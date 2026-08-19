@@ -2,8 +2,8 @@
 //!
 //! Governance lives in `ingest` and `mutation`; this module owns only the
 //! Redb tables those decisions mutate together. Keeping the complete bundle
-//! behind one value gives the future Fjall adapter one concrete capability
-//! boundary without copying policy.
+//! behind one value is what lets governance name a single physical door
+//! instead of reaching for ten tables.
 
 use super::canonical::CanonicalWriteTables;
 #[cfg(test)]
@@ -14,8 +14,6 @@ use super::schema::{
     PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS, PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_META,
     PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_SUPPRESS, TOMBSTONES,
 };
-#[cfg(feature = "bench-instrumentation")]
-use super::store::BenchmarkDurability;
 use super::store::RedbStore;
 use super::{
     Event, EventId, LocalOrigin, PersistenceError, Provenance, RelayUrl, StoredEvent, Timestamp,
@@ -42,14 +40,6 @@ impl GovernedWrite {
     /// mutate it" a compiler rule rather than a convention.
     pub(super) fn begin(store: &mut RedbStore) -> Result<Self, PersistenceError> {
         let write_txn = store.database()?.begin_write().map_err(persist_err)?;
-        #[cfg(feature = "bench-instrumentation")]
-        let mut write_txn = write_txn;
-        #[cfg(feature = "bench-instrumentation")]
-        if store.benchmark_durability == BenchmarkDurability::NoneThenImmediateCheckpoint {
-            write_txn
-                .set_durability(redb::Durability::None)
-                .map_err(persist_err)?;
-        }
         Ok(Self {
             write_txn,
             postings: PostingsBatch::default(),
@@ -63,17 +53,9 @@ impl GovernedWrite {
             &redb::WriteTransaction,
         ) -> Result<T, PersistenceError>,
     ) -> Result<T, PersistenceError> {
-        #[cfg(feature = "bench-instrumentation")]
-        let open_started = std::time::Instant::now();
         let mut ingest = RedbIngestTxn::open(&self.write_txn, &mut self.postings)?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::open_tables(open_started.elapsed());
         let result = mutate(&mut ingest, &self.write_txn)?;
-        #[cfg(feature = "bench-instrumentation")]
-        let flush_started = std::time::Instant::now();
         ingest.canonical.flush_pending()?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::flush(flush_started.elapsed());
         Ok(result)
     }
 
@@ -84,18 +66,10 @@ impl GovernedWrite {
     /// Flush every derived structure, commit, and return a value that the
     /// caller prepared before this transaction exit.
     pub(super) fn commit_prepared<T>(mut self, prepared: T) -> Result<T, PersistenceError> {
-        #[cfg(feature = "bench-instrumentation")]
-        let postings_started = std::time::Instant::now();
         self.postings.flush(&self.write_txn)?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::postings_flush(postings_started.elapsed());
         #[cfg(test)]
         crash_if_postings("postings-before-commit");
-        #[cfg(feature = "bench-instrumentation")]
-        let commit_started = std::time::Instant::now();
         self.write_txn.commit().map_err(persist_err)?;
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::commit(commit_started.elapsed());
         #[cfg(test)]
         crash_if_postings("postings-after-commit");
         Ok(prepared)
@@ -112,64 +86,8 @@ pub(super) enum GovernedPublishQueueMap {
     SuppressByAddr,
 }
 
-/// Backend-neutral physical capabilities required by governed relay ingest.
-/// All policy is expressed against this statically-dispatched trait.
-pub(super) trait GovernedIngestTxn {
-    fn key_for_id(&self, id: &EventId) -> Result<Option<EventKey>, PersistenceError>;
-    fn load_by_key(&self, key: EventKey) -> Result<Option<StoredEvent>, PersistenceError>;
-    fn load_by_id(&self, id: &EventId)
-        -> Result<Option<(EventKey, StoredEvent)>, PersistenceError>;
-    fn load_local(&self, key: EventKey) -> Result<Option<LocalOrigin>, PersistenceError>;
-    fn merge_observation(
-        &mut self,
-        key: EventKey,
-        relay: &RelayUrl,
-        at: Timestamp,
-    ) -> Result<bool, PersistenceError>;
-    fn replace_event(&mut self, key: EventKey, event: &Event) -> Result<(), PersistenceError>;
-    fn replace_local(
-        &mut self,
-        key: EventKey,
-        local: Option<LocalOrigin>,
-    ) -> Result<(), PersistenceError>;
-    fn insert_new(
-        &mut self,
-        event: &Event,
-        provenance: &Provenance,
-    ) -> Result<EventKey, PersistenceError>;
-    fn remove_canonical(&mut self, key: EventKey, id: &EventId) -> Result<(), PersistenceError>;
-    fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError>;
-    fn remove_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError>;
-
-    fn address_get(&self, key: &str) -> Result<Option<EventKey>, PersistenceError>;
-    fn address_put(&mut self, key: &str, value: EventKey) -> Result<(), PersistenceError>;
-    fn address_remove(&mut self, key: &str) -> Result<(), PersistenceError>;
-    fn expiration_put(&mut self, key: &[u8; 40], value: EventKey) -> Result<(), PersistenceError>;
-    fn expiration_remove(&mut self, key: &[u8; 40]) -> Result<(), PersistenceError>;
-
-    /// One permanent deletion fact, keyed by [`super::schema::TOMBSTONES`]'s
-    /// discriminated key. Ids and addresses share the key space.
-    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError>;
-    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError>;
-    fn publish_queue_get(
-        &self,
-        map: GovernedPublishQueueMap,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, PersistenceError>;
-    fn publish_queue_put(
-        &mut self,
-        map: GovernedPublishQueueMap,
-        key: &[u8],
-        value: &[u8],
-    ) -> Result<(), PersistenceError>;
-    fn publish_queue_remove(
-        &mut self,
-        map: GovernedPublishQueueMap,
-        key: &[u8],
-    ) -> Result<Option<Vec<u8>>, PersistenceError>;
-    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError>;
-}
-
+/// The open table bundle governed relay ingest mutates, and the physical
+/// capabilities `ingest` and `mutation` express their policy against.
 pub(super) struct RedbIngestTxn<'txn, 'batch> {
     pub(super) canonical: CanonicalWriteTables<'txn>,
     pub(super) addr_index: redb::Table<'txn, &'static str, EventKey>,
@@ -217,29 +135,33 @@ impl<'txn, 'batch> RedbIngestTxn<'txn, 'batch> {
             postings,
         })
     }
-}
 
-impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
-    fn key_for_id(&self, id: &EventId) -> Result<Option<EventKey>, PersistenceError> {
+    pub(super) fn key_for_id(&self, id: &EventId) -> Result<Option<EventKey>, PersistenceError> {
         self.canonical.key_for_id(id)
     }
 
-    fn load_by_key(&self, key: EventKey) -> Result<Option<StoredEvent>, PersistenceError> {
+    pub(super) fn load_by_key(
+        &self,
+        key: EventKey,
+    ) -> Result<Option<StoredEvent>, PersistenceError> {
         self.canonical.load_by_key(key)
     }
 
-    fn load_by_id(
+    pub(super) fn load_by_id(
         &self,
         id: &EventId,
     ) -> Result<Option<(EventKey, StoredEvent)>, PersistenceError> {
         self.canonical.load_by_id(id)
     }
 
-    fn load_local(&self, key: EventKey) -> Result<Option<LocalOrigin>, PersistenceError> {
+    pub(super) fn load_local(
+        &self,
+        key: EventKey,
+    ) -> Result<Option<LocalOrigin>, PersistenceError> {
         self.canonical.load_local(key)
     }
 
-    fn merge_observation(
+    pub(super) fn merge_observation(
         &mut self,
         key: EventKey,
         relay: &RelayUrl,
@@ -248,11 +170,15 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         self.canonical.merge_observation(key, relay, at)
     }
 
-    fn replace_event(&mut self, key: EventKey, event: &Event) -> Result<(), PersistenceError> {
+    pub(super) fn replace_event(
+        &mut self,
+        key: EventKey,
+        event: &Event,
+    ) -> Result<(), PersistenceError> {
         self.canonical.replace_event(key, event)
     }
 
-    fn replace_local(
+    pub(super) fn replace_local(
         &mut self,
         key: EventKey,
         local: Option<LocalOrigin>,
@@ -260,7 +186,7 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         self.canonical.replace_local(key, local)
     }
 
-    fn insert_new(
+    pub(super) fn insert_new(
         &mut self,
         event: &Event,
         provenance: &Provenance,
@@ -268,21 +194,33 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         self.canonical.insert_new(event, provenance)
     }
 
-    fn remove_canonical(&mut self, key: EventKey, id: &EventId) -> Result<(), PersistenceError> {
+    pub(super) fn remove_canonical(
+        &mut self,
+        key: EventKey,
+        id: &EventId,
+    ) -> Result<(), PersistenceError> {
         self.canonical.remove_by_key(key, id)
     }
 
-    fn insert_indexes(&mut self, event: &Event, key: EventKey) -> Result<(), PersistenceError> {
+    pub(super) fn insert_indexes(
+        &mut self,
+        event: &Event,
+        key: EventKey,
+    ) -> Result<(), PersistenceError> {
         self.postings.insert(event, key);
         Ok(())
     }
 
-    fn remove_indexes(&mut self, _event: &Event, key: EventKey) -> Result<(), PersistenceError> {
+    pub(super) fn remove_indexes(
+        &mut self,
+        _event: &Event,
+        key: EventKey,
+    ) -> Result<(), PersistenceError> {
         self.postings.remove(key);
         Ok(())
     }
 
-    fn address_get(&self, key: &str) -> Result<Option<EventKey>, PersistenceError> {
+    pub(super) fn address_get(&self, key: &str) -> Result<Option<EventKey>, PersistenceError> {
         Ok(self
             .addr_index
             .get(key)
@@ -290,29 +228,37 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
             .map(|guard| guard.value()))
     }
 
-    fn address_put(&mut self, key: &str, value: EventKey) -> Result<(), PersistenceError> {
+    pub(super) fn address_put(
+        &mut self,
+        key: &str,
+        value: EventKey,
+    ) -> Result<(), PersistenceError> {
         self.addr_index.insert(key, value).map_err(persist_err)?;
         Ok(())
     }
 
-    fn address_remove(&mut self, key: &str) -> Result<(), PersistenceError> {
+    pub(super) fn address_remove(&mut self, key: &str) -> Result<(), PersistenceError> {
         self.addr_index.remove(key).map_err(persist_err)?;
         Ok(())
     }
 
-    fn expiration_put(&mut self, key: &[u8; 40], value: EventKey) -> Result<(), PersistenceError> {
+    pub(super) fn expiration_put(
+        &mut self,
+        key: &[u8; 40],
+        value: EventKey,
+    ) -> Result<(), PersistenceError> {
         self.expiration_index
             .insert(key, value)
             .map_err(persist_err)?;
         Ok(())
     }
 
-    fn expiration_remove(&mut self, key: &[u8; 40]) -> Result<(), PersistenceError> {
+    pub(super) fn expiration_remove(&mut self, key: &[u8; 40]) -> Result<(), PersistenceError> {
         self.expiration_index.remove(key).map_err(persist_err)?;
         Ok(())
     }
 
-    fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+    pub(super) fn tombstone_get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
             .tombstones
             .get(key)
@@ -320,12 +266,16 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
             .map(|guard| guard.value().to_owned()))
     }
 
-    fn tombstone_put(&mut self, key: &[u8], value: &[u8]) -> Result<(), PersistenceError> {
+    pub(super) fn tombstone_put(
+        &mut self,
+        key: &[u8],
+        value: &[u8],
+    ) -> Result<(), PersistenceError> {
         self.tombstones.insert(key, value).map_err(persist_err)?;
         Ok(())
     }
 
-    fn publish_queue_get(
+    pub(super) fn publish_queue_get(
         &self,
         map: GovernedPublishQueueMap,
         key: &[u8],
@@ -358,7 +308,7 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         Ok(value.map(|guard| guard.value().to_vec()))
     }
 
-    fn publish_queue_put(
+    pub(super) fn publish_queue_put(
         &mut self,
         map: GovernedPublishQueueMap,
         key: &[u8],
@@ -386,7 +336,7 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         Ok(())
     }
 
-    fn publish_queue_remove(
+    pub(super) fn publish_queue_remove(
         &mut self,
         map: GovernedPublishQueueMap,
         key: &[u8],
@@ -419,7 +369,10 @@ impl GovernedIngestTxn for RedbIngestTxn<'_, '_> {
         Ok(value.map(|guard| guard.value().to_vec()))
     }
 
-    fn displaced_remove(&mut self, key: &[u8; 8]) -> Result<Option<Vec<u8>>, PersistenceError> {
+    pub(super) fn displaced_remove(
+        &mut self,
+        key: &[u8; 8],
+    ) -> Result<Option<Vec<u8>>, PersistenceError> {
         Ok(self
             .publish_queue_displaced
             .remove(key)

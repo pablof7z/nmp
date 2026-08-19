@@ -16,7 +16,7 @@ use crate::{
     VerifiedSignature,
 };
 
-use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
+use super::ingest_txn::{GovernedWrite, RedbIngestTxn};
 use super::mutation::{remove_row_in_txn, tombstone_refuses};
 use super::publish_queue::{
     alloc_intent_id_in_txn, alloc_receipt_id_in_txn, clear_intent_deadlines, mark_terminal_receipt,

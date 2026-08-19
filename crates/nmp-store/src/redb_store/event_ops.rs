@@ -23,11 +23,7 @@ use super::{
 use nostr::secp256k1::schnorr::Signature;
 use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 use std::sync::atomic::Ordering;
 
 /// The `coverage` table's JSON value: the proven interval and nothing else,
@@ -93,24 +89,12 @@ pub(super) fn insert_batch(
     if events.is_empty() {
         return Ok(Vec::new());
     }
-    #[cfg(feature = "bench-instrumentation")]
-    let transaction_started = std::time::Instant::now();
-    #[cfg(feature = "bench-instrumentation")]
-    crate::ingest_attribution::record_batch(events.len());
-    #[cfg(feature = "bench-instrumentation")]
-    let begin_started = std::time::Instant::now();
     let mut write = GovernedWrite::begin(store)?;
-    #[cfg(feature = "bench-instrumentation")]
-    crate::ingest_attribution::begin_write(begin_started.elapsed());
     let mut outcomes = Vec::with_capacity(events.len());
     write.apply(|tables, _write_txn| {
-        #[cfg(feature = "bench-instrumentation")]
-        let apply_started = std::time::Instant::now();
         for (event, from) in events {
             outcomes.push(insert_with_tables(tables, event, from)?);
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::apply_events(apply_started.elapsed());
         Ok(())
     })?;
     #[cfg(any(test, feature = "test-instrumentation"))]
@@ -125,10 +109,6 @@ pub(super) fn insert_batch(
     let outcomes = write.commit_prepared(outcomes)?;
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::ObservationAfterCommit);
-    #[cfg(feature = "bench-instrumentation")]
-    {
-        crate::ingest_attribution::transaction_total(transaction_started.elapsed());
-    }
     Ok(outcomes)
 }
 
@@ -646,11 +626,7 @@ pub(super) fn get_coverage(
     key: CoverageKey,
     session: &RelaySessionKey,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
     let row_key = RedbStore::coverage_row_key(&key, session);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;

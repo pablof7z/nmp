@@ -6,34 +6,11 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-# Store-owned corruption fixtures used by integration tests in other crates.
-# Normal engine and native builds do not compile these destructive helpers.
+# Store-owned instrumentation other crates' tests and evidence binaries
+# reach for: the corruption fixtures, and the query/coverage work counters the
+# hot path would otherwise pay an atomic increment for. Normal engine and
+# native builds compile neither.
 test-instrumentation = []
-# Opt-in counters for evidence binaries. Kept out of production builds so the
-# query hot path pays no atomic-increment cost merely to support benchmarks.
-# Being absent from every production build must not mean being absent from
-# every build entirely (#1268): a feature nothing ever compiles and tests is
-# a feature nothing can hold to the standard the rest of the crate is held
-# to. There is currently no automated build that compiles and tests this
-# feature; build and test it explicitly (`cargo test -p nmp-store --features
-# bench-instrumentation`) when touching it.
-bench-instrumentation = ["dep:fjall", "dep:heed"]
-
-[[example]]
-name = "scale_bench"
-required-features = ["bench-instrumentation"]
-
-[[example]]
-name = "store_decomposition"
-required-features = ["bench-instrumentation"]
-
-[[example]]
-name = "redb_index_layout"
-required-features = ["bench-instrumentation"]
-
-[[example]]
-name = "packed_postings"
-required-features = ["bench-instrumentation"]
 
 [dependencies]
 nostr.workspace = true
@@ -41,10 +18,6 @@ nmp-grammar.workspace = true
 # Redb is NMP's one complete store. It is a pure-Rust embedded ACID key-value
 # store with no C toolchain or build script.
 redb = "4.1"
-fjall = { version = "=3.1.6", optional = true }
-# Native-only LMDB ceiling adapter for #658. This remains benchmark-gated:
-# production NMP and browser targets do not acquire a C build dependency.
-heed = { version = "=0.22.1", optional = true }
 # `RedbStore` canonical event rows use a versioned portable binary envelope
 # for borrowed query filtering. Durable-delivery control records use their own
 # explicit binary codec; coverage and tombstone records remain typed serde JSON.

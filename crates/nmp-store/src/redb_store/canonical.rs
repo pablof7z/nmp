@@ -458,14 +458,8 @@ impl<'txn> CanonicalWriteTables<'txn> {
     ) -> Result<EventKey, PersistenceError> {
         debug_assert!(self.key_for_id(&event.id)?.is_none());
         let key = self.allocate_key()?;
-        #[cfg(feature = "bench-instrumentation")]
-        let encode_started = std::time::Instant::now();
         let event_bytes =
             binary_event::encode_event(event).expect("redb: encode immutable canonical event");
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::encode_event(encode_started.elapsed(), event_bytes.len());
-        #[cfg(feature = "bench-instrumentation")]
-        let insert_started = std::time::Instant::now();
         self.events
             .insert(event_row_key(key).as_slice(), event_bytes.as_slice())
             .map_err(persist_err)?;
@@ -482,8 +476,6 @@ impl<'txn> CanonicalWriteTables<'txn> {
         for (relay, at) in &provenance.seen {
             self.merge_observation(key, relay, *at)?;
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::canonical_insert(insert_started.elapsed());
         Ok(key)
     }
 

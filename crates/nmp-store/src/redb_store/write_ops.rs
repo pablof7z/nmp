@@ -1,7 +1,7 @@
 use super::canonical::{
     encode_stored_event_record, record_to_stored_event, stored_event_to_record,
 };
-use super::ingest_txn::{GovernedIngestTxn, GovernedWrite, RedbIngestTxn};
+use super::ingest_txn::{GovernedWrite, RedbIngestTxn};
 use super::mutation::{
     fan_out_signed_in_txn, find_any_displaced_key_by_event_id_in_txn,
     find_displaced_key_by_event_id_in_txn, missing_addr_index_target,

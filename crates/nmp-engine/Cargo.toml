@@ -12,8 +12,8 @@ default = []
 # stay non-default.
 bench-instrumentation = [
     "dep:libc",
-    "nmp-store/bench-instrumentation",
     "nmp-resolver/bench-instrumentation",
+    "nmp-store/test-instrumentation",
     "nmp-transport/bench-instrumentation",
 ]
 test-instrumentation = ["nmp-store/test-instrumentation"]

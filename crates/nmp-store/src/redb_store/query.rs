@@ -1,6 +1,6 @@
 #[cfg(test)]
 use super::canonical::observation_event_key;
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 use super::schema::EventKey;
 #[cfg(test)]
 use super::schema::{
@@ -10,8 +10,6 @@ use super::schema::{
 };
 #[cfg(test)]
 use super::BTreeSet;
-#[cfg(feature = "bench-instrumentation")]
-use super::Event;
 #[cfg(test)]
 use super::{address_key_for, binary_event, Database, RelayUrl};
 use super::{
@@ -59,112 +57,12 @@ pub(super) fn expiration_key_upper_bound(ts: Timestamp) -> [u8; 40] {
     key
 }
 
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn ordered_vec_key(prefix: &[u8], created_at: Timestamp, id: &EventId) -> Vec<u8> {
-    let mut key = Vec::with_capacity(prefix.len() + 8 + 32);
-    key.extend_from_slice(prefix);
-    key.extend_from_slice(&created_at.as_secs().to_be_bytes());
-    key.extend(id.as_bytes().iter().map(|byte| !byte));
-    key
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn ordered_fixed_key<const N: usize>(
-    prefix: &[u8],
-    created_at: Timestamp,
-    id: &EventId,
-) -> [u8; N] {
-    assert_eq!(prefix.len() + 40, N);
-    let mut key = [0; N];
-    key[..prefix.len()].copy_from_slice(prefix);
-    key[prefix.len()..prefix.len() + 8].copy_from_slice(&created_at.as_secs().to_be_bytes());
-    for (dst, byte) in key[prefix.len() + 8..].iter_mut().zip(id.as_bytes()) {
-        *dst = !byte;
-    }
-    key
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn created_at_key(event: &Event) -> [u8; 40] {
-    ordered_fixed_key(&[], event.created_at, &event.id)
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn by_author_key(event: &Event) -> [u8; 72] {
-    ordered_fixed_key(event.pubkey.as_bytes(), event.created_at, &event.id)
-}
-
 pub(super) fn by_author_prefix(author: &PublicKey) -> Vec<u8> {
     author.as_bytes().to_vec()
 }
 
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn by_kind_key(event: &Event) -> [u8; 42] {
-    ordered_fixed_key(
-        &event.kind.as_u16().to_be_bytes(),
-        event.created_at,
-        &event.id,
-    )
-}
-
 pub(super) fn by_kind_prefix(kind: Kind) -> Vec<u8> {
     kind.as_u16().to_be_bytes().to_vec()
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn by_author_kind_key(event: &Event) -> [u8; 74] {
-    let mut prefix = [0; 34];
-    prefix[..32].copy_from_slice(event.pubkey.as_bytes());
-    prefix[32..].copy_from_slice(&event.kind.as_u16().to_be_bytes());
-    ordered_fixed_key(&prefix, event.created_at, &event.id)
-}
-
-/// Comparison-only cardinality-key builders, retained for the benchmark
-/// variants that measure the durable-statistics physical shape (see
-/// [`super::schema::INDEX_CARDINALITY`]). Nothing in [`crate::RedbStore`]
-/// maintains or reads them.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const CARDINALITY_GLOBAL: u8 = 0;
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const CARDINALITY_AUTHOR: u8 = 1;
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const CARDINALITY_KIND: u8 = 2;
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const CARDINALITY_TAG: u8 = 4;
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const CARDINALITY_SAMPLE_MASK: u8 = 0x0f;
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn event_is_cardinality_sample(sample_key: &[u8; 32], id: &EventId) -> bool {
-    blake3::keyed_hash(sample_key, id.as_bytes()).as_bytes()[0] & CARDINALITY_SAMPLE_MASK == 0
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn cardinality_key(namespace: u8, prefix: &[u8]) -> Vec<u8> {
-    let mut key = Vec::with_capacity(1 + prefix.len());
-    key.push(namespace);
-    key.extend_from_slice(prefix);
-    key
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn global_cardinality_key() -> Vec<u8> {
-    cardinality_key(CARDINALITY_GLOBAL, &[])
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn author_cardinality_key(author: &PublicKey) -> Vec<u8> {
-    cardinality_key(CARDINALITY_AUTHOR, author.as_bytes())
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn kind_cardinality_key(kind: Kind) -> Vec<u8> {
-    cardinality_key(CARDINALITY_KIND, &kind.as_u16().to_be_bytes())
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn tag_cardinality_key(tag: SingleLetterTag, value: &str) -> Vec<u8> {
-    cardinality_key(CARDINALITY_TAG, &tag_index_prefix(tag, value))
 }
 
 pub(super) fn tag_index_prefix(tag: SingleLetterTag, value: &str) -> Vec<u8> {
@@ -184,16 +82,6 @@ pub(super) fn tag_index_prefix(tag: SingleLetterTag, value: &str) -> Vec<u8> {
         key.extend_from_slice(value);
     }
     key
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn tag_index_key(
-    tag: SingleLetterTag,
-    value: &str,
-    created_at: Timestamp,
-    id: &EventId,
-) -> Vec<u8> {
-    ordered_vec_key(&tag_index_prefix(tag, value), created_at, id)
 }
 
 #[cfg(test)]
@@ -470,20 +358,4 @@ pub(super) fn plan_ordered_query(filter: &Filter) -> OrderedPlan {
         .into_iter()
         .next()
         .expect("the global ordered plan is always a candidate")
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) fn insert_tag_index_rows(
-    by_tag: &mut redb::Table<'_, &[u8], EventKey>,
-    event: &Event,
-    event_key: EventKey,
-) -> Result<(), redb::StorageError> {
-    for tag in event.tags.iter() {
-        let (Some(single_letter), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-            continue;
-        };
-        let key = tag_index_key(single_letter, value, event.created_at, &event.id);
-        by_tag.insert(key.as_slice(), event_key)?;
-    }
-    Ok(())
 }

@@ -95,7 +95,6 @@ pub struct ProbeConfig {
     pub payload_bytes: usize,
     pub shape_corpus: Option<PathBuf>,
     pub corpus_output: Option<PathBuf>,
-    pub redb_nondurable_diagnostic: bool,
     pub queue_capacity: usize,
     pub verified_cache_capacity: usize,
     pub committed_observation_cache_capacity: usize,
@@ -127,7 +126,6 @@ impl Default for ProbeConfig {
             payload_bytes: 128,
             shape_corpus: None,
             corpus_output: None,
-            redb_nondurable_diagnostic: false,
             queue_capacity: 1_024,
             verified_cache_capacity: 131_072,
             committed_observation_cache_capacity: 131_072,
@@ -705,18 +703,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         reconnect_delay_initial: Some(Duration::from_secs(3600)),
         reconnect_jitter_max: Some(Duration::ZERO),
     };
-    let store = if config.redb_nondurable_diagnostic {
-        #[cfg(feature = "bench-instrumentation")]
-        {
-            RedbStore::open_benchmark_nondurable(&store_path)?
-        }
-        #[cfg(not(feature = "bench-instrumentation"))]
-        {
-            return Err("redb-nondurable-diagnostic requires bench-instrumentation".into());
-        }
-    } else {
-        RedbStore::open(&store_path)?
-    };
+    let store = RedbStore::open(&store_path)?;
     let (engine_thread, handle) = EngineThread::spawn(store, config.relays, pool_config)?;
     let live_query = LiveQuery::single(demand);
     let rows = match config.visible_limit {
@@ -1036,11 +1023,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         corpus_mode: corpus.mode,
         shape_source_blake3: corpus.shape_source_blake3,
         store_backend: "redb",
-        store_durability: if config.redb_nondurable_diagnostic {
-            "none-then-immediate-checkpoint-diagnostic"
-        } else {
-            "immediate"
-        },
+        store_durability: "immediate",
         queue_capacity,
         verified_cache_capacity,
         committed_observation_cache_capacity,
@@ -1128,7 +1111,6 @@ fn ingest_attribution_json() -> serde_json::Value {
     let transport = nmp_transport::ingest_attribution::snapshot();
     let engine = nmp_engine::ingest_attribution::snapshot();
     let resolver = nmp_resolver::ingest_attribution::snapshot();
-    let store = nmp_store::ingest_attribution::snapshot();
     serde_json::json!({
         "transport": {
             "committed_observation_lookups": transport.committed_observation_lookups,
@@ -1217,15 +1199,6 @@ fn ingest_attribution_json() -> serde_json::Value {
             "react_and_affected_ns": resolver.react_and_affected_ns,
             "react_and_affected_cpu_ns": resolver.react_and_affected_cpu_ns,
             "event_clones": resolver.event_clones
-        },
-        "store": {
-            "batches": store.batches, "events": store.events, "max_batch_events": store.max_batch_events,
-            "transaction_total_ns": store.transaction_total_ns, "begin_write_ns": store.begin_write_ns,
-            "open_tables_ns": store.open_tables_ns, "apply_events_ns": store.apply_events_ns,
-            "flush_ns": store.flush_ns, "postings_flush_ns": store.postings_flush_ns,
-            "commit_ns": store.commit_ns, "durability_checkpoint_ns": store.durability_checkpoint_ns,
-            "encode_event_ns": store.encode_event_ns,
-            "encoded_event_bytes": store.encoded_event_bytes, "canonical_insert_ns": store.canonical_insert_ns,
         }
     })
 }

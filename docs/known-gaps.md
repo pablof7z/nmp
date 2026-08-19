@@ -252,7 +252,11 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   reference event/publishing trace checks redb against independent expected
   outcomes and attaches a stable recovery digest to every process-death
   failpoint. Fjall, LMDB, and SQLite have not passed that full path. Redb
-  remains the production baseline.
+  remains the production baseline, and as of #1941 it is the only backend the
+  tree contains: the Fjall and LMDB ceiling-ingest harnesses, and the
+  `heed`/`fjall` dependencies that carried them, are deleted. Re-evaluating a
+  candidate starts from `docs/design/storage-semantic-oracle.md`'s replacement
+  sequence and a fresh adapter, not from a harness that is still here.
 - **Fjall is only partially qualified (#818, under #701).** A real
   `RLIMIT_FSIZE`/`SIGXFSZ` journal-write failure was proven to behave correctly
   on pinned Fjall 3.1.7/3.1.8 (3.1.6 silently lost the transaction); that

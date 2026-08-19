@@ -107,9 +107,6 @@ mod terminal_retention;
 #[cfg(test)]
 mod terminal_retention_tests;
 
-#[cfg(feature = "bench-instrumentation")]
-pub mod ingest_attribution;
-
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use coverage_claims::coverage_claim_atoms;
 pub use persistence_failure::PersistenceError;
@@ -118,18 +115,6 @@ pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
 pub use redb_store::testing;
 #[cfg(any(test, feature = "test-instrumentation"))]
 pub use redb_store::OrderedEventReadPause;
-#[cfg(feature = "bench-instrumentation")]
-pub use redb_store::{
-    prepare_equivalent_store_corpus, run_fjall_governed_ingest_bench,
-    run_lmdb_governed_ingest_bench, run_packed_postings_bench,
-    run_prepared_redb_compact_index_bench, run_prepared_redb_redo_index_bench,
-    run_prepared_redb_store_bench, run_prepared_redb_unified_index_bench, run_store_bench_variant,
-    FjallGovernedIngestMetrics, LmdbGovernedIngestMetrics, LmdbPackedWork, PackedPostingsBackend,
-    PackedPostingsMetrics, PackedQueryMetrics, RedbRedoIndexMetrics, StoreBenchAttribution,
-    StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
-    StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
-    StoreBenchProcessCounters, StoreBenchVariant,
-};
 pub use redb_store::{RedbStore, StoreSigReader};
 pub use semantic_edit::{
     AccessContextId, MaterializationCandidate, MaterializationId, OperationResolution,

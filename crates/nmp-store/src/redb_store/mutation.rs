@@ -1,5 +1,5 @@
 use super::canonical::stored_event_to_record;
-use super::ingest_txn::{GovernedIngestTxn, GovernedPublishQueueMap, RedbIngestTxn};
+use super::ingest_txn::{GovernedPublishQueueMap, RedbIngestTxn};
 use super::publish_queue::{
     add_addr_claimant_in_txn, add_claimant_in_txn, is_suppressed_in_txn, SuppressClaimRecord,
 };
@@ -36,8 +36,8 @@ pub(super) fn missing_addr_index_target(event_key: EventKey) -> PersistenceError
 /// written before its target ever arrived: refused iff `event.pubkey`
 /// itself claimed this exact id, regardless of any OTHER author's
 /// (irrelevant) claim on the same id.
-pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
-    txn: &T,
+pub(super) fn tombstone_refuses(
+    txn: &RedbIngestTxn<'_, '_>,
     event: &Event,
 ) -> Result<bool, PersistenceError> {
     let key = id_tombstone_key(&event.id, &event.pubkey);
@@ -66,8 +66,8 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
 /// `true`) and kind:5 processing (`predicate` is the NIP-09 author-only
 /// check).
 #[allow(clippy::too_many_arguments)]
-pub(super) fn remove_row_in_txn<T: GovernedIngestTxn>(
-    txn: &mut T,
+pub(super) fn remove_row_in_txn(
+    txn: &mut RedbIngestTxn<'_, '_>,
     id: EventId,
     predicate: impl FnOnce(&StoredEvent) -> bool,
 ) -> Result<Option<StoredEvent>, PersistenceError> {
@@ -105,8 +105,8 @@ pub(super) fn remove_row_in_txn<T: GovernedIngestTxn>(
 /// the PERMANENT tombstone, and drop the row if currently held. Returns
 /// every row actually dropped.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
-    txn: &mut T,
+pub(super) fn process_kind5_deletions(
+    txn: &mut RedbIngestTxn<'_, '_>,
     deleting: &Event,
 ) -> Result<Vec<StoredEvent>, PersistenceError> {
     let mut deleted = Vec::new();
@@ -198,8 +198,8 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
 /// `RedbStore::fan_out_signed` exactly. Returns every intent THIS call
 /// actually transitioned (an already-`Signed` owner is left untouched and
 /// excluded).
-fn update_publish_queue_receipt<T: GovernedIngestTxn>(
-    txn: &mut T,
+fn update_publish_queue_receipt(
+    txn: &mut RedbIngestTxn<'_, '_>,
     receipt_id: u64,
     state: ReceiptState,
 ) -> Result<(), PersistenceError> {
@@ -228,8 +228,8 @@ fn update_publish_queue_receipt<T: GovernedIngestTxn>(
     )
 }
 
-fn remove_claimant<T: GovernedIngestTxn>(
-    txn: &mut T,
+fn remove_claimant(
+    txn: &mut RedbIngestTxn<'_, '_>,
     key: &[u8; 64],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
@@ -250,8 +250,8 @@ fn remove_claimant<T: GovernedIngestTxn>(
     Ok(())
 }
 
-fn remove_addr_claimant<T: GovernedIngestTxn>(
-    txn: &mut T,
+fn remove_addr_claimant(
+    txn: &mut RedbIngestTxn<'_, '_>,
     key: &[u8],
     intent_id: IntentId,
 ) -> Result<(), PersistenceError> {
@@ -272,8 +272,8 @@ fn remove_addr_claimant<T: GovernedIngestTxn>(
     Ok(())
 }
 
-pub(super) fn fan_out_signed_in_txn<T: GovernedIngestTxn>(
-    txn: &mut T,
+pub(super) fn fan_out_signed_in_txn(
+    txn: &mut RedbIngestTxn<'_, '_>,
     owners: &BTreeSet<IntentId>,
     canonical_event: &Event,
 ) -> Result<Vec<IntentId>, PersistenceError> {
