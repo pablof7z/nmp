@@ -124,20 +124,6 @@ where
         self.by_child.contains_key(child)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn len(&self) -> usize {
-        self.by_child.len()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn owner_keys(&self) -> usize {
-        self.by_owner.len()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn owner_edges(&self) -> usize {
-        self.by_owner.values().map(BTreeSet::len).sum()
-    }
 }
 
 /// Exact structural consistency for one mirrored index.
@@ -145,7 +131,7 @@ where
 /// Both directions, by identity rather than by count. `owner_edges == len` is
 /// necessary and nowhere near sufficient: one child indexed under the wrong
 /// owner preserves both numbers exactly.
-#[cfg(feature = "bench-instrumentation")]
+#[cfg(any(test, feature = "test-instrumentation"))]
 impl<Owner, Child, V> OwnerIndexed<Owner, Child, V>
 where
     Owner: Clone + Eq + Hash + std::fmt::Debug,

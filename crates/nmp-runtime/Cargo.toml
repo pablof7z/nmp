@@ -8,13 +8,6 @@ publish.workspace = true
 [features]
 default = []
 
-bench-instrumentation = [
-    "dep:libc",
-    "nmp-engine/bench-instrumentation",
-    "nmp-resolver/bench-instrumentation",
-    "nmp-store/test-instrumentation",
-    "nmp-transport/bench-instrumentation",
-]
 test-instrumentation = [
     "nmp-engine/test-instrumentation",
     "nmp-store/test-instrumentation",
@@ -43,6 +36,5 @@ crossbeam-channel = "0.5"
 # production feature, not a dev-only one; `Handle::adapter_runtime()` hands
 # protocol adapters that same runtime handle.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
-libc = { version = "0.2", optional = true }
 # The opaque session payload's secret bytes are wiped on drop.
 zeroize = "1"

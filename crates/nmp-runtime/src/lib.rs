@@ -272,18 +272,8 @@ enum Cmd {
         id: ReceiptId,
         registration: ReceiptDeliveryRegistration,
     },
-    #[cfg(feature = "bench-instrumentation")]
-    ObservationOwnershipCensus {
-        reply: Sender<ObservationOwnershipCensus>,
-    },
     /// Hold the reducer inside one command turn so a test can observe whether
     /// a simultaneously-due core deadline ran before command dispatch.
-    #[cfg(feature = "bench-instrumentation")]
-    DeadlineRaceProbe {
-        at: Timestamp,
-        entered: Sender<()>,
-        release: Receiver<()>,
-    },
     CancelWrite {
         id: ReceiptId,
         reply: Sender<Result<CancelWriteOutcome, CancelWriteError>>,
@@ -380,23 +370,6 @@ enum Cmd {
     /// lets the observer's `LatestReceiver::recv` return `None`.
     UnobserveDiagnostics(u64),
     Shutdown,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[doc(hidden)]
-pub struct ObservationOwnershipCensus {
-    handles: usize,
-    histories: usize,
-    history_handles: usize,
-    resolver_nodes: usize,
-    demand_atoms: usize,
-    planned_sessions: usize,
-    pending_execution_owners: usize,
-    active_execution_owners: usize,
-    live_wire_owners: usize,
-    row_channels: usize,
-    history_channels: usize,
 }
 
 /// Wall-clock `Duration` from `now` until `deadline` (§3.3's `recv_timeout`
@@ -779,13 +752,6 @@ fn engine_loop(
                 Err(RecvTimeoutError::Disconnected) => break,
             },
         };
-        #[cfg(feature = "bench-instrumentation")]
-        if let Cmd::DeadlineRaceProbe { at, .. } = &cmd {
-            // Model the exact boundary where the command and an armed core
-            // deadline become ready together. The ordinary clock setter
-            // queues its own Tick and would pre-order this test.
-            clock.pin_silently(*at);
-        }
         let command_wall_now = clock.now();
         let command_is_tick = matches!(&cmd, Cmd::Engine(EngineMsg::Tick(_)));
         if !shutting_down
@@ -916,23 +882,6 @@ fn engine_loop(
                 Cmd::DetachReceiptDelivery { id, registration } => {
                     receipt_deliveries.borrow_mut().detach(id, &registration);
                 }
-                #[cfg(feature = "bench-instrumentation")]
-                Cmd::ObservationOwnershipCensus { reply } => {
-                    let core_census = core.observation_ownership_census();
-                    let _ = reply.send(ObservationOwnershipCensus {
-                        handles: core_census.handles,
-                        histories: core_census.histories,
-                        history_handles: core_census.history_handles,
-                        resolver_nodes: core_census.resolver_nodes,
-                        demand_atoms: core_census.demand_atoms,
-                        planned_sessions: core_census.planned_sessions,
-                        pending_execution_owners: core_census.pending_execution_owners,
-                        active_execution_owners: core_census.active_execution_owners,
-                        live_wire_owners: core_census.live_wire_owners,
-                        row_channels: row_channels.len(),
-                        history_channels: history_channels.len(),
-                    });
-                }
                 Cmd::ObserveDiagnostics { reply } => {
                     let id = next_diag_id;
                     next_diag_id = next_diag_id.saturating_add(1);
@@ -956,8 +905,6 @@ fn engine_loop(
                 Cmd::ExemptSignEventDrain(op_id) => {
                     active_sign_events.exempt_from_shutdown_drain(op_id);
                 }
-                #[cfg(feature = "bench-instrumentation")]
-                Cmd::DeadlineRaceProbe { .. } => {}
                 Cmd::Engine(_)
                 | Cmd::RelayInformationFetched { .. }
                 | Cmd::RelayWorkerRetired
@@ -1006,8 +953,6 @@ fn engine_loop(
                 );
             }
             Cmd::RelayBatch { frames, applied } => {
-                #[cfg(feature = "bench-instrumentation")]
-                let batch_started = std::time::Instant::now();
                 let mut ordinary = Vec::new();
                 let mut committed = Vec::new();
                 for (handle, session, frame) in frames {
@@ -1094,8 +1039,6 @@ fn engine_loop(
                         dispatch_runtime,
                     );
                 }
-                #[cfg(feature = "bench-instrumentation")]
-                nmp_engine::ingest_attribution::engine_batch_process(batch_started.elapsed());
                 let _ = applied.send(());
             }
             Cmd::AddSigner { signer, reply } => {
@@ -1525,30 +1468,6 @@ fn engine_loop(
             }
             Cmd::DetachReceiptDelivery { id, registration } => {
                 receipt_deliveries.borrow_mut().detach(id, &registration);
-            }
-            #[cfg(feature = "bench-instrumentation")]
-            Cmd::ObservationOwnershipCensus { reply } => {
-                let core_census = core.observation_ownership_census();
-                let _ = reply.send(ObservationOwnershipCensus {
-                    handles: core_census.handles,
-                    histories: core_census.histories,
-                    history_handles: core_census.history_handles,
-                    resolver_nodes: core_census.resolver_nodes,
-                    demand_atoms: core_census.demand_atoms,
-                    planned_sessions: core_census.planned_sessions,
-                    pending_execution_owners: core_census.pending_execution_owners,
-                    active_execution_owners: core_census.active_execution_owners,
-                    live_wire_owners: core_census.live_wire_owners,
-                    row_channels: row_channels.len(),
-                    history_channels: history_channels.len(),
-                });
-            }
-            #[cfg(feature = "bench-instrumentation")]
-            Cmd::DeadlineRaceProbe {
-                entered, release, ..
-            } => {
-                let _ = entered.send(());
-                let _ = release.recv();
             }
             Cmd::PublishQueueEntries {
                 event_id,
@@ -2065,19 +1984,7 @@ fn reduce_and_dispatch_relay_frames(
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
-    #[cfg(feature = "bench-instrumentation")]
-    let phase_started = std::time::Instant::now();
-    #[cfg(feature = "bench-instrumentation")]
-    let cpu_started = nmp_engine::ingest_attribution::thread_cpu_time_ns();
     let effects = core.handle(EngineMsg::RelayFrames(frames));
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::relay_core_reduce(phase_started.elapsed());
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::relay_core_reduce_cpu(
-        nmp_engine::ingest_attribution::thread_cpu_time_ns().saturating_sub(cpu_started),
-    );
-    #[cfg(feature = "bench-instrumentation")]
-    let phase_started = std::time::Instant::now();
     dispatch_core_effects(
         core,
         effects,
@@ -2088,8 +1995,6 @@ fn reduce_and_dispatch_relay_frames(
         registry,
         runtime,
     );
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::relay_effect_dispatch(phase_started.elapsed());
 }
 
 /// Release workers no longer owned by the reducer, then execute its effects.
@@ -2441,11 +2346,7 @@ fn dispatch_effect(
             invalidated,
             published,
         } => {
-            #[cfg(feature = "bench-instrumentation")]
-            let phase_started = std::time::Instant::now();
             pool.update_committed_observations(invalidated, published);
-            #[cfg(feature = "bench-instrumentation")]
-            nmp_engine::ingest_attribution::committed_observation_effect(phase_started.elapsed());
         }
         Effect::Wire(delta) => {
             let outcomes = apply_wire_delta(&delta, pool);
@@ -2717,11 +2618,7 @@ fn dispatch_effect(
         }
         Effect::EmitHistory(id, batch) => {
             if let Some(tx) = history_channels.get(&id) {
-                #[cfg(feature = "bench-instrumentation")]
-                let send_started = std::time::Instant::now();
                 tx.send(batch);
-                #[cfg(feature = "bench-instrumentation")]
-                nmp_engine::ingest_attribution::history_channel_send(send_started.elapsed());
             }
         }
         Effect::HistoryLoadResult(..) => {}
@@ -2732,8 +2629,6 @@ fn dispatch_effect(
                 .changed(Instant::now(), !diag_channels.is_empty());
         }
         Effect::EmitDiagnostics(mut snapshot) => {
-            #[cfg(feature = "bench-instrumentation")]
-            let phase_started = std::time::Instant::now();
             // This full snapshot is at least as current as any pending lazy
             // marker. Satisfy that cohort so its deadline cannot duplicate
             // this proactive delivery.
@@ -2754,8 +2649,6 @@ fn dispatch_effect(
             // snapshot next (see `diagnostics_channel`'s doc), never a
             // growing backlog.
             fan_out_diagnostics(snapshot, diag_channels);
-            #[cfg(feature = "bench-instrumentation")]
-            nmp_engine::ingest_attribution::diagnostics_effect(phase_started.elapsed());
         }
         Effect::EmitReceipt(id, status) => {
             if matches!(
@@ -2830,27 +2723,6 @@ impl DiagnosticsHandle {
 pub struct Handle {
     inbox: Sender<Cmd>,
     relay_information: RelayInformationService,
-}
-
-/// Benchmark-only hold at the deterministic command/deadline race boundary.
-///
-/// While this value is alive the engine has processed every deadline due at
-/// the probed instant and is blocked before executing the synthetic command.
-/// Dropping it releases the engine. This is mechanism instrumentation, not an
-/// application API.
-#[cfg(feature = "bench-instrumentation")]
-#[doc(hidden)]
-pub struct DeadlineRaceHold {
-    release: Option<Sender<()>>,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-impl Drop for DeadlineRaceHold {
-    fn drop(&mut self) {
-        if let Some(release) = self.release.take() {
-            let _ = release.send(());
-        }
-    }
 }
 
 /// Opaque ownership proof for one exact signer-registry installation.
@@ -3345,40 +3217,6 @@ impl Handle {
             },
             rx,
         )
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn observation_ownership_census(&self) -> ObservationOwnershipCensus {
-        let (reply_tx, reply_rx) = mpsc::channel();
-        self.inbox
-            .send(Cmd::ObservationOwnershipCensus { reply: reply_tx })
-            .expect("nmp-engine: observation ownership census called after shutdown");
-        reply_rx
-            .recv()
-            .expect("nmp-engine: engine dropped observation ownership census reply")
-    }
-
-    /// Make one synthetic command ready at exactly `at`, then hold it after
-    /// the runtime has executed any core deadline due at that same instant.
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_hold_due_deadline_command(&self, at: Timestamp) -> DeadlineRaceHold {
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        self.inbox
-            .send(Cmd::DeadlineRaceProbe {
-                at,
-                entered: entered_tx,
-                release: release_rx,
-            })
-            .expect("nmp-engine: deadline race probe called after shutdown");
-        entered_rx
-            .recv()
-            .expect("nmp-engine: deadline race probe was not entered");
-        DeadlineRaceHold {
-            release: Some(release_tx),
-        }
     }
 
     /// Stop the engine thread (and, transitively, its bridge threads — see

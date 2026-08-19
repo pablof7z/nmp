@@ -31,12 +31,8 @@ default = []
 # already works. `nmp` must not contain a single line of any capability's
 # meaning, re-export door or not.
 
-# #827: both instrumentation features came in with the folded engine modules
-# (`core`, `runtime`, `outbox`). They stay non-default.
-bench-instrumentation = [
-    "nmp-engine/bench-instrumentation",
-    "nmp-runtime/bench-instrumentation",
-]
+# #827: this instrumentation feature came in with the folded engine modules
+# (`core`, `runtime`, `outbox`). It stays non-default.
 test-instrumentation = [
     "nmp-engine/test-instrumentation",
     "nmp-runtime/test-instrumentation",

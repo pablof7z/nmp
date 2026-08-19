@@ -62,8 +62,6 @@ impl HistoryReceiver {
     }
 
     fn reconcile(delivered: &mut BTreeMap<EventId, Row>, mut batch: HistoryBatch) -> HistoryBatch {
-        #[cfg(feature = "bench-instrumentation")]
-        let reconcile_started = std::time::Instant::now();
         let current: BTreeMap<_, _> = batch
             .rows
             .iter()
@@ -92,8 +90,6 @@ impl HistoryReceiver {
         }
         *delivered = current;
         batch.deltas = deltas;
-        #[cfg(feature = "bench-instrumentation")]
-        nmp_engine::ingest_attribution::history_receiver_reconcile(reconcile_started.elapsed());
         batch
     }
 }

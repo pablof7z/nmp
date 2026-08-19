@@ -90,11 +90,7 @@ impl EngineCore {
         self.state.is_current_transport_session(handle, session)
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
@@ -185,22 +181,12 @@ impl EngineCore {
         self.state.active_demand()
     }
 
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.state.assert_owner_consistency(at)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
-        self.state.bench_ownership_census()
-    }
-
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         self.state.observation_ownership_census()
     }
@@ -267,136 +253,6 @@ impl EngineCore {
     ) {
         self.checked("seed_stale_relay_open_failure_for_test", |s| {
             s.seed_stale_relay_open_failure_for_test(session, reason)
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_lifecycle_work(&self) {
-        self.state.bench_reset_lifecycle_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_lifecycle_work(&self) -> (u64, u64, u64) {
-        self.state.bench_lifecycle_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_admission_local_work(&self) -> (u64, u64, u64) {
-        self.state.bench_admission_local_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_admission_work(&mut self) {
-        self.checked("bench_reset_admission_work", |s| {
-            s.bench_reset_admission_work()
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_admission_work(&self) -> CoreAdmissionWork {
-        self.state.bench_admission_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_freshness_work(&self) {
-        self.state.bench_reset_freshness_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_freshness_work(&self) -> CoreFreshnessWork {
-        self.state.bench_freshness_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_withdrawal_work(&mut self) {
-        self.checked("bench_reset_withdrawal_work", |s| {
-            s.bench_reset_withdrawal_work()
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_withdrawal_work(&self) -> CoreWithdrawalWork {
-        self.state.bench_withdrawal_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_query_work(&self) {
-        self.state.bench_reset_query_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_query_work(&self) -> (u64, u64, u64) {
-        self.state.bench_query_work()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_reset_coverage_reads(&self) {
-        self.state.bench_reset_coverage_reads()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_coverage_reads(&self) -> u64 {
-        self.state.bench_coverage_reads()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_ingest_observed(
-        &mut self,
-        events: Vec<(SignedEvent, RelayObserved)>,
-    ) -> Vec<Effect> {
-        self.checked("bench_ingest_observed", |s| s.bench_ingest_observed(events))
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_ingest_observed_with_forced_refresh(
-        &mut self,
-        events: Vec<(SignedEvent, RelayObserved)>,
-    ) -> Vec<Effect> {
-        self.checked("bench_ingest_observed_with_forced_refresh", |s| {
-            s.bench_ingest_observed_with_forced_refresh(events)
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_accept_local(&mut self, accept: AcceptWrite) -> Vec<Effect> {
-        self.checked("bench_accept_local", |s| s.bench_accept_local(accept))
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_accept_local_with_forced_refresh(&mut self, accept: AcceptWrite) -> Vec<Effect> {
-        self.checked("bench_accept_local_with_forced_refresh", |s| {
-            s.bench_accept_local_with_forced_refresh(accept)
-        })
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_expire_due(&mut self, now: Timestamp) -> Vec<Effect> {
-        self.checked("bench_expire_due", |s| s.bench_expire_due(now))
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    #[doc(hidden)]
-    pub fn bench_expire_due_with_forced_refresh(&mut self, now: Timestamp) -> Vec<Effect> {
-        self.checked("bench_expire_due_with_forced_refresh", |s| {
-            s.bench_expire_due_with_forced_refresh(now)
         })
     }
 

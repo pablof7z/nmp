@@ -62,7 +62,7 @@ pub use facts::{
 pub use ownership::{
     AdmissionOutcome, AdmissionPreview, AdmissionPreviewWork, AdmissionWork, CompileOutcome,
     FullMetadataWork, RequestMetadataRemoval, RequestMetadataUpdate, RequestReplacement,
-    RouterOwnershipCensus, WithdrawalOutcome, WithdrawalWork,
+    WithdrawalOutcome, WithdrawalWork,
 };
 pub use plan::{
     diff_plans, BudgetShortfall, DemandKey, RelayPlan, SubId, WireDelta, WireOp, WireReq,

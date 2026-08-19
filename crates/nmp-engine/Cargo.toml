@@ -8,14 +8,6 @@ publish.workspace = true
 [features]
 default = []
 
-# #827: instrumentation that came in with the folded engine modules. Both
-# stay non-default.
-bench-instrumentation = [
-    "dep:libc",
-    "nmp-resolver/bench-instrumentation",
-    "nmp-store/test-instrumentation",
-    "nmp-transport/bench-instrumentation",
-]
 test-instrumentation = ["nmp-store/test-instrumentation"]
 
 # THE DEPENDENCY LIST IS THE POINT OF THIS CRATE.
@@ -43,4 +35,3 @@ nmp-signer.workspace = true
 blake3.workspace = true
 # The durable relay-set encoding in `core/write.rs` is lowercase hex.
 hex = "0.4"
-libc = { version = "0.2", optional = true }

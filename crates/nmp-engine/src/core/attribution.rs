@@ -333,7 +333,7 @@ impl AttributionState {
     /// only exact while every mapping is filed under the session its own
     /// `SubId` names. Nothing checked that; a mapping filed under any other
     /// session leaks forever and the count is identical either way.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (sub_id, claims) in &self.live_request_claims {
             assert!(
@@ -365,28 +365,4 @@ impl AttributionState {
         }
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> AttributionCounts {
-        AttributionCounts {
-            inflight_subs: self.inflight.len(),
-            wire_keys: self.sub_id_by_wire.len(),
-            live_request_keys: self.live_request_claims.len(),
-        }
-    }
-}
-
-/// The three numbers `CoreOwnershipCensus` carries for this owner, named.
-///
-/// It replaces an eleven-element `(usize, ..., usize)` tuple destructured
-/// positionally at the one call site. Every sibling owner (`RequestAttempts`,
-/// `WireOwnership`, `HistorySessions`, `RequestReplacements`)
-/// already returns a named struct; attribution was the one that did not, and
-/// eleven interchangeable positional `usize`s mean any adjacent pair could be
-/// transposed with the whole suite still green. Eight of the eleven counted
-/// the shape registry and its three refcount mirrors, all deleted with it.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct AttributionCounts {
-    pub(super) inflight_subs: usize,
-    pub(super) wire_keys: usize,
-    pub(super) live_request_keys: usize,
 }

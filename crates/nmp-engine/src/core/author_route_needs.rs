@@ -88,17 +88,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use nostr::PublicKey;
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps. `wire_rebuild_agreement.rs` compares this census across
-/// a rebuild the same way it compares `WireOwnership`'s; without these
-/// fields that comparison is blind to everything this owner holds.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct AuthorRouteNeedsCounts {
-    pub(super) wire_owner_keys: usize,
-    pub(super) wire_owner_refs: usize,
-    pub(super) needs: usize,
-}
-
 /// Exact live-wire owner count per author contributed by `Auto` atoms, and
 /// the subset of those authors still needing a neutral provider.
 #[derive(Default)]
@@ -193,7 +182,7 @@ impl AuthorRouteNeeds {
     /// is recorded as needing a provider (same `needs.len()`, wrong member)
     /// fails the second assertion even though every count and every set size
     /// stays right.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (author, count) in &self.wire_owner_counts {
             assert!(
@@ -210,13 +199,5 @@ impl AuthorRouteNeeds {
         }
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> AuthorRouteNeedsCounts {
-        AuthorRouteNeedsCounts {
-            wire_owner_keys: self.wire_owner_counts.len(),
-            wire_owner_refs: self.wire_owner_counts.values().sum(),
-            needs: self.needs.len(),
-        }
-    }
 }
 

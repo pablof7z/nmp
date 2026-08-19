@@ -30,20 +30,7 @@ pub(super) struct HistorySessions {
     next_id: u64,
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps. `pub(super)`, and deliberately not nested into the flat
-/// `pub CoreOwnershipCensus`.
-///
-/// Two censuses read this owner and they want different things:
-/// `observation_ownership_census` wants the two counts below,
-/// `ownership_census` also wants retained freshness edges. The second lives
-/// in its own bench-gated method rather than as a third field here, so the
-/// struct has no field that is dead in the shape the first one builds under.
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 pub(super) struct HistorySessionCounts {
     pub(super) sessions: usize,
     pub(super) handles: usize,
@@ -225,7 +212,7 @@ impl HistoryRows {
     /// I5, checked: one membership, and every key carrying its own row's
     /// timestamp. Lives with the fields it constrains rather than in the
     /// session owner above, which cannot see them.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     fn assert_consistent(&self, at: &str, id: HistorySessionId) {
         assert_eq!(
             self.rows.len(),
@@ -397,7 +384,7 @@ impl HistorySessions {
     /// Membership/order is I5 and lives on [`HistoryRows`], which owns both
     /// collections; this walk delegates to it per session rather than
     /// restating it, because the fields it constrains are private there.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, state) in &self.sessions {
             state.rows.assert_consistent(at, *id);
@@ -447,11 +434,7 @@ impl HistorySessions {
         })
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn counts(&self) -> HistorySessionCounts {
         HistorySessionCounts {
             sessions: self.sessions.len(),
@@ -459,19 +442,6 @@ impl HistorySessions {
         }
     }
 
-    /// Opening-evidence source edges every frozen branch acquisition still
-    /// retains, for the bench census's retained-freshness total. Separate
-    /// from [`Self::counts`] because only that census reads it.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn freshness_source_edges(&self) -> usize {
-        self.sessions
-            .values()
-            .flat_map(|state| &state.acquisitions_by_branch)
-            .flat_map(|acquisition| &acquisition.scopes)
-            .filter_map(ScopeAcquisition::opening_evidence)
-            .map(|evidence| evidence.sources.len())
-            .sum()
-    }
 }
 
 impl CoreState {
@@ -1405,9 +1375,6 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(feature = "bench-instrumentation")]
-                self.history_store_queries
-                    .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
                 // Taking the window target from EVERY branch is exact: a row
                 // outside one branch's newest `target_rows` already has that
@@ -1511,9 +1478,6 @@ impl CoreState {
             };
             for mut atom in self.resolver.root_atoms(*live) {
                 atom.limit = None;
-                #[cfg(feature = "bench-instrumentation")]
-                self.history_store_queries
-                    .set(self.history_store_queries.get().saturating_add(1));
                 let filter = atom.to_nostr();
                 let rows = match pinned_relays.as_ref() {
                     Some(relays) => self
@@ -1592,8 +1556,6 @@ impl CoreState {
         changes: &CommittedRowChanges,
         effects: &mut Vec<Effect>,
     ) -> bool {
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
         let Some(state) = self.history.get(id) else {
             return true;
         };
@@ -1686,8 +1648,6 @@ impl CoreState {
                     current.unwrap_or_else(|| {
                         row_from_stored_event(
                             {
-                                #[cfg(feature = "bench-instrumentation")]
-                                crate::ingest_attribution::projection_event_clone();
                                 changed.event.clone()
                             },
                             changed.signature_state,
@@ -1697,11 +1657,6 @@ impl CoreState {
                 );
             }
         }
-
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_setup(phase_started.elapsed());
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
 
         {
             let state = self
@@ -1721,8 +1676,6 @@ impl CoreState {
                 let event_id = row.event.id;
                 let remembered = row_from_stored_event(
                     {
-                        #[cfg(feature = "bench-instrumentation")]
-                        crate::ingest_attribution::projection_event_clone();
                         row.event.clone()
                     },
                     row.signature_state,
@@ -1780,9 +1733,6 @@ impl CoreState {
         if visible_removals > 0 {
             let boundary =
                 original_boundary.expect("a visible removal implies a prior canonical boundary");
-            #[cfg(feature = "bench-instrumentation")]
-            self.history_store_queries
-                .set(self.history_store_queries.get().saturating_add(1));
             let queried = match pinned_relays.as_ref() {
                 Some(relays) => self.store.query_newest_before_any_under_pin(
                     &filters,
@@ -1843,11 +1793,6 @@ impl CoreState {
             }
         }
 
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_apply(phase_started.elapsed());
-        #[cfg(feature = "bench-instrumentation")]
-        let phase_started = std::time::Instant::now();
-
         let state = self
             .history
             .get(id)
@@ -1869,22 +1814,10 @@ impl CoreState {
                 (None, None) | (Some(_), Some(_)) => {}
             }
         }
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_delta(phase_started.elapsed());
         if deltas.is_empty() {
             return true;
         }
-        #[cfg(feature = "bench-instrumentation")]
-        let batch_started = std::time::Instant::now();
-        #[cfg(feature = "bench-instrumentation")]
-        let delta_count = deltas.len();
         let batch = self.history_batch(id, deltas, WindowLoad::Idle);
-        #[cfg(feature = "bench-instrumentation")]
-        crate::ingest_attribution::history_projection_batch(
-            batch_started.elapsed(),
-            delta_count,
-            batch.rows.len(),
-        );
         effects.push(Effect::EmitHistory(id, batch));
         true
     }

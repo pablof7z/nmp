@@ -108,22 +108,6 @@ pub(super) struct RequestAttempts {
     retries_by_session: HashMap<RelaySessionKey, BTreeSet<RequestRetryKey>>,
 }
 
-/// The census contribution, so `bench_ownership_census` counts this owner's
-/// state without naming its maps. Deliberately `pub(super)` and NOT nested
-/// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct RequestAttemptCounts {
-    pub(super) attempts: usize,
-    pub(super) sub_keys: usize,
-    pub(super) sub_edges: usize,
-    pub(super) session_keys: usize,
-    pub(super) session_edges: usize,
-    pub(super) retry_jobs: usize,
-    pub(super) retry_sub_keys: usize,
-    pub(super) retry_session_keys: usize,
-    pub(super) retry_session_edges: usize,
-}
-
 impl RequestAttempts {
     pub(super) fn new() -> Self {
         Self {
@@ -371,21 +355,6 @@ impl RequestAttempts {
             .retry_failures = failures;
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> RequestAttemptCounts {
-        RequestAttemptCounts {
-            attempts: self.attempts.len(),
-            sub_keys: self.by_sub.len(),
-            sub_edges: self.by_sub.values().map(BTreeSet::len).sum(),
-            session_keys: self.by_session.len(),
-            session_edges: self.by_session.values().map(BTreeSet::len).sum(),
-            retry_jobs: self.retries.len(),
-            retry_sub_keys: self.retry_by_sub.len(),
-            retry_session_keys: self.retries_by_session.len(),
-            retry_session_edges: self.retries_by_session.values().map(BTreeSet::len).sum(),
-        }
-    }
-
     /// Exact structural consistency for every mirror this owner keeps, by
     /// identity rather than by count.
     ///
@@ -396,7 +365,7 @@ impl RequestAttempts {
     /// `assert_consistent` doc makes the same point). Four mirrors are
     /// checked in both directions: `by_sub`, `by_session`,
     /// `retry_by_sub`, `retries_by_session`.
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (attempt_id, attempt) in &self.attempts {
             let ids = self.by_sub.get(&attempt.sub_id).unwrap_or_else(|| {

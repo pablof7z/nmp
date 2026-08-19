@@ -44,15 +44,6 @@ impl IndexedChild<RelaySessionKey> for RequestReplacement {
     }
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct RequestReplacementCounts {
-    pub(super) jobs: usize,
-    pub(super) session_keys: usize,
-    pub(super) session_edges: usize,
-}
-
 pub(super) struct RequestReplacements {
     pending: OwnerIndexed<RelaySessionKey, SubId, RequestReplacement>,
 }
@@ -99,17 +90,9 @@ impl RequestReplacements {
         self.pending.take_owner(session)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn assert_consistent(&self, at: &str) {
         self.pending.assert_consistent(at);
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> RequestReplacementCounts {
-        RequestReplacementCounts {
-            jobs: self.pending.len(),
-            session_keys: self.pending.owner_keys(),
-            session_edges: self.pending.owner_edges(),
-        }
-    }
 }
