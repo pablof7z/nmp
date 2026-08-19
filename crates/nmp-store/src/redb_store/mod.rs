@@ -30,11 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ContextualAtom, RelaySessionKey};
@@ -72,44 +68,8 @@ use crate::{
     VerifiedSignature,
 };
 
-#[cfg(feature = "bench-instrumentation")]
-mod compact_index_bench;
-#[cfg(feature = "bench-instrumentation")]
-mod fjall_ingest_bench;
-#[cfg(feature = "bench-instrumentation")]
-mod lmdb_ingest_bench;
-#[cfg(feature = "bench-instrumentation")]
-mod packed_postings_bench;
 mod postings;
 mod postings_store;
-#[cfg(feature = "bench-instrumentation")]
-mod redo_index_bench;
-#[cfg(feature = "bench-instrumentation")]
-mod store_bench;
-
-#[cfg(feature = "bench-instrumentation")]
-pub use compact_index_bench::run_prepared_redb_compact_index_bench;
-#[cfg(feature = "bench-instrumentation")]
-pub use fjall_ingest_bench::{run_fjall_governed_ingest_bench, FjallGovernedIngestMetrics};
-#[cfg(feature = "bench-instrumentation")]
-pub use lmdb_ingest_bench::{
-    run_lmdb_governed_ingest_bench, LmdbGovernedIngestMetrics, LmdbPackedWork,
-};
-#[cfg(feature = "bench-instrumentation")]
-pub use packed_postings_bench::{
-    run_packed_postings_bench, PackedPostingsBackend, PackedPostingsMetrics, PackedQueryMetrics,
-};
-#[cfg(feature = "bench-instrumentation")]
-pub use redo_index_bench::{run_prepared_redb_redo_index_bench, RedbRedoIndexMetrics};
-#[cfg(feature = "bench-instrumentation")]
-pub use store_bench::{
-    prepare_equivalent_store_corpus, run_prepared_redb_store_bench,
-    run_prepared_redb_unified_index_bench, run_store_bench_variant, StoreBenchAttribution,
-    StoreBenchMetrics, StoreBenchPreparedBatch, StoreBenchPreparedCorpus,
-    StoreBenchPreparedMetrics, StoreBenchPreparedRecord, StoreBenchPreparedTable,
-    StoreBenchProcessCounters, StoreBenchVariant,
-};
-
 mod schema;
 #[cfg(any(test, feature = "test-instrumentation"))]
 #[path = "testing_tests.rs"]

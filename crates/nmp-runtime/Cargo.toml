@@ -11,8 +11,8 @@ default = []
 bench-instrumentation = [
     "dep:libc",
     "nmp-engine/bench-instrumentation",
-    "nmp-store/bench-instrumentation",
     "nmp-resolver/bench-instrumentation",
+    "nmp-store/test-instrumentation",
     "nmp-transport/bench-instrumentation",
 ]
 test-instrumentation = [

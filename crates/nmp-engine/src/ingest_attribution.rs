@@ -164,7 +164,6 @@ pub fn reset() {
     }
     nmp_transport::ingest_attribution::reset();
     nmp_resolver::ingest_attribution::reset();
-    nmp_store::ingest_attribution::reset();
 }
 pub fn snapshot() -> Snapshot {
     let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);

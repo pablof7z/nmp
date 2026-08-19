@@ -71,7 +71,7 @@ impl Prefix {
         &self.0
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(test)]
     fn from_bytes(family: Family, value: &[u8]) -> Result<Self, String> {
         match family {
             Family::Global if value.is_empty() => Ok(Self::global()),
@@ -104,12 +104,6 @@ pub(super) struct EncodedRun {
     pub(super) prefixes: u64,
     #[allow(dead_code)]
     pub(super) posting_bytes: u64,
-    #[cfg_attr(not(feature = "bench-instrumentation"), allow(dead_code))]
-    pub(super) dictionary_build_ns: u64,
-    #[cfg_attr(not(feature = "bench-instrumentation"), allow(dead_code))]
-    pub(super) membership_sort_ns: u64,
-    #[cfg_attr(not(feature = "bench-instrumentation"), allow(dead_code))]
-    pub(super) segment_encode_ns: u64,
 }
 
 pub(super) fn shard_for(family: Family, prefix: &[u8]) -> u8 {
@@ -126,7 +120,6 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
     if memberships.is_empty() {
         return Err("cannot encode an empty postings run".to_owned());
     }
-    let dictionary_started = std::time::Instant::now();
     let mut ids_by_key = BTreeMap::new();
     let mut created_at_by_key = BTreeMap::new();
     let mut ids = HashSet::with_capacity(memberships.len());
@@ -180,9 +173,6 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         .enumerate()
         .map(|(ordinal, (event_key, _))| (*event_key, ordinal as u32))
         .collect();
-    let dictionary_build_ns = elapsed_ns(dictionary_started);
-
-    let sort_started = std::time::Instant::now();
     memberships.sort_unstable_by(|left, right| {
         left.family
             .cmp(&right.family)
@@ -195,9 +185,6 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
             && left.prefix == right.prefix
             && left.event.event_key == right.event.event_key
     });
-    let membership_sort_ns = elapsed_ns(sort_started);
-
-    let segment_started = std::time::Instant::now();
     let mut segments = Vec::new();
     let mut prefixes = 0u64;
     let mut start = 0usize;
@@ -227,7 +214,6 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
     }
     let postings = memberships.len() as u64;
     let dictionary = encode_dictionary(&dictionary_entries)?;
-    let segment_encode_ns = elapsed_ns(segment_started);
     Ok(EncodedRun {
         dictionary,
         segments,
@@ -235,14 +221,7 @@ pub(super) fn encode_run(mut memberships: Vec<Membership>) -> Result<EncodedRun,
         postings,
         prefixes,
         posting_bytes: postings.saturating_mul(POSTING_ENTRY_LEN as u64),
-        dictionary_build_ns,
-        membership_sort_ns,
-        segment_encode_ns,
     })
-}
-
-fn elapsed_ns(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn canonical_order(left: &RunEvent, right: &RunEvent) -> Ordering {
@@ -560,7 +539,7 @@ impl<'a> SegmentView<'a> {
         Ok(postings)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(test)]
     pub(super) fn memberships(
         self,
         dictionary: DictionaryView<'a>,
@@ -569,7 +548,7 @@ impl<'a> SegmentView<'a> {
         self.memberships_interned(dictionary, &mut events)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(test)]
     pub(super) fn memberships_interned(
         self,
         dictionary: DictionaryView<'a>,
@@ -1018,20 +997,20 @@ impl PostingCursor<'_> {
     }
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 pub(super) struct MergeSource<'a> {
     pub(super) cursor: PostingCursor<'a>,
     pub(super) dead: Option<&'a DeadKeys>,
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HeapEntry {
     event: RunEvent,
     source: usize,
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 impl Ord for HeapEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         self.event
@@ -1043,14 +1022,14 @@ impl Ord for HeapEntry {
     }
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 impl PartialOrd for HeapEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(test)]
 pub(super) fn merge_posting_cursors(
     mut sources: Vec<MergeSource<'_>>,
     limit: usize,

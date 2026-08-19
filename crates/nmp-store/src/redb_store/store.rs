@@ -21,19 +21,11 @@ use super::schema::{
     SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
     SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 use super::AtomicU64;
 #[cfg(test)]
 use super::AtomicU8;
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
@@ -199,32 +191,24 @@ pub struct RedbStore {
     #[cfg(test)]
     pub(super) crash_point: AtomicU8,
     /// Owned rows materialized after borrowed filtering.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) examined_rows: AtomicU64,
     /// Ordered index entries consumed, including one prefetched head per OR
     /// range needed to establish global ordering.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) query_index_rows: AtomicU64,
     /// Canonical binary event values dereferenced for borrowed post-filtering.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) query_event_values: AtomicU64,
     /// Coverage-table point reads, kept separate from event projection work
     /// so lifecycle benchmarks can attribute diagnostics cost exactly.
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) coverage_reads: AtomicU64,
     /// Calls through the concrete publish-queue lane-recovery door. This is
     /// test-only work attribution for reducer scheduling falsifiers, not a
     /// runtime diagnostic.
     #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) publish_queue_lane_recovery_reads: AtomicU64,
-    /// Benchmark-only ceiling: governed commits skip persistence barriers.
-    /// Ordinary builds cannot construct a store with this set.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) benchmark_durability: BenchmarkDurability,
     /// Number of rows yielded by bounded attempt-table ranges. Tests reset
     /// this to prove work follows the target lane count, not total history.
     #[cfg(test)]
@@ -277,13 +261,6 @@ impl OrderedEventReadPause {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum BenchmarkDurability {
-    Immediate,
-    #[cfg(feature = "bench-instrumentation")]
-    NoneThenImmediateCheckpoint,
-}
-
 #[cfg(test)]
 type RequiredDatabaseInitTestHook = Box<dyn FnMut()>;
 
@@ -328,32 +305,6 @@ fn call_required_database_init_test_hook() {
             hook();
         }
     });
-}
-
-#[cfg(feature = "bench-instrumentation")]
-impl Drop for RedbStore {
-    fn drop(&mut self) {
-        if self.benchmark_durability != BenchmarkDurability::NoneThenImmediateCheckpoint {
-            return;
-        }
-
-        // Redb otherwise performs an implicit Immediate allocator/trim
-        // transaction during Database::drop. Make the required durability
-        // drain explicit and timed so a no-fsync foreground ceiling cannot
-        // hide persistence work after the measurement window.
-        let started = std::time::Instant::now();
-        let Some(db) = self.db.as_ref() else {
-            return;
-        };
-        let checkpoint = db
-            .begin_write()
-            .expect("redb benchmark durability checkpoint begin");
-        checkpoint
-            .commit()
-            .expect("redb benchmark durability checkpoint commit");
-        crate::ingest_attribution::durability_checkpoint(started.elapsed());
-        self.benchmark_durability = BenchmarkDurability::Immediate;
-    }
 }
 
 impl RedbStore {
@@ -731,7 +682,7 @@ impl RedbStore {
     /// publish queue evidence are permanently lost
     /// (`docs/internals/conventions/schema-epoch-discard.md`).
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
-        Self::open_inner(path, BenchmarkDurability::Immediate, |path| {
+        Self::open_inner(path, |path| {
             let backend = RequiredLockedFileBackend::open(path)?;
             #[cfg(test)]
             call_required_database_init_test_hook();
@@ -763,7 +714,7 @@ impl RedbStore {
         backend: impl redb::StorageBackend,
     ) -> Result<Self, RedbStoreOpenError> {
         let mut backend = Some(backend);
-        Self::open_inner(path, BenchmarkDurability::Immediate, move |_| {
+        Self::open_inner(path, move |_| {
             Database::builder()
                 .set_cache_size(REDB_CACHE_BYTES)
                 .create_with_backend(
@@ -775,32 +726,8 @@ impl RedbStore {
         })
     }
 
-    /// Open a benchmark-only diagnostic store whose governed write
-    /// transactions use [`redb::Durability::None`].
-    ///
-    /// This is an upper-bound measurement seam, not a usable persistence
-    /// mode: a process or machine crash may roll back every foreground
-    /// commit. Drop performs one separately-timed Immediate checkpoint so
-    /// maintenance-inclusive evidence cannot hide the deferred durability
-    /// work. Schema creation and reopen repair remain immediately durable.
-    #[cfg(feature = "bench-instrumentation")]
-    pub fn open_benchmark_nondurable(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
-        Self::open_inner(
-            path,
-            BenchmarkDurability::NoneThenImmediateCheckpoint,
-            |path| {
-                let backend = RequiredLockedFileBackend::open(path)?;
-                Database::builder()
-                    .set_cache_size(REDB_CACHE_BYTES)
-                    .create_with_backend(backend)
-                    .map_err(|error| RedbStoreOpenError::database(error.into(), path))
-            },
-        )
-    }
-
     fn open_inner(
         path: impl AsRef<Path>,
-        _benchmark_durability: BenchmarkDurability,
         create: impl FnOnce(&Path) -> Result<Database, RedbStoreOpenError>,
     ) -> Result<Self, RedbStoreOpenError> {
         let path = path.as_ref();
@@ -949,22 +876,16 @@ impl RedbStore {
             open_write_transactions: _open_write_transactions,
             #[cfg(test)]
             crash_point: AtomicU8::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(any(test, feature = "test-instrumentation"))]
             examined_rows: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(any(test, feature = "test-instrumentation"))]
             query_index_rows: AtomicU64::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(any(test, feature = "test-instrumentation"))]
             query_event_values: AtomicU64::new(0),
-            #[cfg(any(
-                test,
-                feature = "bench-instrumentation",
-                feature = "test-instrumentation"
-            ))]
+            #[cfg(any(test, feature = "test-instrumentation"))]
             coverage_reads: AtomicU64::new(0),
             #[cfg(any(test, feature = "test-instrumentation"))]
             publish_queue_lane_recovery_reads: AtomicU64::new(0),
-            #[cfg(feature = "bench-instrumentation")]
-            benchmark_durability: _benchmark_durability,
             #[cfg(test)]
             attempt_range_rows: AtomicU64::new(0),
             #[cfg(test)]
@@ -1052,14 +973,14 @@ impl RedbStore {
         self.examined_rows.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn reset_query_work(&self) {
         self.examined_rows.store(0, Ordering::Relaxed);
         self.query_index_rows.store(0, Ordering::Relaxed);
         self.query_event_values.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn query_work(&self) -> (u64, u64, u64) {
         (
             self.query_index_rows.load(Ordering::Relaxed),
@@ -1068,20 +989,12 @@ impl RedbStore {
         )
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn reset_coverage_reads(&self) {
         self.coverage_reads.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn coverage_reads(&self) -> u64 {
         self.coverage_reads.load(Ordering::Relaxed)
     }
@@ -1210,7 +1123,7 @@ impl RedbStore {
         relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<StoredEvent, PersistenceError> {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(any(test, feature = "test-instrumentation"))]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
         Ok(StoredEvent {
             event: view.materialize_event().map_err(|error| {
@@ -1263,7 +1176,7 @@ impl RedbStore {
                 if !needs_event_value {
                     return Ok(Some(event_id));
                 }
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(any(test, feature = "test-instrumentation"))]
                 self.query_event_values.fetch_add(1, Ordering::Relaxed);
                 let Some(value) = events
                     .get(event_row_key(event_key).as_slice())
@@ -1289,7 +1202,7 @@ impl RedbStore {
                     return Ok(None);
                 }
                 if suppression_possible {
-                    #[cfg(any(test, feature = "bench-instrumentation"))]
+                    #[cfg(any(test, feature = "test-instrumentation"))]
                     self.examined_rows.fetch_add(1, Ordering::Relaxed);
                     let event = view.materialize_event().map_err(|error| {
                         PersistenceError::new(format!(
@@ -1314,7 +1227,7 @@ impl RedbStore {
                 limit: Some(limit),
             },
             || {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(any(test, feature = "test-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
             },
             &mut project_if_visible,
@@ -1397,7 +1310,7 @@ impl RedbStore {
                     }
                 }
             }
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(any(test, feature = "test-instrumentation"))]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
             let Some(value) = events
                 .get(event_row_key(event_key).as_slice())
@@ -1453,7 +1366,7 @@ impl RedbStore {
                 limit,
             },
             || {
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(any(test, feature = "test-instrumentation"))]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
             },
             &mut materialize_if_visible,

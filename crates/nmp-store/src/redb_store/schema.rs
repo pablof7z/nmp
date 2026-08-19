@@ -146,43 +146,6 @@ pub(super) const TOMBSTONE_ADDR: u8 = 1;
 /// value: the canonical event's compact surrogate key.
 pub(super) const EXPIRATION_INDEX: TableDefinition<&[u8; 40], EventKey> =
     TableDefinition::new("expiration_index");
-/// Binary ordered indexes all end in the same sortable suffix:
-/// `created_at:u64-be | !event_id:[u8;32]`. Reverse scans therefore yield
-/// `created_at DESC, event_id ASC` and can stop exactly at the visible limit.
-///
-/// Comparison-only: packed postings own the current query layout, so
-/// [`crate::RedbStore`] never creates or reads these row indexes. They survive
-/// solely so benchmark variants can measure the alternative physical shape.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const BY_CREATED_AT: TableDefinition<&[u8; 40], EventKey> =
-    TableDefinition::new("by_created_at");
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const BY_AUTHOR: TableDefinition<&[u8; 72], EventKey> =
-    TableDefinition::new("by_author_time");
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const BY_KIND: TableDefinition<&[u8; 42], EventKey> =
-    TableDefinition::new("by_kind_time");
-/// Comparison-only historical index shape used by benchmark variants; never
-/// opened by [`crate::RedbStore`] and not part of the current schema epoch.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const COMPARISON_BY_AUTHOR_KIND: TableDefinition<&[u8; 74], EventKey> =
-    TableDefinition::new("by_author_kind_time");
-/// NIP-01 single-letter tag index, borrowing nostrdb's clustered
-/// `(tag,value,created_at)` layout. The binary key is:
-///
-/// `tag:u8 | encoding:u8 | value | created_at:u64-be | !event_id:[u8;32]`
-///
-/// Big-endian timestamp bytes make redb's ordinary byte ordering usable as a
-/// newest-first reverse range scan. The event id suffix both disambiguates
-/// equal timestamps. The id bytes are inverted so a reverse scan is
-/// `created_at DESC, event_id ASC`, NMP's canonical NIP-01 tie-break, without
-/// parsing hex.
-/// Values are compact event keys, so a hit dereferences the immutable note
-/// directly without rebuilding or hex-encoding its NIP-01 id.
-///
-/// Comparison-only, exactly like [`BY_CREATED_AT`].
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const BY_TAG: TableDefinition<&[u8], EventKey> = TableDefinition::new("by_tag");
 /// Immutable packed ordered-postings artifacts. Packed postings are the
 /// current query-authoritative representation.
 pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
@@ -209,22 +172,6 @@ pub(super) const POSTINGS_SEGMENTS: TableDefinition<&[u8], &[u8]> =
 /// deleted events out of query merges. Only their tree is gone.
 pub(super) const POSTINGS_CATALOG: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("postings_catalog");
-/// Sampled live-row counts per ordered-index prefix. Keys are namespaced
-/// binary prefixes (global, author, kind, or tag/value); values count sampled
-/// physical rows in that bucket.
-///
-/// Comparison-only, exactly like [`BY_CREATED_AT`]: [`crate::RedbStore`] never
-/// creates, opens, or reads this table and is not part of the current schema
-/// epoch. The planner it once fed chose between indexes that all return the
-/// same rows (`plan.index` only picks a scan order; the post-index mask is
-/// derived from the chosen index, never from an estimate), so the durable
-/// estimate could only make a query slower, never wrong — and packed postings
-/// already carry an exact per-prefix `posting_count` in their segment headers.
-/// It survives solely so benchmark variants can measure the alternative
-/// physical shape that motivated it.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) const INDEX_CARDINALITY: TableDefinition<&[u8], u64> =
-    TableDefinition::new("index_cardinality");
 /// Fresh publish-queue namespace (#1027). The key widths are the
 /// semantic contract, not redb's numeric layout:
 ///

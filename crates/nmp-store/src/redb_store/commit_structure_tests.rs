@@ -122,10 +122,6 @@ fn allowed_cfg_attributes(expression: &Expr) -> bool {
             .parse_nested_meta(|meta| {
                 if meta.path.is_ident("test") {
                     allowed = true;
-                } else if meta.path.is_ident("feature") {
-                    let value = meta.value()?;
-                    let feature: syn::LitStr = value.parse()?;
-                    allowed |= feature.value() == "bench-instrumentation";
                 }
                 Ok(())
             })

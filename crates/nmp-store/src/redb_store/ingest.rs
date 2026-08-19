@@ -1,4 +1,4 @@
-use super::ingest_txn::GovernedIngestTxn;
+use super::ingest_txn::RedbIngestTxn;
 use super::mutation::{
     fan_out_signed_in_txn, missing_addr_index_target, process_kind5_deletions, remove_row_in_txn,
     tombstone_refuses,
@@ -9,8 +9,8 @@ use super::{
     PersistenceError, Provenance, RefuseReason, RelayObserved, SigState,
 };
 #[allow(clippy::too_many_lines)]
-pub(super) fn insert_with_tables<T: GovernedIngestTxn>(
-    tables: &mut T,
+pub(super) fn insert_with_tables(
+    tables: &mut RedbIngestTxn<'_, '_>,
     event: Event,
     from: RelayObserved,
 ) -> Result<InsertOutcome, PersistenceError> {

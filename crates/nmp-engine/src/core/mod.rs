@@ -3478,8 +3478,8 @@ impl CoreState {
         }
     }
 
-    /// Benchmark-only access to the store work counters used by the
-    /// million-row scale proofs. Not an application/store API.
+    /// Benchmark-only access to the store work counters. Not an
+    /// application/store API.
     #[doc(hidden)]
     pub(in crate::core) fn bench_reset_query_work(&self) {
         self.store.reset_query_work();

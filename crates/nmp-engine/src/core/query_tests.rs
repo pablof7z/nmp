@@ -1825,8 +1825,7 @@ mod coverage_evidence_refresh_tests {
     fn one_eose_visits_only_its_owner_among_207_incompatible_observations() {
         let relay = RelayUrl::parse("wss://evidence-only-exact.example").unwrap();
         let directory = tempfile::tempdir().unwrap();
-        let store =
-            RedbStore::open_benchmark_nondurable(directory.path().join("exact.redb")).unwrap();
+        let store = RedbStore::open(directory.path().join("exact.redb")).unwrap();
         let (mut core, transport, session) = connected_core_with_store(&relay, store);
         for index in 0..207u16 {
             core.handle(EngineMsg::Subscribe(pinned_tag_query(
