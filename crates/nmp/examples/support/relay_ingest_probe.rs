@@ -247,7 +247,6 @@ pub struct ProbeResult {
     pub last_event_id: String,
     pub server_send_ms: Vec<f64>,
     pub server_bytes: Vec<u64>,
-    pub ingest_attribution: Option<serde_json::Value>,
 }
 
 struct Corpus {
@@ -808,7 +807,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let process_write_bytes = process_write_bytes()
         .zip(process_write_bytes_before)
         .map(|(after, before)| after.saturating_sub(before));
-    let ingest_attribution = None;
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
@@ -1004,7 +1002,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .map(|stats| duration_ms(stats.send_elapsed))
             .collect(),
         server_bytes: server_stats.iter().map(|stats| stats.bytes).collect(),
-        ingest_attribution,
     })
 }
 

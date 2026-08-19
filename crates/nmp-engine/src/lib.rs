@@ -18,7 +18,6 @@
 //! - [`mod@core`] — the reducer and durable-state owner.
 //! - [`mod@publish_queue`] — the write-fact/receipt vocabulary the reducer
 //!   mints.
-//! - [`mod@ingest_attribution`] — bench-only ingest counters.
 //!
 //! Callers are `nmp-runtime` and the `nmp` facade's own re-export list. They
 //! name this crate directly; `nmp`'s `#[doc(hidden)] pub mod mechanism`
