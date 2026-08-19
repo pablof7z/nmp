@@ -27,17 +27,34 @@
 //!
 //! Deliberately NOT depended on: `nostr` and `nmp-grammar`. Every place where
 //! naming one of them would have been easier is a finding instead.
+//!
+//! ## The binary is a supervisor, not a test
+//!
+//! `src/bin/canary.rs` spawns and kills child processes, because five of its
+//! scenarios cannot be expressed any other way. A restart is only a restart if
+//! the writing process exited -- a second `Engine` over one store in one
+//! address space still holds the redb pages, the allocator and every decoded
+//! row. A crash is only a crash under SIGKILL, with no `shutdown` and no
+//! `Drop`. Descriptors, threads and resident size are properties of a process.
+//! "The process exited" and "teardown returned" are different signals. Two
+//! processes contending for one store is not a function call.
+//!
+//! Scenarios: `surfaces`, `deletions`, `routing`, `restart`, `crash`,
+//! `contend`, `teardown`, `findings`, `all` (default). See [`process`].
 
 #![deny(unsafe_code)]
 
 pub mod app;
 pub mod composer;
+pub mod deletions;
 pub mod feed;
 pub mod findings;
 pub mod notifications;
 pub mod people;
+pub mod process;
 pub mod profiles;
 pub mod room;
+pub mod routing;
 pub mod rows;
 pub mod thread;
 

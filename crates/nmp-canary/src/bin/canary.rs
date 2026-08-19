@@ -7,7 +7,24 @@
 //! SURFACE, which is what this crate exists to measure. The relay half is a
 //! separate harness.
 //!
-//! Run: `cargo run -p nmp-canary --bin canary`
+//! It is a BINARY and not a test, and that is load-bearing. Five of the
+//! scenarios below cannot be expressed any other way:
+//!
+//! - a restart is only a restart if the writing process exited. A second
+//!   `Engine` over one store in one address space still holds the redb pages,
+//!   the allocator and every decoded row, so a read served from anywhere but
+//!   the durable file looks identical to a correct one.
+//! - a crash is only a crash if the process was SIGKILLed mid-flight, with no
+//!   `shutdown` and no `Drop`.
+//! - descriptors, threads and resident size are properties of a process.
+//! - "the process exited" and "teardown returned" are different signals.
+//! - two processes contending for one store is not a function call.
+//!
+//! Run: `cargo run -p nmp-canary --bin canary [scenario]`
+//!
+//! Scenarios: `all` (default), `surfaces`, `deletions`, `routing`, `restart`,
+//! `crash`, `contend`, `teardown`, `findings`. The `child-*` forms are spawned
+//! by the supervisors and are not meant to be typed.
 
 use std::time::Duration;
 
@@ -23,7 +40,7 @@ use nmp_canary::Canary;
 
 const TICK: Duration = Duration::from_millis(250);
 
-fn main() {
+fn surfaces() {
     let mut app = Canary::open(None, Vec::new()).expect("engine opens with no relays");
 
     // --- two accounts live at once ------------------------------------------
@@ -315,9 +332,6 @@ fn main() {
     drop(feed);
     drop(room);
     app.shutdown();
-
-    println!("\n{}", "=".repeat(72));
-    print!("{}", nmp_canary::report());
 }
 
 fn short(key: PublicKey) -> String {
@@ -362,5 +376,508 @@ fn publish_profile(app: &Canary, author: PublicKey, name: &str, picture: &str) {
     };
     if let Ok(mut receipt) = app.engine.publish(intent) {
         drain(&mut receipt);
+    }
+}
+
+// ===========================================================================
+// Dispatcher
+// ===========================================================================
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let scenario = args.get(1).map(String::as_str).unwrap_or("all");
+    match scenario {
+        "surfaces" => surfaces(),
+        "deletions" => deletions_scenario(),
+        "routing" => routing_scenario(),
+        "restart" => restart_scenario(),
+        "crash" => crash_scenario(),
+        "contend" => contend_scenario(),
+        "teardown" => teardown_scenario(),
+        "findings" => print!("{}", nmp_canary::report()),
+        // Spawned by the supervisors above. Not meant to be typed.
+        "child-write" => child_write(&args),
+        "child-recover" => child_recover(&args),
+        "child-contend" => child_contend(&args),
+        "all" => {
+            surfaces();
+            deletions_scenario();
+            routing_scenario();
+            restart_scenario();
+            crash_scenario();
+            contend_scenario();
+            teardown_scenario();
+            println!("\n{}", "=".repeat(72));
+            print!("{}", nmp_canary::report());
+        }
+        other => {
+            eprintln!("unknown scenario {other:?}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn banner(title: &str) {
+    println!("\n{}\n== {title}\n{}", "=".repeat(72), "-".repeat(72));
+}
+
+/// This binary's own path, for spawning children.
+fn me() -> std::path::PathBuf {
+    std::env::current_exe().expect("a running binary knows its own path")
+}
+
+fn scratch(name: &str) -> String {
+    let dir = std::env::temp_dir().join(format!("nmp-canary-{}-{}", name, std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("store.redb").to_string_lossy().into_owned()
+}
+
+// ===========================================================================
+// NIP-09 deletions: the kind an app must ask for and then hide
+// ===========================================================================
+
+fn deletions_scenario() {
+    banner("NIP-09 deletions");
+    let mut app = Canary::open(None, Vec::new()).expect("engine opens");
+    let alice = app.add_account(&[7u8; 32], true).expect("alice");
+    let bob = app.add_account(&[9u8; 32], false).expect("bob");
+    let follows = Follows::new();
+    let mut following = follows.follow(&app.engine, bob).expect("alice follows bob");
+    drain(&mut following);
+
+    let mut post = Composer::post(&app.engine, bob, "this one gets deleted").expect("bob posts");
+    post.drain(&app.engine, TICK);
+    let doomed = post.state.event_id.expect("acceptance decided the id");
+
+    let mut feed = FollowsFeed::open(&app.engine, 20, 200).expect("feed opens");
+    // The control: identical query with kind:5 left out.
+    let mut control = FollowsFeed::open_with(
+        &app.engine,
+        nmp_canary::feed::follows_feed_without_deletions(),
+        20,
+        200,
+    )
+    .expect("the control feed opens");
+    pump(&mut feed, 6);
+    pump(&mut control, 6);
+    println!(
+        "before delete: subscribed-5 feed {} raw / {} displayed; control (no kind:5) {} raw",
+        feed.rows().len(),
+        feed.display_rows().count(),
+        control.rows().len()
+    );
+
+    // The deletion itself. No NIP-09 crate owns this, so the app composes it.
+    let target = feed
+        .rows()
+        .iter()
+        .find(|row| row.id() == doomed)
+        .cloned()
+        .expect("the doomed row is in the feed");
+    let mut deleting = nmp_canary::deletions::delete(&app.engine, bob, &target, "on reflection")
+        .expect("a deletion publishes like any other write");
+    drain(&mut deleting);
+    pump(&mut feed, 8);
+    pump(&mut control, 8);
+
+    let raw = feed.rows().len();
+    let shown = feed.display_rows().count();
+    let deletions_in_set = feed
+        .rows()
+        .iter()
+        .filter(|row| nmp_canary::deletions::is_deletion(row))
+        .count();
+    let doomed_still_there = feed.rows().iter().any(|row| row.id() == doomed);
+    println!(
+        "after delete:  {raw} raw row(s), {shown} displayed, {deletions_in_set} of them kind:5"
+    );
+    println!("  the deleted row is still in the row set: {doomed_still_there}");
+    println!(
+        "  control feed (kind:5 NOT subscribed): {} raw row(s), deleted row present: {}",
+        control.rows().len(),
+        control.rows().iter().any(|row| row.id() == doomed)
+    );
+    println!();
+    println!("  MEASURED here: a subscribed kind:5 becomes a row the timeline must filter out,");
+    println!("  and a LOCAL deletion tombstones its target whether or not kind:5 was subscribed");
+    println!("  (nmp-store applies it inside `insert`, independent of any open query).");
+    println!("  NOT measured here (no relay in this harness): that a REMOTE deletion never");
+    println!("  arrives unless the app widened its own kinds. That half rests on the source --");
+    println!("  nothing in nmp-router/nmp-resolver/nmp-engine widens a demand's `kinds` to 5.");
+    let _ = alice;
+    drop(feed);
+    drop(control);
+    app.shutdown();
+}
+
+// ===========================================================================
+// WriteRouting::Auto with nothing configured
+// ===========================================================================
+
+fn routing_scenario() {
+    banner("WriteRouting::Auto under four configurations");
+    println!("claim under test: 'Auto is REFUSED unless outbox indexers are configured'\n");
+    for probe in nmp_canary::routing::matrix() {
+        match nmp_canary::routing::run(&probe, Duration::from_millis(700)) {
+            Ok(observed) => println!("  {observed}"),
+            Err(error) => println!("  {:<28} engine would not start: {error}", probe.label),
+        }
+    }
+}
+
+// ===========================================================================
+// A real restart: the writing process exits before anything is read back
+// ===========================================================================
+
+fn restart_scenario() {
+    banner("restart across a real process exit");
+    let store = scratch("restart");
+    let _ = nmp::Engine::reset_persistent_store(&store);
+
+    let write = std::process::Command::new(me())
+        .args(["child-write", &store, "3", "clean"])
+        .output()
+        .expect("the child runs");
+    let stdout = String::from_utf8_lossy(&write.stdout).into_owned();
+    let handoff = nmp_canary::process::Handoff::parse(&stdout);
+    println!(
+        "writer pid exited with {:?}, handed off {} event id(s)",
+        write.status.code(),
+        handoff.events.len()
+    );
+    for line in stdout.lines().filter(|line| line.starts_with("child.")) {
+        println!("  {line}");
+    }
+    if !write.status.success() {
+        println!(
+            "  writer stderr: {}",
+            String::from_utf8_lossy(&write.stderr)
+        );
+    }
+
+    let mut recover_args = vec!["child-recover".to_string(), store.clone()];
+    recover_args.extend(handoff.receipts.iter().map(|id| id.0.to_string()));
+    let recover = std::process::Command::new(me())
+        .args(&recover_args)
+        .output()
+        .expect("the recovering child runs");
+    println!("reader pid exited with {:?}", recover.status.code());
+    for line in String::from_utf8_lossy(&recover.stdout)
+        .lines()
+        .filter(|line| line.starts_with("child."))
+    {
+        println!("  {line}");
+    }
+    if !recover.status.success() {
+        println!(
+            "  reader stderr: {}",
+            String::from_utf8_lossy(&recover.stderr)
+        );
+    }
+    let _ = nmp::Engine::reset_persistent_store(&store);
+}
+
+// ===========================================================================
+// SIGKILL mid-publish, recovered through the durable doors only
+// ===========================================================================
+
+fn crash_scenario() {
+    banner("SIGKILL of a live engine with writes in flight");
+    let store = scratch("crash");
+    let _ = nmp::Engine::reset_persistent_store(&store);
+
+    let mut child = std::process::Command::new(me())
+        .args(["child-write", &store, "4", "hang"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("the child spawns");
+
+    // Wait for the child to say it has accepted its writes, then kill it
+    // without giving it any chance to run `shutdown` or `Drop`.
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut buffer = String::new();
+        let mut chunk = [0u8; 512];
+        loop {
+            match stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk[..read]));
+                    if buffer.contains("child.ready") {
+                        let _ = tx.send(buffer.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = tx.send(buffer);
+    });
+
+    let observed = rx
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap_or_else(|_| String::new());
+    let handoff = nmp_canary::process::Handoff::parse(&observed);
+    println!(
+        "child accepted {} write(s) and reported ready; killing it now",
+        handoff.events.len()
+    );
+    for line in observed.lines().filter(|line| line.starts_with("child.")) {
+        println!("  {line}");
+    }
+    // SIGKILL. No unwinding, no flush, no `Drop`.
+    let _ = child.kill();
+    let status = child.wait().expect("the killed child is reaped");
+    println!("child terminated: {status:?}");
+
+    let mut recover_args = vec!["child-recover".to_string(), store.clone()];
+    recover_args.extend(handoff.receipts.iter().map(|id| id.0.to_string()));
+    let recover = std::process::Command::new(me())
+        .args(&recover_args)
+        .output()
+        .expect("the recovering child runs");
+    println!("recovery pid exited with {:?}", recover.status.code());
+    for line in String::from_utf8_lossy(&recover.stdout)
+        .lines()
+        .filter(|line| line.starts_with("child."))
+    {
+        println!("  {line}");
+    }
+    if !recover.status.success() {
+        println!(
+            "  recovery stderr: {}",
+            String::from_utf8_lossy(&recover.stderr)
+        );
+    }
+    let _ = nmp::Engine::reset_persistent_store(&store);
+}
+
+// ===========================================================================
+// Two processes, one store
+// ===========================================================================
+
+fn contend_scenario() {
+    banner("two processes over one store");
+    let store = scratch("contend");
+    let _ = nmp::Engine::reset_persistent_store(&store);
+    let app = nmp_canary::process::durable(&store).expect("this process opens the store");
+    println!("this process holds the store open");
+
+    let child = std::process::Command::new(me())
+        .args(["child-contend", &store])
+        .output()
+        .expect("the contending child runs");
+    for line in String::from_utf8_lossy(&child.stdout)
+        .lines()
+        .filter(|line| line.starts_with("child."))
+    {
+        println!("  {line}");
+    }
+
+    // And the documented in-process refusal, for contrast.
+    match nmp::Engine::reset_persistent_store(&store) {
+        Ok(()) => println!("  reset while open: ACCEPTED (no in-process refusal)"),
+        Err(error) => println!("  reset while open: refused -- {error}"),
+    }
+    app.shutdown();
+    let _ = nmp::Engine::reset_persistent_store(&store);
+}
+
+// ===========================================================================
+// Teardown returned, and the process exits, with work in flight
+// ===========================================================================
+
+fn teardown_scenario() {
+    banner("teardown with work in flight");
+    let before = nmp_canary::process::Survey::take();
+    println!("before: {before}");
+
+    let mut app = Canary::open(None, Vec::new()).expect("engine opens");
+    let alice = app.add_account(&[11u8; 32], true).expect("alice");
+
+    // Work in flight: parked writes and open observations, none of them settled.
+    let mut held = Vec::new();
+    for index in 0..8 {
+        if let Ok(sending) = Composer::post(&app.engine, alice, &format!("in flight {index}")) {
+            held.push(sending);
+        }
+    }
+    let feeds: Vec<_> = (0..4)
+        .filter_map(|_| FollowsFeed::open(&app.engine, 10, 50).ok())
+        .collect();
+    let during = nmp_canary::process::Survey::take();
+    println!(
+        "during: {during} (writes held {}, observations open {})",
+        held.len(),
+        feeds.len()
+    );
+
+    let elapsed = nmp_canary::process::timed_shutdown(&app.engine);
+    println!("shutdown RETURNED after {elapsed:?}");
+    println!("  (`shutdown` returns `()`, so its return is the whole signal --");
+    println!("   there is no way to ask whether anything was abandoned)");
+
+    drop(feeds);
+    drop(held);
+    let after = nmp_canary::process::Survey::take();
+    println!("after:  {after}");
+    println!(
+        "  descriptor delta across the whole scenario: {:?}",
+        after.delta_descriptors(&before)
+    );
+}
+
+// ===========================================================================
+// Children
+// ===========================================================================
+
+fn child_write(args: &[String]) {
+    let store = args.get(2).cloned().unwrap_or_default();
+    let count: usize = args
+        .get(3)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(1);
+    let mode = args.get(4).map(String::as_str).unwrap_or("clean");
+
+    let mut app = match nmp_canary::process::durable(&store) {
+        Ok(app) => app,
+        Err(error) => {
+            println!("child.open=failed:{error}");
+            std::process::exit(1);
+        }
+    };
+    let author = app.add_account(&[13u8; 32], true).expect("a valid key");
+    println!("child.pid={}", std::process::id());
+    println!("child.survey={}", nmp_canary::process::Survey::take());
+
+    let mut handoff = nmp_canary::process::Handoff {
+        author: Some(author),
+        events: Vec::new(),
+        receipts: Vec::new(),
+    };
+    for index in 0..count {
+        match Composer::post(&app.engine, author, &format!("durable write {index}")) {
+            Ok(mut sending) => {
+                sending.drain(&app.engine, Duration::from_millis(200));
+                if let Some(event) = sending.state.event_id {
+                    handoff.events.push(event);
+                }
+                if let Some(receipt) = sending.state.receipt {
+                    handoff.receipts.push(receipt);
+                }
+            }
+            Err(error) => println!("child.publish_failed={error}"),
+        }
+    }
+    handoff.print();
+    println!("child.accepted={}", handoff.events.len());
+    println!("child.ready=1");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+
+    if mode == "hang" {
+        // Wait to be killed. No shutdown, no Drop, no flush beyond what the
+        // engine already committed at acceptance.
+        loop {
+            std::thread::sleep(Duration::from_secs(3600));
+        }
+    }
+    let elapsed = nmp_canary::process::timed_shutdown(&app.engine);
+    println!("child.shutdown_returned_in={elapsed:?}");
+    let _ = std::io::stdout().flush();
+}
+
+fn child_recover(args: &[String]) {
+    let store = args.get(2).cloned().unwrap_or_default();
+    // Receipt ids the writer printed, handed back on the command line as bare
+    // integers. `ReceiptId(pub u64)` makes this a cast, not a codec.
+    let carried: Vec<nmp::ReceiptId> = args
+        .iter()
+        .skip(3)
+        .filter_map(|value| value.parse::<u64>().ok())
+        .map(nmp::ReceiptId)
+        .collect();
+    let app = match nmp_canary::process::durable(&store) {
+        Ok(app) => app,
+        Err(error) => {
+            println!("child.reopen=failed:{error}");
+            std::process::exit(1);
+        }
+    };
+    println!("child.reopen=ok");
+    println!("child.pid={}", std::process::id());
+
+    for receipt in &carried {
+        let verdict = match app.engine.reattach_receipt(*receipt) {
+            Ok(nmp::ReceiptReattachment::Attached { .. }) => "attached",
+            Ok(nmp::ReceiptReattachment::NotFound) => "not-found",
+            Ok(nmp::ReceiptReattachment::RetainedButUnreadable) => "unreadable",
+            Err(_) => "engine-closed",
+        };
+        println!("child.carried_receipt id={} reattach={verdict}", receipt.0);
+    }
+
+    let retained = nmp_canary::process::survey_publish_queue(&app.engine);
+    println!("child.retained_obligations={}", retained.len());
+    for entry in &retained {
+        println!(
+            "child.obligation event={} signing={:?} route_complete={} intended={} outcome={:?} reattach={}",
+            &entry.event.to_hex()[..12],
+            entry.signing,
+            entry.route_complete,
+            entry.intended,
+            entry.outcome,
+            entry.reattached
+        );
+    }
+
+    // And the rows themselves, from the durable store with no prior state.
+    let author = retained.first().map(|entry| entry.author);
+    if let Some(author) = author {
+        let query = nmp_canary::profiles::profiles_of_authors([author]);
+        let _ = query; // profiles are not the point here
+        let mine = nmp::LiveQuery::single(nmp::Demand {
+            selection: nmp::Filter {
+                authors: Some(nmp::Binding::Literal(std::collections::BTreeSet::from([
+                    author.to_hex(),
+                ]))),
+                ..nmp::Filter::default()
+            },
+            ..nmp::Demand::default()
+        });
+        if let Ok(subscription) = app.engine.observe(mine, None) {
+            let mut table = nmp_canary::rows::RowTable::new();
+            for _ in 0..6 {
+                match subscription.recv_timeout(Duration::from_millis(300)) {
+                    Ok(frame) => table.apply(&frame),
+                    Err(_) => break,
+                }
+            }
+            println!("child.rows_from_cold_store={}", table.len());
+            let signed = table
+                .rows()
+                .filter(|row| matches!(row.signature(), nmp::RowSignature::Signed(_)))
+                .count();
+            println!("child.rows_signed={signed}");
+        }
+    }
+    println!("child.survey={}", nmp_canary::process::Survey::take());
+    let elapsed = nmp_canary::process::timed_shutdown(&app.engine);
+    println!("child.shutdown_returned_in={elapsed:?}");
+}
+
+fn child_contend(args: &[String]) {
+    let store = args.get(2).cloned().unwrap_or_default();
+    match nmp_canary::process::durable(&store) {
+        Ok(app) => {
+            println!("child.second_process_open=ACCEPTED");
+            app.shutdown();
+        }
+        Err(error) => println!("child.second_process_open=refused:{error}"),
+    }
+    match nmp::Engine::reset_persistent_store(&store) {
+        Ok(()) => println!("child.second_process_reset=ACCEPTED"),
+        Err(error) => println!("child.second_process_reset=refused:{error}"),
     }
 }
