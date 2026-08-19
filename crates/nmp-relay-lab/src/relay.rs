@@ -44,6 +44,7 @@ pub struct RelayLab {
     addr: SocketAddr,
     wire: WireLog,
     corpus: Arc<Mutex<Vec<Event>>>,
+    store: Option<crate::RelayStore>,
     connections: Arc<AtomicU64>,
     sessions: Arc<AtomicU64>,
     kills: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
@@ -80,7 +81,19 @@ impl RelayLab {
         let url = RelayUrl::parse(&format!("ws://{addr}"))
             .expect("nmp-relay-lab: the relay URL must parse");
 
-        let corpus = Arc::new(Mutex::new(std::mem::take(&mut { script.corpus.clone() })));
+        // A durable script's corpus IS the file: what it already holds comes
+        // first, and the seed is appended to it. An in-memory script keeps
+        // the old behaviour exactly.
+        let mut initial = Vec::new();
+        if let Some(store) = &script.store {
+            initial.extend(store.read());
+            if !script.corpus.is_empty() {
+                store.append(script.corpus.clone());
+            }
+        }
+        initial.extend(script.corpus.clone());
+        let corpus = Arc::new(Mutex::new(initial));
+        let store = script.store.clone();
         let wire = WireLog::default();
         let connections = Arc::new(AtomicU64::new(0));
         let sessions = Arc::new(AtomicU64::new(0));
@@ -91,11 +104,13 @@ impl RelayLab {
             listener,
             Arc::new(script),
             Arc::clone(&corpus),
+            store.clone(),
             wire.clone(),
             Arc::clone(&connections),
             Arc::clone(&kills),
             Arc::new(Mutex::new(RelayCounters::default())),
             Arc::clone(&sessions),
+            url.to_string(),
             shutdown_rx,
         ));
 
@@ -104,6 +119,7 @@ impl RelayLab {
             addr,
             wire,
             corpus,
+            store,
             connections,
             sessions,
             kills,
@@ -157,10 +173,21 @@ impl RelayLab {
 
     /// Stage more pre-existing state mid-scenario, after the relay is running.
     pub fn seed(&self, events: impl IntoIterator<Item = Event>) {
+        let events: Vec<Event> = events.into_iter().collect();
+        if let Some(store) = &self.store {
+            store.append(events.clone());
+        }
         self.corpus
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .extend(events);
+    }
+
+    /// This relay's durable store, if it has one. A scenario reads or appends
+    /// through this WHILE THE RELAY IS DOWN -- that is what it is for.
+    #[must_use]
+    pub fn store(&self) -> Option<&crate::RelayStore> {
+        self.store.as_ref()
     }
 
     /// What this relay currently holds -- including writes it ingested.
@@ -212,11 +239,13 @@ async fn accept_loop(
     listener: TcpListener,
     script: Arc<Script>,
     corpus: Arc<Mutex<Vec<Event>>>,
+    store: Option<crate::RelayStore>,
     wire: WireLog,
     connections: Arc<AtomicU64>,
     kills: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
     counters: Arc<Mutex<RelayCounters>>,
     sessions: Arc<AtomicU64>,
+    url: String,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     let mut live = JoinSet::new();
@@ -234,8 +263,17 @@ async fn accept_loop(
                 let wire = wire.clone();
                 let counters = Arc::clone(&counters);
                 let sessions = Arc::clone(&sessions);
+                let endpoint = Endpoint {
+                    script,
+                    corpus,
+                    store: store.clone(),
+                    wire,
+                    counters,
+                    sessions: Arc::clone(&sessions),
+                    url: url.clone(),
+                };
                 live.spawn(async move {
-                    serve(stream, script, corpus, wire, counters, sessions, kill_rx).await;
+                    serve(stream, endpoint, kill_rx).await;
                 });
             }
             Some(_) = live.join_next(), if !live.is_empty() => {}
@@ -248,15 +286,28 @@ async fn accept_loop(
 
 /// Read the request head, then take whichever of the two protocols it asked
 /// for. Only the client speaks first in both, so there is nothing to guess.
-async fn serve(
-    mut stream: TcpStream,
+/// Everything one connection needs that is the same for every connection.
+#[derive(Clone)]
+struct Endpoint {
     script: Arc<Script>,
     corpus: Arc<Mutex<Vec<Event>>>,
+    store: Option<crate::RelayStore>,
     wire: WireLog,
     counters: Arc<Mutex<RelayCounters>>,
     sessions: Arc<AtomicU64>,
-    kill: oneshot::Receiver<()>,
-) {
+    url: String,
+}
+
+async fn serve(mut stream: TcpStream, endpoint: Endpoint, kill: oneshot::Receiver<()>) {
+    let Endpoint {
+        script,
+        corpus,
+        store,
+        wire,
+        counters,
+        sessions,
+        url,
+    } = endpoint;
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while ws::head_end(&head).is_none() {
@@ -327,6 +378,8 @@ async fn serve(
             sub_id: None,
             event: None,
             filters: Vec::new(),
+            scope: None,
+            store: store.clone(),
             corpus: Arc::clone(&corpus),
             out: out_tx.clone(),
             wire: wire.clone(),
@@ -341,8 +394,12 @@ async fn serve(
         corpus,
         wire: wire.clone(),
         out: out_tx,
+        store: store.clone(),
         counters,
         live_subs: BTreeMap::new(),
+        issued_challenge: None,
+        authenticated_as: None,
+        url,
     };
 
     let read_loop = async move {
@@ -479,10 +536,20 @@ struct SessionState {
     connection: usize,
     script: Arc<Script>,
     corpus: Arc<Mutex<Vec<Event>>>,
+    store: Option<crate::RelayStore>,
     wire: WireLog,
     out: Out,
     counters: Arc<Mutex<RelayCounters>>,
     live_subs: BTreeMap<String, AbortHandle>,
+    /// The challenge THIS connection issued, if any. A NIP-42 response is
+    /// validated against this exact string: a fixture that accepts a
+    /// challenge it never sent proves nothing about the client's binding.
+    issued_challenge: Option<String>,
+    /// Who this session has authenticated as. `None` until a valid
+    /// kind:22242 arrives.
+    authenticated_as: Option<nostr::PublicKey>,
+    /// This relay's own URL, for validating the `relay` tag.
+    url: String,
 }
 
 impl SessionState {
@@ -546,6 +613,26 @@ impl SessionState {
             index,
         };
 
+        // NIP-42 read gating, ahead of the cap and of every rule: a session
+        // that may not ask this question is refused before anything decides
+        // how to answer it.
+        let gated = self
+            .script
+            .read_gate
+            .as_ref()
+            .filter(|gate| self.authenticated_as.is_none() && gate.gates(&frame))
+            .map(|gate| gate.refusal.clone());
+        if let Some(refusal) = gated {
+            let challenge = self.issue_challenge();
+            let _ = self.out.send(Outbound::Text(
+                serde_json::json!(["AUTH", challenge]).to_string(),
+            ));
+            let _ = self.out.send(Outbound::Text(
+                serde_json::json!(["CLOSED", sub_id, refusal]).to_string(),
+            ));
+            return;
+        }
+
         // A cap the relay never advertised: CLOSE the excess. Checked before
         // any rule, because a relay at its ceiling refuses the request rather
         // than answering it badly. A REQ replacing a live subscription costs
@@ -560,10 +647,18 @@ impl SessionState {
         }
 
         let reply = self.matching_reply(&frame);
+        let scope = self
+            .script
+            .read_gate
+            .as_ref()
+            .filter(|gate| gate.scope_to_involved_pubkey)
+            .and(self.authenticated_as);
         let ctx = ProgramCtx {
             sub_id: Some(sub_id.to_string()),
             event: None,
             filters,
+            scope,
+            store: self.store.clone(),
             corpus: Arc::clone(&self.corpus),
             out: self.out.clone(),
             wire: self.wire.clone(),
@@ -650,6 +745,8 @@ impl SessionState {
             sub_id: None,
             event: Some(event),
             filters: Vec::new(),
+            scope: None,
+            store: self.store.clone(),
             corpus: Arc::clone(&self.corpus),
             out: self.out.clone(),
             wire: self.wire.clone(),
@@ -657,24 +754,98 @@ impl SessionState {
         tokio::spawn(run_program(reply.steps, ctx));
     }
 
-    fn on_auth(&mut self, array: &[serde_json::Value]) {
-        let event = array
-            .get(1)
-            .and_then(|body| serde_json::from_value::<Event>(body.clone()).ok());
-        let reply = self
-            .script
-            .auth_reply
+    /// Mint the challenge this connection will validate a response against.
+    /// Stable per connection: a client that answers a challenge is answering
+    /// THIS one.
+    fn issue_challenge(&mut self) -> String {
+        self.issued_challenge
+            .get_or_insert_with(|| format!("relay-lab-challenge-{}", self.connection))
             .clone()
-            .unwrap_or_else(|| Reply::new().then_ok(""));
-        let ctx = ProgramCtx {
-            sub_id: None,
-            event,
-            filters: Vec::new(),
-            corpus: Arc::clone(&self.corpus),
-            out: self.out.clone(),
-            wire: self.wire.clone(),
+    }
+
+    /// NIP-42 `["AUTH", <kind:22242 event>]`.
+    ///
+    /// Validated properly, because a fixture that accepts any 22242 makes
+    /// every AUTH scenario pass without the client ever binding to anything:
+    /// the kind, the signature and id, the `challenge` tag against the exact
+    /// string THIS connection issued, and the `relay` tag against this
+    /// relay's own URL. Each refusal says which check failed, since "auth
+    /// failed" is not a thing a scenario can act on.
+    fn on_auth(&mut self, array: &[serde_json::Value]) {
+        let Some(body) = array.get(1) else {
+            self.wire.fault("AUTH without a body".to_string());
+            return;
         };
-        tokio::spawn(run_program(reply.steps, ctx));
+        let Ok(event) = serde_json::from_value::<Event>(body.clone()) else {
+            let _ = self.out.send(Outbound::Text(
+                serde_json::json!(["NOTICE", "invalid: unparseable AUTH event"]).to_string(),
+            ));
+            return;
+        };
+
+        if let Some(reply) = self.script.auth_reply.clone() {
+            let ctx = ProgramCtx {
+                sub_id: None,
+                event: Some(event),
+                filters: Vec::new(),
+                scope: None,
+                store: self.store.clone(),
+                corpus: Arc::clone(&self.corpus),
+                out: self.out.clone(),
+                wire: self.wire.clone(),
+            };
+            tokio::spawn(run_program(reply.steps, ctx));
+            return;
+        }
+
+        let tag_value = |name: &str| -> Option<String> {
+            event.tags.iter().find_map(|tag| {
+                let slice = tag.as_slice();
+                (slice.first().map(String::as_str) == Some(name))
+                    .then(|| slice.get(1).cloned())
+                    .flatten()
+            })
+        };
+
+        let refusal = if event.kind.as_u16() != 22242 {
+            Some(format!(
+                "invalid: an AUTH response is kind 22242, not {}",
+                event.kind.as_u16()
+            ))
+        } else if !event.verify_id() || !event.verify_signature() {
+            Some("invalid: the AUTH event does not verify".to_string())
+        } else if tag_value("challenge").as_deref() != self.issued_challenge.as_deref() {
+            Some(format!(
+                "invalid: the challenge tag is {:?}, but this connection issued {:?}",
+                tag_value("challenge"),
+                self.issued_challenge
+            ))
+        } else if !tag_value("relay")
+            .map(|relay| same_relay(&relay, &self.url))
+            .unwrap_or(false)
+        {
+            Some(format!(
+                "invalid: the relay tag is {:?}, but this relay is {:?}",
+                tag_value("relay"),
+                self.url
+            ))
+        } else {
+            None
+        };
+
+        match refusal {
+            Some(message) => {
+                let _ = self.out.send(Outbound::Text(
+                    serde_json::json!(["OK", event.id.to_hex(), false, message]).to_string(),
+                ));
+            }
+            None => {
+                self.authenticated_as = Some(event.pubkey);
+                let _ = self.out.send(Outbound::Text(
+                    serde_json::json!(["OK", event.id.to_hex(), true, ""]).to_string(),
+                ));
+            }
+        }
     }
 }
 
@@ -682,6 +853,13 @@ struct ProgramCtx {
     sub_id: Option<String>,
     event: Option<Event>,
     filters: Vec<nostr::Filter>,
+    /// The durable store, so an ingested write reaches the file.
+    store: Option<crate::RelayStore>,
+    /// When set, `Step::Stored` serves only events involving this key --
+    /// authored by it or `p`-tagged to it. Applied inside the selection
+    /// rather than left to each script, so a scenario cannot forget it and
+    /// silently prove nothing.
+    scope: Option<nostr::PublicKey>,
     corpus: Arc<Mutex<Vec<Event>>>,
     out: Out,
     wire: WireLog,
@@ -713,7 +891,7 @@ async fn run_program(steps: Vec<Step>, ctx: ProgramCtx) {
                 let Some(sub_id) = ctx.require_sub("Step::Stored") else {
                     return;
                 };
-                for event in select_stored(&ctx.corpus, &ctx.filters, serve) {
+                for event in select_stored(&ctx.corpus, &ctx.filters, serve, ctx.scope) {
                     ctx.send(serde_json::json!([
                         "EVENT",
                         sub_id,
@@ -775,6 +953,12 @@ async fn run_program(steps: Vec<Step>, ctx: ProgramCtx) {
             }
             Step::Ingest => {
                 if let Some(event) = ctx.event.clone() {
+                    // Durable first: a write acknowledged but not yet on disk
+                    // would be exactly the lie `ok_but_forget` exists to make
+                    // deliberate.
+                    if let Some(store) = &ctx.store {
+                        store.append([event.clone()]);
+                    }
                     ctx.corpus
                         .lock()
                         .unwrap_or_else(|p| p.into_inner())
@@ -837,8 +1021,13 @@ fn select_stored(
     corpus: &Arc<Mutex<Vec<Event>>>,
     filters: &[nostr::Filter],
     serve: Serve,
+    scope: Option<nostr::PublicKey>,
 ) -> Vec<Event> {
     let held = corpus.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let held: Vec<Event> = match scope {
+        None => held,
+        Some(key) => held.into_iter().filter(|e| involves(e, key)).collect(),
+    };
     let mut selected: Vec<Event> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
@@ -871,6 +1060,32 @@ fn select_stored(
         selected.truncate(n);
     }
     selected
+}
+
+/// NIP-42's `relay` tag is compared as a URL, not as a string: a trailing
+/// slash and a case difference in the scheme are the same relay, and refusing
+/// over one would be this fixture inventing a rule the spec does not have.
+fn same_relay(claimed: &str, ours: &str) -> bool {
+    let normalize = |value: &str| {
+        value
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    normalize(claimed) == normalize(ours)
+}
+
+/// True iff `event` involves `key`: authored by it, or `p`-tagged to it.
+/// `strfry`'s `restrictReadToInvolvedPubkey` in one function.
+fn involves(event: &Event, key: nostr::PublicKey) -> bool {
+    if event.pubkey == key {
+        return true;
+    }
+    let hex = key.to_hex();
+    event.tags.iter().any(|tag| {
+        let slice = tag.as_slice();
+        slice.first().map(String::as_str) == Some("p")
+            && slice.get(1).map(String::as_str) == Some(hex.as_str())
+    })
 }
 
 /// Wait for the relay to be reachable at all. Not usually needed -- the

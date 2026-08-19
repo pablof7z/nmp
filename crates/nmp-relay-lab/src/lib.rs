@@ -101,6 +101,9 @@
 //! | misbehave once, then behave | `.on_nth_req(1, Req::any(), Reply::closed("error: try again"))` |
 //! | advertise NIP-11 limits | `.nip11(Nip11::limits(Some(3), None))` |
 //! | cap subscriptions silently | `.cap_subscriptions(3, "error: too many")` |
+//! | gate READS behind NIP-42 | `.gate_reads(ReadGate::everything())` |
+//! | gate only some kinds | `.gate_reads(ReadGate::kinds([4, 1059]))` |
+//! | serve only what involves you | `.gate_reads(ReadGate::everything().scoped_to_involved_pubkey())` |
 //!
 //! # Honesty
 //!
@@ -132,11 +135,16 @@
 #![forbid(unsafe_code)]
 
 pub mod clock;
+#[cfg(feature = "external-relay")]
+pub mod external;
+pub mod probe;
 mod relay;
+mod store;
 mod script;
 mod wire;
 pub mod ws;
 
 pub use relay::{wait_reachable, RelayLab};
-pub use script::{forge, Ev, Nip11, Reply, Req, ReqFrame, Script, Serve, Step, Upgrade};
+pub use store::RelayStore;
+pub use script::{forge, Ev, Nip11, ReadGate, Reply, Req, ReqFrame, Script, Serve, Step, Upgrade};
 pub use wire::{Direction, WireFrame, WireLog, WireRecord, WireReq};

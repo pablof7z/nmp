@@ -21,6 +21,16 @@ description = "A scriptable in-process NIP-01 relay: the test writes the downstr
 #    crossed the boundary by hex/JSON round-trip. Speaking the wire directly
 #    against the pinned `nostr` deletes that bridge outright: a scenario hands
 #    this crate the same `nostr::Event` value the engine will observe.
+[features]
+default = []
+# A real third-party relay (`nostr-rs-relay`) as a CHILD PROCESS, for the one
+# question an in-process fixture cannot answer: does NMP interoperate with a
+# relay nobody here wrote? Non-default because it needs a binary on the
+# machine -- and a cargo feature rather than a runtime skip, because a test
+# that silently no-ops when a binary is missing is a green run that proves
+# nothing. Install with `cargo install nostr-rs-relay` (NOT --locked).
+external-relay = []
+
 [dependencies]
 nostr.workspace = true
 serde_json.workspace = true
@@ -33,10 +43,10 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "
 sha1 = "0.10"
 base64 = "0.22"
 
+[[test]]
+name = "external_relay"
+required-features = ["external-relay"]
+
 [dev-dependencies]
-# `unstable-mechanism` is needed by ONE test file (`tests/clock.rs`), and
-# needing it is the finding that file exists to record: `Engine::clock()` is
-# the only way to state what time an engine is running at, and reaching it
-# also links `nmp-router-testkit`. See `src/clock.rs` for the full statement.
-nmp = { workspace = true, features = ["unstable-mechanism"] }
+nmp.workspace = true
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }

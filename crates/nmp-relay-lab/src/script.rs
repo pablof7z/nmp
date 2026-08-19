@@ -463,6 +463,76 @@ impl Reply {
     }
 }
 
+/// Which reads this relay refuses until the session has authenticated, and
+/// what an authenticated session is then allowed to see.
+///
+/// Read gating, not write gating. The distinction is load-bearing: a relay
+/// that gates only writes has no protected READ session, so the whole class
+/// of bug where a client withholds a protected session's REQs pending an AUTH
+/// state it never builds is structurally unreachable against it. `strfry`
+/// spells these two fields `restrictedReadKinds` and
+/// `restrictReadToInvolvedPubkey`.
+#[derive(Debug, Clone, Default)]
+pub struct ReadGate {
+    /// Kinds that may not be read by an unauthenticated session. Empty means
+    /// every kind is gated, which is the whole-relay case.
+    pub kinds: BTreeSet<u16>,
+    /// Serve an authenticated session only the events that INVOLVE its own
+    /// key -- authored by it, or `p`-tagged to it.
+    ///
+    /// Without this an AUTH suite is vacuously green: a relay that challenges
+    /// everybody and then serves everybody the same rows proves that the
+    /// handshake completed and nothing else. This is what makes "the wrong
+    /// identity is served nothing" a sayable assertion.
+    pub scope_to_involved_pubkey: bool,
+    /// The exact `CLOSED` message an ungated REQ is refused with, prefix
+    /// included, because that is the string an app sees.
+    pub refusal: String,
+}
+
+impl ReadGate {
+    /// Gate every kind, and say NIP-01's own words about it.
+    #[must_use]
+    pub fn everything() -> Self {
+        Self {
+            kinds: BTreeSet::new(),
+            scope_to_involved_pubkey: false,
+            refusal: "auth-required: we can't serve this to an unauthenticated session"
+                .to_string(),
+        }
+    }
+
+    /// Gate only these kinds. Other kinds are served to anybody.
+    #[must_use]
+    pub fn kinds(kinds: impl IntoIterator<Item = u16>) -> Self {
+        Self {
+            kinds: kinds.into_iter().collect(),
+            ..Self::everything()
+        }
+    }
+
+    /// Also scope what an authenticated session sees to its own involvement.
+    #[must_use]
+    pub fn scoped_to_involved_pubkey(mut self) -> Self {
+        self.scope_to_involved_pubkey = true;
+        self
+    }
+
+    #[must_use]
+    pub fn refusing_with(mut self, message: impl Into<String>) -> Self {
+        self.refusal = message.into();
+        self
+    }
+
+    /// True iff this REQ touches a gated kind.
+    pub(crate) fn gates(&self, req: &ReqFrame) -> bool {
+        if self.kinds.is_empty() {
+            return true;
+        }
+        req.kinds().iter().any(|kind| self.kinds.contains(kind))
+    }
+}
+
 /// What this relay does with the websocket upgrade request itself.
 #[derive(Debug, Clone)]
 pub enum Upgrade {
@@ -535,6 +605,8 @@ pub struct Script {
     pub(crate) upgrade: Upgrade,
     pub(crate) subscription_cap: Option<(usize, String)>,
     pub(crate) verify_writes: bool,
+    pub(crate) read_gate: Option<ReadGate>,
+    pub(crate) store: Option<crate::RelayStore>,
 }
 
 impl Default for Script {
@@ -570,6 +642,8 @@ impl Script {
             upgrade: Upgrade::Accept,
             subscription_cap: None,
             verify_writes: true,
+            read_gate: None,
+            store: None,
         }
     }
 
@@ -648,6 +722,41 @@ impl Script {
     #[must_use]
     pub fn cap_subscriptions(mut self, n: usize, message: impl Into<String>) -> Self {
         self.subscription_cap = Some((n, message.into()));
+        self
+    }
+
+    /// Back this relay with a DURABLE store at `path`.
+    ///
+    /// The corpus is then the file: it is loaded at start, every ingested
+    /// write is appended, and it outlives both this relay and this process.
+    /// A relay restarted on the same path (`start_on_port` after
+    /// `disconnect`) comes back holding everything it held -- plus anything a
+    /// sidecar appended while it was down, which is the whole of "the relay
+    /// gained events while the client was disconnected".
+    ///
+    /// Without this a relay is in-memory and a rebind is not a restart.
+    #[must_use]
+    pub fn durable(mut self, path: impl Into<std::path::PathBuf>) -> Self {
+        self.store = Some(crate::RelayStore::at(path));
+        self
+    }
+
+    /// Refuse gated reads until the session authenticates, NIP-42 style.
+    ///
+    /// A REQ touching a gated kind on an unauthenticated session is answered
+    /// `["CLOSED", <sub-id>, "auth-required: ..."]` AND `["AUTH", <challenge>]`,
+    /// in that order. The client signs a kind:22242 event carrying that exact
+    /// challenge and this relay's URL, sends `["AUTH", <event>]`, and its
+    /// re-sent REQ is then served.
+    ///
+    /// The relay validates the response properly -- kind, signature, the
+    /// `challenge` tag against the one IT issued on THIS connection, and the
+    /// `relay` tag against its own URL. A fixture that accepts any 22242 would
+    /// make every AUTH scenario pass without the client ever binding to
+    /// anything.
+    #[must_use]
+    pub fn gate_reads(mut self, gate: ReadGate) -> Self {
+        self.read_gate = Some(gate);
         self
     }
 

@@ -1,130 +1,111 @@
-//! **The time door: what a scenario can and cannot state about *now*.**
+//! **The time door: there is no longer one.**
 //!
 //! This module holds no relay machinery. It holds the measured answer to the
 //! question a scenario asks before it can be written at all: *can I say what
-//! time this engine is running at?* The answer is "for two of the four kinds
-//! of time jump, yes, through a door no application may open".
+//! time this engine is running at?*
 //!
-//! Findings are cited against `origin/master` at the time of writing; each is
-//! a file and a symbol, not a recollection.
+//! The answer used to be "yes, through a door no application may open". It is
+//! now "no".
 //!
-//! # 1. The reducer's clock is complete, and it is not an app door
+//! # What changed
 //!
-//! `nmp_runtime::EngineClock` (`crates/nmp-runtime/src/clock.rs`) is the ONE
-//! wall-clock reading the engine thread makes. `EngineClock::now()` returns
-//! `Timestamp::now()` while unpinned and the stated instant once pinned, and
-//! it is genuinely the only such read: outside that function, `Timestamp::now()`
-//! does not appear in production code anywhere in `nmp-engine`, `nmp-runtime`,
-//! `nmp-store`, `nmp-nip11` or `nmp` (the one other hit,
-//! `nmp-runtime/src/receipt_stream.rs:449`, is inside that file's own
-//! `#[cfg(test)]` module).
+//! `Engine::clock()` was `#[doc(hidden)]` behind an `unstable-mechanism`
+//! feature. That feature was defined as
+//! `["dep:nmp-router-testkit", "nmp-engine/unstable-mechanism", ...]`, and it
+//! went when the testkit crates went. `crates/nmp/Cargo.toml` now declares
+//! exactly three features -- `default`, `bench-instrumentation`,
+//! `test-instrumentation` -- and `crates/nmp/src/` contains no clock door of
+//! any kind; the single surviving occurrence of the word is an unrelated
+//! sentence in `config.rs` about `max_publish_attempts` counting observations
+//! rather than wall-clock.
 //!
-//! `EngineClock::set` also DELIVERS an `EngineMsg::Tick`, and commands reach
-//! the engine thread over one FIFO, so a stated time is processed strictly
-//! before whatever the scenario does next — no ack, no barrier, no sleep.
-//! `advance` moves it forward, `set` may move it BACKWARD (documented and
-//! deliberate: a device whose clock is behind is a case the write plane has
-//! to survive). Its one refusal is the unix epoch, which is the unpinned
-//! sentinel.
+//! This is not a grep-only claim. `nmp-relay-lab`'s own test suite named
+//! `nmp = { features = ["unstable-mechanism"] }` and cargo refused the build:
+//! *"package `nmp-relay-lab` depends on `nmp` with feature
+//! `unstable-mechanism` but `nmp` does not have that feature."*
 //!
-//! So for the two jumps that live in the reducer, the mechanism is right:
+//! # The mechanism is intact, and further out of reach than before
 //!
-//! - **backward across a replaceable edit** — `clock.set(earlier)`.
-//! - **forward across an expiry** — `clock.advance(30 days)`, and the tick it
-//!   delivers is what makes the sweep actually run.
+//! `nmp_runtime::EngineClock` still exists and is still complete for what it
+//! covers. `EngineClock::now()` is the ONE wall-clock reading the engine
+//! thread makes; `set` delivers an `EngineMsg::Tick` over the same FIFO the
+//! caller's next command uses, so a stated time is acted on with no barrier
+//! and no sleep; `advance` moves forward and `set` may move BACKWARD, which
+//! is documented as deliberate because a device whose clock is behind is a
+//! case the write plane has to survive.
 //!
-//! What is wrong is the door. `Engine::clock()`
-//! (`crates/nmp/src/engine.rs:450`) is `#[doc(hidden)]` and behind
-//! `unstable-mechanism` — and that feature is not only a stability marker.
-//! `crates/nmp/Cargo.toml` defines it as
-//! `["dep:nmp-router-testkit", "nmp-engine/unstable-mechanism",
-//! "nmp-runtime/unstable-mechanism"]`, so **an application that wants to say
-//! what time it is links a test-fixture crate**. A reference app whose job is
-//! to design the public surface cannot use that door without the surface
-//! it is designing becoming untrue.
+//! `EngineThread::clock()` is `pub` and carries no `cfg` at all, and
+//! `EngineThread::spawn(RedbStore, usize, PoolConfig)` and
+//! `RedbStore::temporary()` are likewise `pub` and ungated. So the mechanism
+//! is reachable -- by a caller that abandons `nmp::Engine` and assembles an
+//! engine out of `nmp-runtime`, `nmp-store` and `nmp-transport` by hand.
+//!
+//! That is worse than the old situation, not better. Before, stating the time
+//! cost a feature flag on the product facade. Now it costs giving up the
+//! product facade entirely: a scenario that wants a clock must drive `Handle`
+//! instead of `Engine`, which is a different API with different nouns
+//! (`RowsReceiver` rather than `Frame`, no `observe`, no `Subscription`), so
+//! nothing written against the app's own surface can be reused. A reference
+//! app cannot do it at all without ceasing to be a reference app.
 //!
 //! ## The finding
 //!
 //! `EngineConfig` should carry the clock, the way it already carries
 //! `store_path` and the way `Engine::new_with_capabilities_and_routing`
-//! already takes an `AuthorRouteProvider`: an installed, app-supplied
-//! decision made once at construction and fixed for the engine's life. That
-//! shape is already the workspace's answer for "the app chooses the
-//! algorithm, NMP compiles in none"; a clock is the same kind of thing and
-//! has the same reason — an app on a device with a skewed clock, an app
-//! replaying a recorded session, and a scenario stating an instant all want
-//! the same seam, and today only the third has one.
+//! already takes an `AuthorRouteProvider`: an app-supplied decision made once
+//! at construction and fixed for the engine's life. That shape is already the
+//! workspace's answer for "the app chooses, NMP compiles in none".
 //!
-//! Construction-time also fixes a gap the post-construction door has: today
-//! the clock can only be stated AFTER `Engine::new` returns, so nothing that
-//! happens during store recovery can be given a stated time.
+//! Construction-time also closes a gap the deleted door never had a chance
+//! to: nothing that happens during store recovery can be given a stated time
+//! by a setter that only exists afterwards.
 //!
-//! # 2. The transport runs on a different clock, and nothing can jump it
-//!
-//! This is the larger half, and it is the one that decides whether two of the
-//! four scenarios can be written at all.
+//! # The transport runs on a different clock, and that has NOT changed
 //!
 //! `EngineClock` governs the REDUCER. The transport does not read it:
 //!
 //! - **Reconnect backoff** is `Instant::now()` in
-//!   `nmp-transport/src/pool/worker.rs::wait_before_reconnect` (`let deadline
-//!   = Instant::now() + delay`). Advancing `EngineClock` by thirty days
-//!   shortens it by nothing.
-//! - **The background-gap detector** is `SystemTime::now()`, read in the
-//!   worker at `pool/worker.rs` (`SuspendGapDetector::new(SystemTime::now(),
-//!   SUSPEND_GAP_THRESHOLD)`). The detector itself takes an injected reading
-//!   and is deterministically testable in isolation, but the worker that
-//!   feeds it reads the real clock and nothing intercepts that.
+//!   `nmp-transport/src/pool/worker.rs::wait_before_reconnect`
+//!   (`let deadline = Instant::now() + delay`).
+//! - **The background-gap detector** is `SystemTime::now()`, read in the same
+//!   worker (`SuspendGapDetector::new(SystemTime::now(), SUSPEND_GAP_THRESHOLD)`).
+//!   The detector itself takes an injected reading and is deterministically
+//!   testable in isolation; the worker that feeds it reads the real clock and
+//!   nothing intercepts that.
 //!
-//! There ARE knobs for the first one: `PoolConfig::reconnect_delay_initial`
-//! and `PoolConfig::reconnect_jitter_max`, both `Option<Duration>` and both
-//! documented as existing precisely so an integration test need not wait out
-//! the production schedule. **They are unreachable from `EngineConfig`.**
-//! `crates/nmp/src/engine.rs:238` builds the pool config as
-//! `PoolConfig { max_relays: config.max_relays, ..PoolConfig::default() }`,
-//! and the only entry points taking a whole `PoolConfig` are
-//! `Engine::from_parts*` — every one of them `#[doc(hidden)]`, behind
-//! `unstable-mechanism`, and requiring a pre-built `RedbStore` (two of the
-//! three also require a `nmp_router_testkit::FixtureRoutingFacts`).
+//! So even a caller willing to assemble an engine by hand cannot make thirty
+//! days pass for a backoff. What it CAN now do is shorten the schedule:
+//! `PoolConfig::reconnect_delay_initial` and `PoolConfig::reconnect_jitter_max`
+//! are `Option<Duration>` overrides documented as existing precisely so an
+//! integration test need not wait out the production schedule, and
+//! `EngineThread::spawn` takes a whole `PoolConfig`. They remain unreachable
+//! from `EngineConfig`, which projects only `max_relays`
+//! (`crates/nmp/src/engine.rs`: `PoolConfig { max_relays, ..default() }`).
 //!
-//! ## The consequence, stated as a number
+//! ## The second finding
 //!
-//! A reconnect scenario driving a real `nmp::Engine` through the supported
-//! facade pays [`PRODUCTION_RECONNECT_FLOOR`] of real wall-clock per retry
-//! and cannot jump it. That is not a tuning complaint: it is the difference
-//! between a reconnect scenario being ordinary and being something nobody
-//! writes.
+//! Two doors are missing, and they are not the same door. A scenario about an
+//! EXPIRY wants a stated instant; a scenario about a RECONNECT wants a
+//! compressed schedule. One knob for both would make the second lie -- a
+//! reconnect that "took" thirty days of stated time and zero real time never
+//! exercised the backoff at all.
 //!
-//! ## The finding
-//!
-//! Two doors are missing, and they are not the same door:
-//!
-//! 1. A **stated `now`** the whole engine reads — reducer AND transport —
-//!    installed at construction. `EngineClock` is the right mechanism and the
-//!    wrong scope.
-//! 2. **Transport timing as configuration.** `PoolConfig`'s two reconnect
-//!    overrides already exist and are already justified in their own doc
-//!    comments; they are simply not projected onto `EngineConfig`. This one
-//!    needs no new mechanism at all, only a field.
-//!
-//! Which of the two a scenario needs is decided by what it is about: a
-//! scenario about an EXPIRY wants a stated instant, and a scenario about a
-//! RECONNECT wants a compressed schedule. Collapsing them into one knob would
-//! make the second lie — a reconnect that "took" thirty days of stated time
-//! and zero real time never exercised the backoff at all.
+//! The second is the cheaper of the two and needs no new mechanism: project
+//! the two `PoolConfig` overrides onto `EngineConfig`.
 
 use std::time::Duration;
 
-/// The minimum real wall-clock a reconnect costs a scenario that drives a
-/// real `nmp::Engine` through `EngineConfig`, per retry, today.
+/// The minimum real wall-clock a reconnect costs a scenario driving an
+/// `nmp::Engine` built from an `EngineConfig`, per retry.
 ///
 /// `backoff::RECONNECT_DELAY_INITIAL` (3s) plus `backoff::RECONNECT_JITTER_MAX`
 /// (5s), because the jitter is a FIXED per-URL offset re-paid on every retry
-/// against that URL until it connects — an unlucky ephemeral port pays it
-/// every time. Both are overridable through `PoolConfig`; neither override is
-/// reachable from `EngineConfig`, which is the finding in this module's doc.
+/// against that URL until it connects -- an unlucky ephemeral port pays it
+/// every time.
 ///
-/// A reconnect scenario budgets against this. It is a fact about NMP as it is
-/// today, not a target: if the second finding above is acted on, this constant
-/// stops being the floor and should be deleted rather than adjusted.
+/// A scenario budgets against this. It is a fact about the FACADE, not about
+/// NMP: `PoolConfig` can already be told otherwise, and an engine assembled
+/// from `EngineThread::spawn` pays whatever it asks for. If the second finding
+/// above is acted on, this constant stops being the floor and should be
+/// deleted rather than adjusted.
 pub const PRODUCTION_RECONNECT_FLOOR: Duration = Duration::from_secs(8);
