@@ -1654,7 +1654,7 @@ impl CoreState {
                     .attribute_eose_detailed(&session, wire_id, self.clock);
                 let completed_send = completed.as_ref().map(CompletedAttribution::send_id);
                 let committed_coverage = completed.and_then(|completed| {
-                    self.persist_attributed_completion(completed, &session.relay, &mut effects)
+                    self.persist_attributed_completion(completed, &mut effects)
                 });
                 let settled = committed_coverage.is_some();
                 let terminal_demands = if let Some(send) = completed_send.filter(|_| settled) {
