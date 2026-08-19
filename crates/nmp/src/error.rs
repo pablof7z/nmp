@@ -100,6 +100,9 @@ pub enum EngineError {
     /// registrations from their replacements has been exhausted (#8). It
     /// never wraps or reuses an identity; registration fails closed instead.
     AuthCapabilityInstanceExhausted,
+    /// The signing capability offered to [`crate::Engine::add_signer`]
+    /// reported no public key, so nothing could be keyed to it.
+    SignerMissingPublicKey,
     /// A windowed [`Engine::observe`](crate::Engine::observe) declared an
     /// `initial` window size greater than its `max` ceiling (#485). Caught
     /// before the engine is touched; zero sizes are unrepresentable via
@@ -195,6 +198,9 @@ impl std::fmt::Display for EngineError {
             }
             Self::AuthCapabilityInstanceExhausted => {
                 write!(f, "AUTH capability instance space exhausted")
+            }
+            Self::SignerMissingPublicKey => {
+                write!(f, "signing capability has no public key")
             }
             Self::WindowInitialExceedsMax { initial, max } => {
                 write!(f, "window initial size {initial} exceeds its max {max}")
@@ -295,6 +301,19 @@ impl EngineError {
                 Self::AuthCapabilityRegistryFull { limit }
             }
             nmp_runtime::AddAuthPolicyError::EngineShuttingDown => Self::EngineClosed,
+        }
+    }
+
+    pub(crate) fn from_add_signer_error(error: nmp_runtime::AddSignerError) -> Self {
+        match error {
+            nmp_runtime::AddSignerError::MissingPublicKey => Self::SignerMissingPublicKey,
+            nmp_runtime::AddSignerError::CapabilityInstanceExhausted => {
+                Self::AuthCapabilityInstanceExhausted
+            }
+            nmp_runtime::AddSignerError::RegistryFull { limit } => {
+                Self::AuthCapabilityRegistryFull { limit }
+            }
+            nmp_runtime::AddSignerError::EngineShuttingDown => Self::EngineClosed,
         }
     }
 }
