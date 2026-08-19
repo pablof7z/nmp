@@ -121,6 +121,7 @@ pub use diagnostics::{
 pub use engine::RelayInformationRequestError;
 pub use engine::{
     AuthPolicyRegistration, CancelWriteError, CancelWriteOutcome, Engine, SignEventRequest,
+    SignerRegistration,
 };
 pub use error::EngineError;
 pub use nmp_grammar::{

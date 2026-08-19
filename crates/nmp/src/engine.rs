@@ -88,6 +88,30 @@ impl std::fmt::Debug for AuthPolicyRegistration {
     }
 }
 
+/// Opaque ownership proof for one exact signer installation. Installing a
+/// signer for the same key again replaces it and invalidates this value; a
+/// stale clone can never detach the replacement.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SignerRegistration {
+    inner: nmp_runtime::SignerRegistration,
+}
+
+impl SignerRegistration {
+    /// The account identity this signer signs for.
+    #[must_use]
+    pub fn public_key(&self) -> PublicKey {
+        self.inner.public_key()
+    }
+}
+
+impl std::fmt::Debug for SignerRegistration {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignerRegistration")
+            .field("public_key", &self.public_key())
+            .finish_non_exhaustive()
+    }
+}
+
 /// One event body to sign with the current account without publishing it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignEventRequest {
@@ -382,6 +406,47 @@ impl Engine {
         registration: &AuthPolicyRegistration,
     ) -> Result<bool, EngineError> {
         self.with_handle(|handle| handle.remove_auth_policy(registration.inner.clone()))
+    }
+
+    /// Install an app-supplied signing capability for the key it names.
+    ///
+    /// This is the door a signer that is not an in-process private key comes
+    /// through -- a remote bunker, a browser extension, a hardware device.
+    /// The capability states its own public key, and
+    /// [`SigningCapability::sign`](crate::SigningCapability::sign) returns a
+    /// pollable operation rather than blocking, so a signer that has to ask a
+    /// human resolves on its own thread.
+    ///
+    /// Installing for a key that already has a signer replaces it and
+    /// invalidates the prior registration. Accepted writes keep the identity
+    /// they were frozen with and are never retargeted: a write parked waiting
+    /// for this exact key proceeds once the capability attaches. Shares the
+    /// finite [`EngineConfig::max_auth_capabilities`](crate::EngineConfig::max_auth_capabilities)
+    /// ceiling with account and AUTH-policy registrations.
+    pub fn add_signer<S>(&self, signer: S) -> Result<SignerRegistration, EngineError>
+    where
+        S: nmp_signer::SigningCapability + Send + Sync + 'static,
+    {
+        let registration = self.with_handle(|handle| {
+            handle
+                .add_signer(signer)
+                .map_err(EngineError::from_add_signer_error)
+        })??;
+        Ok(SignerRegistration {
+            inner: registration,
+        })
+    }
+
+    /// Detach only the exact signer installation proven by `registration`.
+    ///
+    /// Accepted writes keep their frozen identity and go back to waiting
+    /// rather than failing. A stale or repeated removal returns `Ok(false)`
+    /// and cannot detach a replacement installed for the same key.
+    pub fn remove_signer(
+        &self,
+        registration: &SignerRegistration,
+    ) -> Result<bool, EngineError> {
+        self.with_handle(|handle| handle.remove_signer(registration.inner.clone()))
     }
 
     /// Sign one immutable unsigned event through the current session
