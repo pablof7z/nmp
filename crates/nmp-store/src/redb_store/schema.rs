@@ -88,7 +88,6 @@ pub(super) const SCHEMA_VERSION_KEY: &str = "schema_version";
 pub(super) const NEXT_EVENT_KEY: &str = "next_event_key";
 pub(super) const NEXT_RELAY_KEY: &str = "next_relay_key";
 pub(super) const POSTINGS_NEXT_RUN_ID: &str = "postings_next_run_id";
-pub(super) const POSTINGS_READY: &str = "postings_query_ready";
 /// The ONE exact current schema epoch (#867). NMP carries no persistent-schema
 /// compatibility obligation in this architecture cut: there is no pre-current
 /// decoder, no migration, no adoption, and no destructive reset door. A

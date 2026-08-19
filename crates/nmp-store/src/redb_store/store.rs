@@ -12,7 +12,7 @@ use super::query::{OrderedIndex, OrderedPlan};
 use super::schema::{
     decode_relay_row, event_local_key, event_row_key, observation_bounds, observation_key,
     observation_relay_key, persist_err, unsupported_schema, EventKey, RelayKey, ADDR_INDEX,
-    COVERAGE, EVENTS, EVENT_IDS, EXPIRATION_INDEX, POSTINGS_CATALOG, POSTINGS_READY,
+    COVERAGE, EVENTS, EVENT_IDS, EXPIRATION_INDEX, POSTINGS_CATALOG,
     POSTINGS_SEGMENTS, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_DISPLACED, PUBLISH_QUEUE_INTENTS,
     PUBLISH_QUEUE_KIND5_CLAIMS, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS,
@@ -34,7 +34,7 @@ use super::{
     RequiredLockedFileBackend, StoreOwnership, StoredEvent, StoredEventView, Timestamp,
 };
 use nostr::secp256k1::schnorr::Signature;
-use redb::{ReadableDatabase, ReadableTable, ReadableTableMetadata, TableHandle};
+use redb::{ReadableDatabase, ReadableTable, TableHandle};
 use std::sync::{Arc, Mutex};
 
 /// NMP's complete durable-store implementation. One Redb database, MVCC, ACID.
@@ -833,7 +833,6 @@ impl RedbStore {
                 write_txn.open_table(SEMANTIC_OPERATIONS)?;
                 write_txn.open_table(SEMANTIC_MATERIALIZATION_HIGH_WATER)?;
                 let mut store_meta = write_txn.open_table(STORE_META)?;
-                store_meta.insert(POSTINGS_READY, 1)?;
                 store_meta.insert(SCHEMA_VERSION_KEY, SCHEMA_VERSION)?;
             }
             write_txn.commit()?;
@@ -1139,99 +1138,6 @@ impl RedbStore {
                 relay_cache,
             )?,
         })
-    }
-
-    /// Merge the planner's chosen packed prefix lists. Once `limit` visible
-    /// rows survive the borrowed binary post-filter, no older posting or event
-    /// value is touched.
-    pub(super) fn query_ordered_ids(
-        &self,
-        read_txn: &redb::ReadTransaction,
-        plan: &OrderedPlan,
-        filter: &Filter,
-        limit: usize,
-    ) -> Result<Vec<EventId>, PersistenceError> {
-        let events = read_txn.open_table(EVENTS).map_err(persist_err)?;
-        let event_ids = read_txn.open_table(EVENT_IDS).map_err(persist_err)?;
-        let publish_queue_suppress = read_txn
-            .open_table(PUBLISH_QUEUE_SUPPRESS)
-            .map_err(persist_err)?;
-        let suppression_possible = !publish_queue_suppress.is_empty().map_err(persist_err)?;
-        let since = filter.since.map(|ts| ts.as_secs()).unwrap_or(0);
-        let until = filter.until.map(|ts| ts.as_secs()).unwrap_or(u64::MAX);
-        let prepared_filter = PreparedFilter::new(filter);
-        let needs_event_value = prepared_filter.needs_event_value_after_index(plan.index.matched())
-            || suppression_possible;
-        let mut project_if_visible =
-            |event_key: EventKey, event_id: EventId| -> Result<Option<EventId>, PersistenceError> {
-                let canonical_key = event_ids
-                    .get(event_id.as_bytes())
-                    .map_err(persist_err)?
-                    .map(|guard| guard.value());
-                if canonical_key != Some(event_key) {
-                    return Err(PersistenceError::new(format!(
-                        "ordered index disagrees with canonical id map for {event_id}"
-                    )));
-                }
-                if !needs_event_value {
-                    return Ok(Some(event_id));
-                }
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                self.query_event_values.fetch_add(1, Ordering::Relaxed);
-                let Some(value) = events
-                    .get(event_row_key(event_key).as_slice())
-                    .map_err(persist_err)?
-                else {
-                    return Err(PersistenceError::new(format!(
-                        "ordered index points at missing canonical event {event_key}"
-                    )));
-                };
-                let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-                    PersistenceError::new(format!(
-                        "decode canonical event view {event_key}: {error:?}"
-                    ))
-                })?;
-                let matches = view
-                    .matches_prepared_filter_after_index(&prepared_filter, plan.index.matched())
-                    .map_err(|error| {
-                        PersistenceError::new(format!(
-                            "match canonical event against filter {event_key}: {error:?}"
-                        ))
-                    })?;
-                if !matches {
-                    return Ok(None);
-                }
-                if suppression_possible {
-                    #[cfg(any(test, feature = "test-instrumentation"))]
-                    self.examined_rows.fetch_add(1, Ordering::Relaxed);
-                    let event = view.materialize_event().map_err(|error| {
-                        PersistenceError::new(format!(
-                            "materialize canonical event {event_key}: {error:?}"
-                        ))
-                    })?;
-                    if is_suppressed_in_txn(&publish_queue_suppress, &event)? {
-                        return Ok(None);
-                    }
-                }
-                Ok(Some(event_id))
-            };
-
-        scan_packed(
-            read_txn,
-            PackedScan {
-                family: packed_family(plan.index),
-                prefixes: &plan.prefixes,
-                since,
-                until,
-                before: None,
-                limit: Some(limit),
-            },
-            || {
-                #[cfg(any(test, feature = "test-instrumentation"))]
-                self.query_index_rows.fetch_add(1, Ordering::Relaxed);
-            },
-            &mut project_if_visible,
-        )
     }
 
     pub(super) fn query_ordered(

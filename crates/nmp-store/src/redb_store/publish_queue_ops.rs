@@ -1699,33 +1699,6 @@ pub(super) fn accept_refused(
     commit_prepared(write_txn, receipt_id)
 }
 
-/// Read every retained receipt back out in receipt-id order (#1039).
-pub(super) fn enumerate_publish_queue_receipts(
-    store: &RedbStore,
-) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
-    let receipts = match read_txn.open_table(PUBLISH_QUEUE_RECEIPTS) {
-        Ok(table) => table,
-        Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
-        Err(error) => return Err(persist_err(error)),
-    };
-    let mut out = Vec::new();
-    for row in receipts.iter().map_err(persist_err)? {
-        let (key, value) = row.map_err(persist_err)?;
-        let receipt_id = u64::from_be_bytes(*key.value());
-        let record =
-            decode_receipt(value.value()).map_err(|error| codec_error("receipt", error))?;
-        out.push(crate::PublishQueueReceipt {
-            receipt_id,
-            intent_id: record.intent_id,
-            expected_pubkey: record.expected_pubkey,
-            accepted_at: record.accepted_at,
-            payload: record.payload,
-        });
-    }
-    Ok(out)
-}
-
 /// Read one bounded page of retained receipts in receipt-id order (#903).
 /// The range begins after the exclusive cursor, so a later page does not
 /// walk or materialize the prefix the caller already consumed.

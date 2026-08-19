@@ -668,7 +668,7 @@ fn newer_replaceable_write_retires_offline_work_before_any_attempt() {
             store.reattach_receipt(older_receipt).unwrap().is_none(),
             "a safely-unsent predecessor is obsolete data, not retained receipt history"
         );
-        assert_eq!(store.enumerate_publish_queue_receipts().unwrap().len(), 1);
+        assert_eq!(store.publish_queue_receipts_after(None, u8::MAX).unwrap().len(), 1);
         assert!(store
             .recover_publish_queue_lanes(older_intent)
             .unwrap()
@@ -1081,7 +1081,7 @@ fn already_expired_refusal_cannot_be_retained_as_a_receipt() {
         let (frozen, _) = compose(&k, Kind::Metadata, "already expired", 100);
         let result = store.accept_refused(frozen.id, k.public_key(), RefuseReason::AlreadyExpired);
         assert!(result.is_err(), "expiry must not cross the custody door");
-        assert!(store.enumerate_publish_queue_receipts().unwrap().is_empty());
+        assert!(store.publish_queue_receipts_after(None, u8::MAX).unwrap().is_empty());
     });
 }
 
@@ -1835,7 +1835,7 @@ fn removing_a_queue_entry_forgets_it_and_refuses_while_work_is_open() {
         let open_receipt = open_outcome.journaled_receipt_id().expect("journaled");
 
         assert!(store
-            .enumerate_publish_queue_receipts()
+            .publish_queue_receipts_after(None, u8::MAX)
             .unwrap()
             .iter()
             .any(|receipt| receipt.receipt_id == refused));

@@ -20,8 +20,6 @@ use super::postings::{
     RunEvent, RunMeta, SegmentView, MAX_DEATH_BLOCKS,
 };
 use super::query::tag_index_prefix;
-#[cfg(test)]
-use super::schema::POSTINGS_READY;
 use super::schema::{
     persist_err, EventKey, POSTINGS_CATALOG, POSTINGS_NEXT_RUN_ID, POSTINGS_SEGMENTS, STORE_META,
 };
@@ -51,16 +49,6 @@ pub(super) fn assert_packed_integrity(
     let segments = read_txn
         .open_table(POSTINGS_SEGMENTS)
         .expect("audit packed segments");
-    let meta = read_txn
-        .open_table(STORE_META)
-        .expect("audit packed metadata");
-    assert_eq!(
-        meta.get(POSTINGS_READY)
-            .expect("audit packed readiness")
-            .expect("packed readiness exists")
-            .value(),
-        1
-    );
 
     let metas = catalog_run_metas(&catalog).expect("read packed run catalog");
     validate_run_metas(&metas).expect("packed run ranges are valid");
