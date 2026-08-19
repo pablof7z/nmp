@@ -12,7 +12,7 @@ owns:
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/outbox.md
-  - docs/bug-class-ledger.md
+  - docs/builder/28-patterns.md
 ---
 
 # Routing knowledge and settlement

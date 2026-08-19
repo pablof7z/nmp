@@ -13,7 +13,7 @@
 /// replay pages) and the
 /// governed sign-only operation's blocking/completion doors -- no `relays:`
 /// parameter, no open-REQ method anywhere on it
-/// (ledger #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
+/// (guarantee #2/#3 preserved at the top edge; `add_signer`/`remove_signer` are
 /// M4's deliberate lifecycle widening, closing the multi-account and remote
 /// signer detach gaps; `observe_diagnostics` is M5's --
 /// read-only, off the data path, never influences routing/delivery). The two

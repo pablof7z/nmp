@@ -6,7 +6,7 @@
 import NMPFFI
 
 /// The ordered `WriteFact` facts a single `publish` call's write reaches
-/// (ledger #9 -- enqueue is not converged), pulled from its durable receipt
+/// (guarantee #9 -- enqueue is not converged), pulled from its durable receipt
 /// handle (#680). Live delivery is finite: a paused consumer that falls
 /// behind receives `NMPError.factStreamLagged` and can reattach the named
 /// receipt to replay the canonical persisted history. It finishes (`nil`) when

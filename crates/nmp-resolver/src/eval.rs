@@ -179,7 +179,7 @@ pub(crate) fn resolve_reactive(
 }
 
 /// Fold a `SetAlgebra` over resolved operand sets. `Diff` is the first
-/// operand minus the union of the rest (bug-class ledger #11: "follows
+/// operand minus the union of the rest (guarantee #11: "follows
 /// MINUS mutes").
 pub(crate) fn resolve_setop(op: SetAlgebra, operands: &[&ResolvedSet]) -> ResolvedSet {
     match op {

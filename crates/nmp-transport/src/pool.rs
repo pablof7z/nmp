@@ -468,7 +468,7 @@ pub enum DisconnectReason {
 }
 
 /// Events the pool pushes to its [`PoolEventSink`]. Reconnect always mints
-/// a NEW generation for the slot (ledger #2/#3/#4) — `Connected` carries
+/// a NEW generation for the slot (guarantee #2/#3/#4) — `Connected` carries
 /// the fresh [`RelayHandle`].
 #[derive(Debug, Clone)]
 pub enum PoolEvent {

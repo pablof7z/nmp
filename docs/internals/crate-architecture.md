@@ -119,7 +119,7 @@ open-questions section.
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-store` | the durable store. Its single redb transaction spans event AND publish-queue tables (`write_ops.rs`, bug-class #9's falsifier) — the strongest do-not-split in the workspace | transport, router, resolver, engine, protocol crates | correct today |
+| `nmp-store` | the durable store. Its single redb transaction spans event AND publish-queue tables (`write_ops.rs`, what makes guarantee #9 hold) — the strongest do-not-split in the workspace | transport, router, resolver, engine, protocol crates | correct today |
 | `nmp-resolver` | evaluating `Filter` → `ConcreteFilter`s, demand diffing | router (siblings, not layers) | correct today |
 | `nmp-router` | demand → per-relay subscription plans (its 3-symbol `nmp-store` edge is deliberate: durable coverage identity) | transport, protocol crates | correct today |
 | `nmp-transport` | the generational WebSocket pool | store, router, resolver, protocol crates | correct today |

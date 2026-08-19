@@ -118,7 +118,7 @@ impl EventBuilder {
 /// The event payload of a write intent. VISION P states signing and
 /// publishing are ORTHOGONAL stages, not one linear lifecycle: a caller
 /// that already holds a validly-signed event (e.g. republishing a
-/// previously-signed private event to a recomputed relay set, ledger #6, or
+/// previously-signed private event to a recomputed relay set, guarantee #6, or
 /// sending a followee's note verbatim to an archive relay) supplies
 /// `Signed` and skips `Effect::RequestSign` entirely, going straight to
 /// routing; a caller describing an event supplies a builder and the reducer
@@ -390,7 +390,7 @@ pub enum WriteRouting {
     /// "Use these exact relays and that is that, no matter what else
     /// happens."
     ///
-    /// Ledger #6's fail-closed discipline lives here, structurally:
+    /// Guarantee #6's fail-closed discipline lives here, structurally:
     ///
     /// - **Verbatim execution.** Resolution yields exactly these relays,
     ///   every time. The directory is never consulted, so there is nothing

@@ -53,7 +53,7 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   queries, router caps, and the expandable observation window are bounded, but
   graph, derived-set, wire, relay, ordinary-result, receipt, ingestion, and
   scheduler bounds do not share an explicit shortfall contract. Silent first-N
-  behavior is forbidden (ledger #17).
+  behavior is forbidden (guarantee #17).
 - **A pending cancel hook that blocks forever blocks `EngineThread::join`.**
   The runtime's finite drain cancels every live policy/signer operation without
   polling and never blocks the engine thread on app code, but safe Rust cannot
@@ -80,7 +80,7 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 - **Decrypt path is absent end-to-end (M3-C).** Ingest never asks for a
   decryption and there is no `EngineMsg` that could carry a plaintext result back;
   the reducer emits no decrypt effect and the runtime has nothing to execute.
-  Needed for reading NIP-17 DMs / private NIP-51 items (ledger #12); #6 owns the
+  Needed for reading NIP-17 DMs / private NIP-51 items (guarantee #12); #6 owns the
   async sign/encrypt/decrypt capability design that would supply both halves.
 
 ## Observation & delivery

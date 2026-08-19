@@ -1,13 +1,13 @@
 //! `nmp-store` — NMP's one concrete durable store, [`RedbStore`]: the one
-//! mutating door (VISION §4 "the store", bug-class ledger #1), extended in
+//! mutating door (VISION §4 "the store", guarantee #1), extended in
 //! M3 step A1 with persistence, provenance merge, and coverage watermarks
-//! (VISION §7 ledger #7 / #5).
+//! (VISION §7, guarantee #7 / #5).
 //!
 //! Insert runs **dedup-by-id first**, THEN replaceable/addressable
 //! supersession (M1 plan §2.2): winner = newest `created_at`, tie-break
 //! lexicographically-smallest id. `query` reuses `nostr::Filter::match_event`
 //! — no hand-rolled event matching. A duplicate-id insert now MERGES relay
-//! provenance into the stored row (ledger #5) instead of being a no-op.
+//! provenance into the stored row (guarantee #5) instead of being a no-op.
 //!
 //! Coverage (`record_coverage`/`get_coverage`) implements the store half of
 //! `docs/design/query-demand-and-evidence.md` and issue #816's
@@ -170,7 +170,7 @@ pub enum SigState {
 }
 
 /// A locally-authored row's provenance (issue #2's "`Local` origin; a row
-/// *field*, exactly ledger #5's shape"). Set iff this row entered through
+/// *field*, exactly guarantee #5's shape"). Set iff this row entered through
 /// [`RedbStore::accept_write`] rather than [`RedbStore::insert`].
 ///
 /// `owners` is a SET, not a single `IntentId` (architecture review
@@ -203,7 +203,7 @@ pub struct LocalOrigin {
 
 /// Per-relay provenance for one stored event: which relays have delivered
 /// this exact event id, and the latest wall-clock time each one did so
-/// (ledger #5). A first-class field of the stored row, not a sidecar.
+/// (guarantee #5). A first-class field of the stored row, not a sidecar.
 /// `local` is `Some` iff this row has ever been locally accepted (issue
 /// #2) — it is preserved (never cleared) across a later relay echo merging
 /// into `seen`, AND across every owning intent eventually being
@@ -313,7 +313,7 @@ pub use nmp_grammar::sentinel_signature;
 /// still replace the sentinel, flip every co-owner to `Signed`, drop the
 /// displaced recovery stash, and — for a pending kind:5 draft — turn
 /// provisional suppression claims into PERMANENT tombstones. That is the
-/// convention-only failure class `docs/bug-class-ledger.md:3-5` rules out —
+/// convention-only failure class `docs/builder/28-patterns.md` rules out —
 /// exactly the kind of precondition that must be enforced by a type, never
 /// by a doc comment alone.
 ///
@@ -403,7 +403,7 @@ impl VerifiedSignature {
 }
 
 /// A stored event plus its provenance. What `query` returns — every caller
-/// gets provenance for free, never a bare `Event` (ledger #5's falsifier:
+/// gets provenance for free, never a bare `Event` (guarantee #5's falsifier:
 /// no `query` path returns an event without its provenance populated).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEvent {
@@ -460,7 +460,7 @@ pub enum InsertOutcome {
     Inserted,
     /// This exact event id is already present. `provenance_grew` is `true`
     /// iff the merge actually changed the provenance map (M1's no-op stub
-    /// becomes a real merge in M3 — ledger #5).
+    /// becomes a real merge in M3 — guarantee #5).
     Duplicate {
         provenance_grew: bool,
         /// Locally-accepted intent owners that this verified relay copy

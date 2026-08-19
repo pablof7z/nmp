@@ -195,8 +195,8 @@ impl ConcreteFilter {
 /// the same [`ConcreteFilter`] requested under two different
 /// [`ReadRouting`]/authenticated-identity pairs is TWO distinct atoms —
 /// distinct refcount entries, distinct [`DescriptorHash`]es, distinct
-/// coverage/attribution identity. This is the anti-alias fix bug-class
-/// ledger #18 names: `ConcreteFilter::hash()` alone can never distinguish
+/// coverage/attribution identity. This is the anti-alias fix guarantee
+/// #18 names: `ConcreteFilter::hash()` alone can never distinguish
 /// them (identical bytes hash identically by design), so identity has to
 /// widen one level up, here, rather than by mutating `ConcreteFilter`
 /// itself (which stays pure selection — untouched by this type).
@@ -417,7 +417,7 @@ mod tests {
 
     /// #106's anti-alias core: the identical `ConcreteFilter` under two
     /// distinct `ReadRouting`s must hash to two distinct
-    /// `ContextualAtom` identities -- this is precisely the bug-class #18
+    /// `ContextualAtom` identities -- this is precisely the guarantee #18
     /// collapse (same selection, different identity, same atom)
     /// the whole `Demand`/`ContextualAtom` widening exists to close.
     #[test]

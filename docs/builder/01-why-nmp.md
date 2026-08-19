@@ -95,8 +95,8 @@ Core does not define a preferred feed or content kind.
 
 The earlier NMP design exposed a wide application framework and then relied on
 doctrine, lints, and audits to police the boundary. The rewrite takes the
-opposite approach: a bug class is closed only when the supported facade makes
-the bad path unreachable and a falsifier proves that claim.
+opposite approach: a bug class is closed by making the bad path unreachable on
+the supported facade, most often by there being no API that can express it.
 
 Examples of that standard include:
 
@@ -107,10 +107,10 @@ Examples of that standard include:
 - signer results cannot mutate a frozen event body; and
 - an empty local result is never represented as global Nostr completeness.
 
-The [bug-class ledger](../bug-class-ledger.md) records which guarantees are
-built, partial, or still target work. Examples in this guide describe the
-coherent v2 North Star; [Current implementation status](03-status-map.md) is the
-shipping truth.
+[Guarantees and the bugs they exclude](28-patterns.md) records each excluded
+bug class and its mechanism. Examples in this guide describe the coherent v2
+North Star; [Current implementation status](03-status-map.md) is the shipping
+truth.
 
 ## The practical test
 

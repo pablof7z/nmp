@@ -28,7 +28,7 @@ use super::{EventId, LaneWorkerProjection, PendingWrite, ReceiptId, RelayUrl};
 /// this relay" without a scan.
 #[derive(Default)]
 pub(super) struct PendingWrites {
-    /// Publish queue (§3.4 / VISION §7 ledger #6/#9). Keyed by `ReceiptId`
+    /// Publish queue (§3.4 / VISION §7, guarantee #6/#9). Keyed by `ReceiptId`
     /// from `Publish` through to the last terminal per-relay status.
     pending: HashMap<ReceiptId, PendingWrite>,
     /// O(1) reverse index of each row's own `intent_id` (epic #507 finding

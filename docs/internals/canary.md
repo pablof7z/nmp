@@ -581,7 +581,7 @@ the persisted `NMPSessionPayload` restored, then proves in one run (~2.7s):
   would pass for rows that survived as bare keys;
 - the query reports the dead relay honestly (`connecting`, never
   `requesting`/`finishedStoredEvents`/`coverageSatisfied`), so a stale feed is
-  not readable as a complete one (bug-class ledger #7);
+  not readable as a complete one (guarantee #7);
 - `reconciledThrough` is still present across the restart. `SourceEvidence`'s
   own doc names this case — a source can be down while still carrying a
   perfectly good watermark from before it dropped — and it is what makes an

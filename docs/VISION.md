@@ -361,4 +361,4 @@ The next work is ordered by dependency:
    overload, signer-offline, and protocol-module scenarios.
 
 GitHub Issues are the tactical queue. `docs/known-gaps.md` states what remains
-unbuilt; `docs/bug-class-ledger.md` claims only mechanisms with real proof.
+unbuilt.

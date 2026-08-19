@@ -58,6 +58,6 @@ longer it lives.
 
 ## Everything else
 
-`AGENTS.md` — cold-start reading order, the issue-first rule, the six
-architecture review gates, and working discipline (isolated worktrees, one PR
-per coherent unit, never push to `master` from a shared build).
+`AGENTS.md` — cold-start reading order, the ten standing conventions in full,
+and working discipline (isolated worktrees, one PR per coherent unit, the
+commit message carries the why, never push to `master` from a shared build).

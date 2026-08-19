@@ -52,7 +52,7 @@ pub struct SetOp {
 }
 
 /// Set algebra over resolved value sets. `Diff` is non-negotiable: it is
-/// what makes "follows MINUS mutes" declarable (bug-class ledger #11).
+/// what makes "follows MINUS mutes" declarable (guarantee #11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SetAlgebra {
     /// Union of all operands.

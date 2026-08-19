@@ -113,7 +113,7 @@ fn wait_for_rows(
 }
 
 /// Waits until `pred` matches some status on the stream (never assumes the
-/// FIRST value is a terminal -- ledger #9).
+/// FIRST value is a terminal -- guarantee #9).
 fn wait_for_status(
     rx: &FifoReceiver<WriteFact>,
     timeout: Duration,

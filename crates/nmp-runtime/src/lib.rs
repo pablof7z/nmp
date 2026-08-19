@@ -3947,7 +3947,7 @@ impl DiagnosticsHandle {
 }
 
 /// The cheap, `Clone + Send` app-facing handle. Its deliberately narrow
-/// vocabulary preserves ledger #2/#3 at the top edge. M4 §5 added signer
+/// vocabulary preserves guarantee #2/#3 at the top edge. M4 §5 added signer
 /// registration to close the multi-account gap; M5 added read-only
 /// diagnostics; #464 adds governed sign-only without creating a third
 /// workload noun or bypassing the current-account signing-provider boundary:

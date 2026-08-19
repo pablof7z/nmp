@@ -2296,7 +2296,7 @@ This is a dependency order, not a promise that each item is already designed:
    cost is negligible or measured product workloads require it.
 9. Project only the capability workflows and truthful receipt facts across
    FFI, Swift, and Kotlin; do not expose raw opaque bytes as an app API.
-10. Update README, known gaps, bug-class ledger, feature corpus, supported
+10. Update README, known gaps, feature corpus, supported
     surfaces, and stale architecture documents only after the behavior is
     actually built and proven.
 

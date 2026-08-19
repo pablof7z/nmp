@@ -24,7 +24,7 @@ const PUBLISH_QUEUE_META: TableDefinition<&[u8], &[u8]> =
 ///
 /// This is a real inventory gate, not a whitelist: it compares by EQUALITY,
 /// so a table added without a reason fails here by name. #1248 §4 asked for
-/// exactly that, because none of the six architecture review gates fires on a
+/// exactly that, because no standing convention fires on a
 /// new durable table — a longer-lived and harder-to-reverse commitment than
 /// most public types, since it is bytes on a user's disk under an epoch with
 /// no migration path.

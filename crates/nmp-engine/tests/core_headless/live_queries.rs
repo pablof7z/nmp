@@ -619,7 +619,7 @@ fn eose_records_coverage_watermark_and_non_eose_does_not() {
 /// The selection here is deliberately author-bearing while the routing is
 /// `Auto`, because that pairing is what a shape-derived key would get wrong:
 /// nothing about "this filter binds authors" may influence which coverage
-/// row answers. This is ledger #18's store-side half.
+/// row answers. This is guarantee #18's store-side half.
 #[test]
 fn get_coverage_distinguishes_auto_from_an_explicit_relay_set() {
     let a = Keys::generate();

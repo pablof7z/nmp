@@ -291,7 +291,7 @@ pub enum ReceiptReattachment {
 impl Handle {
     /// Enqueue a write. The returned [`ReceiptStream`] carries the stable
     /// store-issued receipt id and the event id acceptance froze, AND streams
-    /// every `WriteFact` this intent ever reaches (ledger #9 — enqueue is not
+    /// every `WriteFact` this intent ever reaches (guarantee #9 — enqueue is not
     /// converged; the FIRST value is never a terminal for a durable/
     /// at-most-once intent).
     /// `Ephemeral` also yields receipt facts, but owns no publish queue

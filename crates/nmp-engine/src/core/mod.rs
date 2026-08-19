@@ -1266,7 +1266,7 @@ pub enum Effect {
     /// throwaway probe filter, and the hex initial message.
     StartProbe(RequestAttemptId, RelayUrl, SubId, ConcreteFilter, String),
     /// Place a real `NEG-OPEN` after the live-first EOSE barrier for
-    /// `filter` against a PROVEN-supported relay (ledger #8's compile-fence:
+    /// `filter` against a PROVEN-supported relay (guarantee #8's compile-fence:
     /// the first field can only ever be a `ProbedRelay`), under its own
     /// NIP-77 `sub_id`, with the initial message built from the local store.
     NegOpen(RequestAttemptId, ProbedRelay, SubId, ConcreteFilter, String),
@@ -1663,7 +1663,7 @@ struct PendingWrite {
     /// state); AtMostOnce's distinguishing property is that NOTHING in this
     /// reducer ever re-sends on a `RelayDisconnected` for either class — a
     /// dropped pending relay always resolves to `GaveUp`, never a retry
-    /// `PublishEvent` (no blind retry, ledger's `AtMostOnce` amendment).
+    /// `PublishEvent` (no blind retry, the `AtMostOnce` amendment).
     pending_relays: BTreeSet<RelayUrl>,
     /// The persisted started ordinal currently awaiting a terminal outcome
     /// for each relay.
@@ -1985,7 +1985,7 @@ pub struct CoreState {
     maintenance_turns: u64,
     active_pubkey: Option<PublicKey>,
     /// Every open durable write obligation and the three indexes that mirror
-    /// it (§3.4 / VISION §7 ledger #6/#9). Its five fields are private to
+    /// it (§3.4 / VISION §7, guarantee #6/#9). Its five fields are private to
     /// `pending_writes.rs`, so "which receipt owns this intent", "which
     /// receipts own these bytes" and "which receipts have a lane on this
     /// relay" have one implementation each instead of a door plus the

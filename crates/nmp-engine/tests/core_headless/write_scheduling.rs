@@ -13,7 +13,7 @@ const REPLAY_PAGE_CAPACITY: usize = 32;
 
 // ---- publish queue scheduling -------------------------------------------
 
-/// Test 4 analog: `enqueue_is_not_converged` (ledger #9). Acceptance is
+/// Test 4 analog: `enqueue_is_not_converged` (guarantee #9). Acceptance is
 /// custody, not a verdict: the publish turn takes the write and says nothing
 /// terminal about it. What the app learns first is never an outcome, and the
 /// write is still on its way to a signer.

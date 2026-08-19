@@ -18,7 +18,7 @@ This is the audited revision of the declared product/source authorities, not the
 3. Identify the consumer tier: direct Rust (`nmp`), Swift (`NMP`), Kotlin/JVM (`com.nmp.sdk`), or optional content/UI packages. Never substitute an internal crate or raw generated UniFFI type for its supported wrapper.
 4. Check `docs/known-gaps.md`. Treat `docs/VISION.md` as the north star, not proof that a public method exists.
 
-If asked to modify the NMP repository, follow its `AGENTS.md`: capture an issue first, use an isolated worktree and PR, update every affected projection, and test the touched API.
+If asked to modify the NMP repository, follow its `AGENTS.md`: use an isolated worktree and PR, update every affected projection, and test the touched API.
 
 ## Route the task
 

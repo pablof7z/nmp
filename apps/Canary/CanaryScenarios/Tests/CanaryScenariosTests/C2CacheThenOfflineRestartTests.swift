@@ -308,7 +308,7 @@ final class C2CacheThenOfflineRestartTests: XCTestCase {
         )
         // Honest reporting, not manufactured completeness: NMP must say this
         // planned source is not working rather than let the app read a stale
-        // feed as a complete one (bug-class ledger #7).
+        // feed as a complete one (guarantee #7).
         XCTAssertNotNil(
             read.status,
             "20s offline and across \(read.batches) batch(es) the query never reported any "
