@@ -6,7 +6,7 @@ Canonical contributor guide for the NMP repo. Every rule here applies to agents 
 
 1. `README.md` — what NMP is (two nouns: a live query, a write intent) and the honest current status.
 2. `docs/VISION.md` — the north star, the milestone plan (M0–M6), the two thesis-gates, and the numbered principles (P1…) work is measured against.
-3. `docs/bug-class-ledger.md` — the bug classes structurally ruled out, and the mechanism that rules each out. This replaces governance-by-policing: correctness lives in the shape of the API, not a police force patrolling it.
+3. `docs/builder/28-patterns.md` — the numbered bug classes the design structurally rules out, and the mechanism that rules each out. Correctness lives in the shape of the API, not in a police force patrolling it; the usual mechanism is *absence* — the unsupported thing has no API, so no caller can express it.
 4. `docs/known-gaps.md` — the truth-anchor companion: everything built-but-incomplete or deliberately deferred, so nothing hides.
 5. `docs/internals/architecture-boundaries.md` — where a decision ends, where a commit begins, and what may happen before it. What "functional" and "reactive" mean *here*, the transaction/effect rules, and the ownership rules — plus the current honest exceptions to each.
 6. `docs/internals/crate-architecture.md` — the target crate set: what each crate owns, which *seams* are settled (engine/runtime, capability eviction, the store transaction), which questions are still open (including the internal decomposition of the deterministic engine), the capability rule (`nmp` knows no event-kind capability) with its measure, and the rule that a crate is first a unit of responsibility and authority. A distinct dependency list is not required. Issues encode older decisions; this is the destination they are checked against.
@@ -23,7 +23,7 @@ For work that changes NMP itself, use `skills/nmp-dev/SKILL.md`. It routes inter
 The issue must **capture the why**, not just the what:
 
 - State the problem or the goal in terms of a **consequence** — what breaks, what a user can't do, what invariant is unproven — not merely the mechanical change.
-- **Anchor to higher-level thinking where it genuinely exists.** Link the VISION principle (P-number), the bug-class-ledger entry, the design doc, or the milestone the work serves. A change that closes a structural bug class or advances a milestone should say so, with the reference.
+- **Anchor to higher-level thinking where it genuinely exists.** Link the VISION principle (P-number), the structural guarantee, the design doc, or the milestone the work serves. A change that closes a structural bug class or advances a milestone should say so, with the reference.
 - **Do not hallucinate a rationale.** If the honest why is small — "this is a plain bug," "this is mechanical cleanup," "this unblocks a clean clone" — say exactly that. A fabricated grand justification is worse than an honest small one. The test for a claimed higher-level reason: it must be citable in a doc or a prior decision, not invented to dignify the task.
 - Prefer **one issue per coherent unit of work** (one PR closes it). Group into an **epic** issue when a milestone fans out into many units; the epic carries the thesis and a checklist of child units, each child issue carries its own local why and links back to the epic.
 

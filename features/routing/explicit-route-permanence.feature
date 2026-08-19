@@ -21,7 +21,7 @@ Feature: Explicit write routes stay verbatim for their whole lifetime
   @ledger-6
   Scenario: A relay learned after acceptance is never added to an explicit route
     # There is no widen path anywhere: no operation adds a relay to an
-    # accepted Explicit route, which is ledger #6's `NarrowOnly` discipline
+    # accepted Explicit route, which is guarantee #6's `NarrowOnly` discipline
     # carried over structurally rather than by convention. Learning more must
     # therefore change nothing here, including across a durable restart.
     Given the engine is offline

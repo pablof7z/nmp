@@ -1,12 +1,14 @@
 # Guarantees and the bugs they exclude
 
-This chapter is the builder-facing map of the provisional v2 guarantees. The
-[bug-class ledger](../bug-class-ledger.md) and
-[current implementation status](03-status-map.md) record which proofs ship.
+This chapter is the map of the bug classes NMP's design structurally excludes,
+and the mechanism that excludes each. The numbers are stable identifiers: design
+docs and code comments cite them. [Current implementation
+status](03-status-map.md) and [known gaps](../known-gaps.md) record what ships.
 
-The old NMP relied on broad doctrine and lints. The rewrite closes a bug class
-only when the supported facade makes the bad path unreachable and a falsifier
-proves it.
+The old NMP relied on broad doctrine and lints. The rewrite excludes a bug class
+by making the bad path unreachable on the supported facade — most often by there
+being no API that can express it, so no caller can ask for it and no reviewer
+has to notice.
 
 ## Core structural guarantees
 
@@ -15,8 +17,9 @@ proves it.
 **Excludes:** stale replaceable winners and duplicate ids with lost provenance.
 
 Exact-id dedup, provenance merge, and replaceable arbitration happen behind the
-store door. Apps do not maintain a second profile/list/event cache or decide
-which candidate wins.
+store door. There is no public index or storage setter — that door is the only
+way an event enters the store. Apps do not maintain a second
+profile/list/event cache or decide which candidate wins.
 
 ### #2: demand-derived subscription lifetime
 
@@ -72,7 +75,8 @@ shortfall facts. Apps interpret those facts; NMP exposes no
 **Excludes:** sending NIP-77 messages to an unprobed relay.
 
 Only the prober can mint `ProbedRelay`; the negentropy effect requires that
-token. Other relays use REQ.
+token. A relay's NIP-11 advertisement is separate evidence and can never mint
+it. Other relays use REQ.
 
 ### #9: durable acceptance is not convergence
 
@@ -80,7 +84,9 @@ token. Other relays use REQ.
 
 `Accepted` is emitted only after atomic persistence of the frozen body, expected
 author, intent, receipt, and canonical pending row. ACK, rejection, and retry
-remain separate facts.
+remain separate facts. Facts about the whole write and facts about one relay
+live on different arms of the write fact, so "is this over?" is answered once
+rather than re-derived by each consumer.
 
 ### #10: accepted writes cannot drift to another signer
 
@@ -120,8 +126,13 @@ decrypt protocol data, but presentation remains downstream in the app/UI.
 **Excludes:** a late-arriving old-timestamped event being skipped because a UI
 pagination cursor already passed it.
 
-The exact windowed/collection API remains unsettled; the cursor-ownership rule
-is the requirement.
+Windowing is a policy on the one read noun: `observe(query, window)` maintains
+the complete bounded canonical partition ordered by an exact exclusive
+`(created_at DESC, event_id ASC)` cursor the engine owns. Growth is declarative
+and monotonic — `requestRows(atLeast:)` states the total you want — so the host
+never constructs, holds, or replays a protocol cursor or continuation token, and
+there is nothing to go stale. Acquisition cursors are separate engine state.
+Durable cursor resume and a global end verdict are deliberately not offered.
 
 ### #14: schema ownership is not contextual authority
 
@@ -159,7 +170,7 @@ semantics, return explicit shortfall, reject with a type, or backpressure with a
 diagnostic reason. Every projection and interior queue must prove the bound end
 to end.
 
-### #18: source/identitys cannot borrow evidence incorrectly
+### #18: source/identity cannot borrow evidence incorrectly
 
 **Excludes:** equal filters under different AUTH or read routing sharing a
 watermark as though they were the same request.
@@ -177,12 +188,83 @@ Rust persists obligations and expected pubkeys. Standard platform providers
 own secure secret storage; apps own identity policy and may supply custom
 providers.
 
+### #20: replaceable edits are engine-materialized operations
+
+**Excludes:** an app reading a replaceable event, editing the whole value, and
+overwriting a newer version it never saw.
+
+An edit is an engine-issued, capability-bound operation that NMP materializes
+over the current source, retains across restart, and reapplies when newer source
+truth arrives. There is no caller-facing compare-and-swap payload to lose a race
+against; a capability defines its own first value, and a cache miss never creates
+one. See [Editing replaceable events](15-editing-replaceable.md); the residual
+limits of the coordinate gate are in [known gaps](../known-gaps.md).
+
+### #21: a live store cannot be double-opened or deleted underneath itself
+
+**Excludes:** two engines writing one database file, or a destructive reset
+unlinking a file another process still owns.
+
+Opening a persistent store takes cross-process ownership of the resolved target
+before the database initializes, and holds it for the store's life. That lock is
+mandatory: a platform that cannot provide it fails closed rather than degrading
+to unlocked operation, so relative, symlink, and hard-link aliases resolve to one
+authority rather than one lock each. Destructive reset joins the same ownership
+and holds it through removal, so no check-then-delete gap exists. Violations are
+typed `StoreAlreadyOpen`/`StoreStillOpen` refusals on every SDK, never a doc
+comment.
+
+### #22: there is no route-override noun to register
+
+**Excludes:** a global registry mapping event kinds to route policies, and the
+"who owns this kind" arbitration such a registry would require.
+
+Route resolution happens inside the layer that owns the operation or query, from
+that operation's complete facts. There is nothing to register and nowhere to
+register it. Two crates that parse the same numeric kind are therefore not in a
+routing collision at all: the authority boundary is the whole operation, not
+global ownership of a number.
+
+### #23: detection does not create an effect
+
+**Excludes:** parsing a note's content and thereby opening observations the app
+never asked for.
+
+`nmp-content` returns an immutable document and depends on no engine or
+mechanism crate. Decoding a NIP-19/NIP-21 locator preserves its exact identity
+and authored relay hints but cannot construct a demand: kind, read routing,
+relay admission, and observation count are choices that belong to the component
+the app selected, and each selected component owns one independently cancellable
+ordinary handle. See [Content and components](34-content.md).
+
+### #24: protocol capability is physically separable from core
+
+**Excludes:** a protocol verb on the generic engine facade, and a core artifact
+shipping protocol symbols nobody selected.
+
+Protocol-owned composition returns the ordinary core noun — NIP-22's comment
+builder returns a `WriteIntent` — so generic facades keep only observation,
+publication, and lifecycle verbs. The boundary is physical rather than stylistic:
+a core-only build contains no protocol crate, API, or symbol, and each selected
+capability arrives through one Cargo feature and one catalog record. See
+[Packaging and distribution](08-packaging.md).
+
+### #25: an authorization names the identity it speaks for
+
+**Excludes:** an account switch between drafting and signing producing a
+well-formed authorization that acts as the wrong identity.
+
+A signed authorization carries the `PublicKey` the caller believed it would
+speak for, and validation refuses any event whose signer is someone else.
+Nothing else can catch this: the signature is genuinely valid for whoever signed,
+so a signature check cannot see the mistake. That validated value is the only
+door to a Blossom `Authorization` header.
+
 ## Builder rule
 
-Treat this list as the North Star, not evidence that every mechanism ships. A
-design doc or passing adjacent test does not promote a guarantee; the supported
-Rust facade and platform projections must be falsified end to end. Check the
-status appendix and owning issue before relying on one in a shipping app.
+Treat this list as the North Star, not evidence that every mechanism ships.
+Check the [status appendix](03-status-map.md) and [known
+gaps](../known-gaps.md) before relying on one in a shipping app.
 
 ---
 

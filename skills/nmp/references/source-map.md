@@ -8,7 +8,7 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `README.md`
 - Source: `docs/VISION.md`
 - Source: `docs/known-gaps.md`
-- Source: `docs/bug-class-ledger.md`
+- Source: `docs/builder/28-patterns.md`
 - Source: `docs/design/async-observation-handles.md`
 - Source: `docs/internals/conventions/bech32-boundary.md`
 - Source: `docs/internals/conventions/no-backwards-compatibility.md`
@@ -184,4 +184,4 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `scripts/build-swift-xcframework.sh`
 - Source: `scripts/build-kotlin-jvm.sh`
 
-Use public declarations and tests as current API truth. Use `docs/VISION.md` for intended invariants and `docs/known-gaps.md`/the bug-class ledger for proof status. Comments inside mechanism code can explain design but do not create a consumer API.
+Use public declarations and tests as current API truth. Use `docs/VISION.md` for intended invariants, `docs/builder/28-patterns.md` for what the design structurally excludes, and `docs/known-gaps.md` for what is not built. Comments inside mechanism code can explain design but do not create a consumer API.

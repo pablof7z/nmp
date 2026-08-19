@@ -110,7 +110,7 @@ cite NMP as uniformly dependency-precise until it closes.
    rather than applied.
 
 Rules 1, 2 and 4 hold today on the write-acceptance and cancellation paths, and
-bug-class-ledger **#9** is the falsifier that keeps them honest: acceptance is
+structural guarantee **#9** keeps them honest: acceptance is
 constructible only after intent, receipt, frozen body and canonical row commit
 together. Rule 5 holds for writes (a generation counter) and for AUTH (epoch,
 phase-token and capability-instance all checked).
@@ -155,11 +155,11 @@ it. Both are known and tracked; neither is a licence to add a third.
 Read it once. When you touch a module, leave its decision boundary, ownership,
 effects and tests clearer than you found them — that is the whole obligation.
 
-The examples above deliberately cite **bug-class-ledger entries and their
-falsifiers** rather than symbol names, because symbols move: `EventStore` and
-four transport surfaces were deleted in the same week this was written. A ledger
-entry names an excluded bug class and the mechanism that excludes it, and stays
-true across the refactor that renames its implementation.
+The examples above deliberately cite the **numbered structural guarantees**
+(`docs/builder/28-patterns.md`) rather than symbol names, because symbols move:
+`EventStore` and four transport surfaces were deleted in the same week this was
+written. A guarantee names an excluded bug class and the mechanism that excludes
+it, and stays true across the refactor that renames its implementation.
 
 If something here contradicts the code, the code wins and this document is a
 bug. Fix it in the same change.

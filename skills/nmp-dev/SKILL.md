@@ -50,7 +50,7 @@ testing](references/testing/INDEX.md).
   the same change: Rust, storage, diagnostics, FFI, Swift, Kotlin, docs, tests,
   validation scripts, and evidence metadata. Do not keep the old path for
   compatibility.
-- Keep `README.md`, `docs/known-gaps.md`, and the bug-class ledger truthful.
+- Keep `README.md` and `docs/known-gaps.md` truthful.
 - A crate is a unit of responsibility and authority. Cargo is one way of
   making that boundary structural. Do not refuse a package because both
   sides still share lower-level dependencies. See

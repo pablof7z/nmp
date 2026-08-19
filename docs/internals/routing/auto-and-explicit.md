@@ -9,7 +9,7 @@ owns:
   - why routing is a durable strategy, not a resolved relay set
   - the reversal that made single-relay publishing first-class
   - routing's independence from authorship
-  - what `Explicit` inherits from ledger #6, and what dies with the old variants
+  - what `Explicit` inherits from guarantee #6, and what dies with the old variants
 related:
   - docs/internals/routing/resolution-lifecycle.md
   - docs/internals/routing/knowledge-and-settlement.md
@@ -59,7 +59,7 @@ variants:
 - `AuthorOutbox` — resolves to the author's NIP-65 write relays and nothing
   else (`crates/nmp/src/core/write.rs:2591-2603`), erroring when none are
   known.
-- `PrivateNarrow(PrivateRoute)` — ledger #6's fail-closed narrow route. Its
+- `PrivateNarrow(PrivateRoute)` — guarantee #6's fail-closed narrow route. Its
   `NarrowOnly` set is populated once at construction and structurally exposes
   no widen/insert operation afterward (`crates/nmp-grammar/src/write.rs:230`
   onward); an empty set fails closed at resolution
@@ -209,10 +209,10 @@ would not either.
 
 ---
 
-## 6. What `Explicit` carries forward from ledger #6 — DESIGNED
+## 6. What `Explicit` carries forward from guarantee #6 — DESIGNED
 
 `PrivateNarrow` dies, but the structural discipline it embodied does not.
-Ledger #6's fail-closed property transfers to `Explicit` intact, and
+Guarantee #6's fail-closed property transfers to `Explicit` intact, and
 *structurally* — as properties of the type and the acceptance path, not as
 conventions:
 
@@ -233,7 +233,7 @@ conventions:
   This is stricter than master, and the difference is not an oversight being
   corrected. Today an empty `PrivateNarrow` is accepted and then fails closed
   at resolution with `WriteStatus::Failed`
-  (`crates/nmp/src/core/write.rs:2605-2613`), and ledger #6 built that on
+  (`crates/nmp/src/core/write.rs:2605-2613`), and guarantee #6 built that on
   purpose — `NarrowOnly`'s own doc says an empty set "is exactly how an
   unroutable private recipient is expressed structurally"
   (`crates/nmp-grammar/src/write.rs:230-238`). Emptiness was a *sentence*, not

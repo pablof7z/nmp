@@ -48,7 +48,7 @@ Feature: An app says "figure it out" or "these exact relays", and nothing else
   @designed
   Scenario: A relay learned after acceptance is never added to an explicit route
     # There is no widen path anywhere: no operation adds a relay to an
-    # accepted Explicit route, which is ledger #6's `NarrowOnly` discipline
+    # accepted Explicit route, which is guarantee #6's `NarrowOnly` discipline
     # carried over structurally rather than by convention. Learning more must
     # therefore change nothing here.
     Given the engine is offline

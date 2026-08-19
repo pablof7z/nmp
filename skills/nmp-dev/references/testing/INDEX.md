@@ -5,8 +5,8 @@ Put each kind of information in one place:
 - Feature files describe behavior.
 - Tests prove that behavior.
 - GitHub issues track unfinished work.
-- Design docs and the bug-class ledger explain why the architecture exists and
-  which classes of bugs it prevents.
+- Design docs and `docs/builder/28-patterns.md` explain why the architecture
+  exists and which classes of bugs it prevents.
 
 Do not copy the same rule into several places. Current BDD syntax, status, and
 runner rules live in [`behavior-specification.md`](behavior-specification.md).

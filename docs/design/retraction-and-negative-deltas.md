@@ -86,7 +86,7 @@ fn remove(&mut self, id: EventId, reason: RetractReason) -> Option<StoredEvent>;
 `RetractReason { Rejected, Deleted }` exists so diagnostics can count
 retractions per cause and so `remove` is self-documentingly *not* a general delete API.
 None of this is app-facing: the app never holds the store; the two-noun surface
-(`Handle`/FFI) gains nothing. Ledger #1's mechanism ("no public index/storage setter")
+(`Handle`/FFI) gains nothing. Guarantee #1's mechanism ("no public index/storage setter")
 is unchanged — these are engine-internal doors on the same one-door store, and every
 one of them still routes through the same supersession/tombstone/expiry logic.
 
@@ -275,7 +275,7 @@ different semantics — the framework-reborn shape Brainstorm's UNDO probe warne
 
 - The accepted row enters through the ordinary door with local provenance —
   `Provenance` grows a `local: Option<LocalOrigin>` alongside `seen` (issue #2's
-  `Local` origin; a row *field*, exactly ledger #5's shape). The canonical row
+  `Local` origin; a row *field*, exactly guarantee #5's shape). The canonical row
   also carries typed signature state, conceptually `Pending(intent_id)` or
   `Signed(signature)`. That state is data on the one row, not a second query
   path or committed/pending authority split.
@@ -457,6 +457,6 @@ size are not a priority, which is the argument in this paragraph — ~40 bytes
 per deletion — applied to the whole store rather than to tombstones alone.
 
 Everything else in this design is derivable from settled principles (one door,
-replace-not-rebuild, D8, two nouns, ledger #5/#7) and carries no new app-facing
+replace-not-rebuild, D8, two nouns, guarantees #5/#7) and carries no new app-facing
 surface: the app's entire experience of this family is `RowDelta::Removed` — a variant
 it already handles.
