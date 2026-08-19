@@ -1,4 +1,4 @@
 interface:
   display_name: "NMP Development"
   short_description: "Develop and test the NMP repository itself"
-  default_prompt: "Use $nmp-dev to make an internal NMP change. Follow the repository's issue-first workflow and verify the result."
+  default_prompt: "Use $nmp-dev to make an internal NMP change. Follow the repository's standing conventions and verify the result."

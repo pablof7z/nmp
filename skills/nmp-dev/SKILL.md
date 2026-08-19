@@ -11,9 +11,8 @@ router.
 ## Start
 
 1. Read `AGENTS.md` and its cold-start sources.
-2. Find or file the issue before editing.
-3. Use an issue-linked branch in an isolated worktree.
-4. Read the owning design, gap, feature rule, and tests.
+2. Use a branch in an isolated worktree.
+3. Read the owning design, gap, feature rule, and tests.
 
 For behavior, tests, or user corrections, start with [NMP
 testing](references/testing/INDEX.md).
@@ -74,8 +73,8 @@ testing](references/testing/INDEX.md).
 
 ## Finish
 
-- Review the diff against the issue and `AGENTS.md`'s standing conventions.
+- Review the diff against `AGENTS.md`'s standing conventions.
 - Report the commands run, what they proved, and any live or platform checks
   not run.
-- Close completed issues. Otherwise post branch, worktree, blocker, and next
-  step on the issue or PR.
+- When work is left in progress, post branch, worktree, blocker, and next
+  step on the PR.

@@ -16,19 +16,6 @@ Canonical contributor guide for the NMP repo. Every rule here applies to agents 
 
 For work that changes NMP itself, use `skills/nmp-dev/SKILL.md`. It routes internal implementation, review, and testing work; for behavioral changes, test changes, or user corrections about how NMP should behave, start with `skills/nmp-dev/references/testing/INDEX.md`. `skills/nmp/SKILL.md` is the separate consumer-facing skill for applications that build with NMP; it is not authority for NMP internals.
 
-## Issue-first, always — capture the why
-
-**Every unit of work traces to a captured GitHub issue before it starts.** No silent side-quests, no code without a tracked reason. If you find work that needs doing and no issue covers it, *file the issue first*, then do the work; the PR references it and closing it is how the tracker stays honest (`docs/known-gaps.md` and a closed issue are the two ways "done" is recorded — mark done by removing it from the open set, don't leave finished work open).
-
-The issue must **capture the why**, not just the what:
-
-- State the problem or the goal in terms of a **consequence** — what breaks, what a user can't do, what invariant is unproven — not merely the mechanical change.
-- **Anchor to higher-level thinking where it genuinely exists.** Link the VISION principle (P-number), the structural guarantee, the design doc, or the milestone the work serves. A change that closes a structural bug class or advances a milestone should say so, with the reference.
-- **Do not hallucinate a rationale.** If the honest why is small — "this is a plain bug," "this is mechanical cleanup," "this unblocks a clean clone" — say exactly that. A fabricated grand justification is worse than an honest small one. The test for a claimed higher-level reason: it must be citable in a doc or a prior decision, not invented to dignify the task.
-- Prefer **one issue per coherent unit of work** (one PR closes it). Group into an **epic** issue when a milestone fans out into many units; the epic carries the thesis and a checklist of child units, each child issue carries its own local why and links back to the epic.
-
-The point is that six months from now the tracker answers *why did we do this*, and the answer is either a real, referenceable line of thinking or an honest "it was a bug" — never a confabulation.
-
 ## Standing conventions — read before proposing a surface change
 
 Ten rules that are not negotiable and are violated most often in *proposals*, not in code. Full reasoning, worked examples, and the incidents behind each live in `docs/internals/conventions/`.
@@ -47,6 +34,7 @@ Ten rules that are not negotiable and are violated most often in *proposals*, no
 ## Working discipline
 
 - **Branches + PRs, never push work straight to `master` from a shared build.** Agents work in isolated git worktrees; a cohesive feature is one PR in one shared worktree.
+- **The commit message carries the why.** State the consequence — what breaks, what a user can't do, what invariant is unproven — not just the mechanical change. An honest small reason ("this is a plain bug", "mechanical cleanup", "this unblocks a clean clone") beats an invented grand one; a fabricated justification is worse than no justification.
 - **Truth and honesty are the anchors.** The README is the current honest picture, not a pitch, and not a changelog. `docs/known-gaps.md` must list what doesn't work. Compiles ≠ works — verify the running result.
 - **Fix end-to-end.** No temporary hacks, no compat aliases, no narrating a defect instead of fixing it. If a change is right, make it and update every caller in the same PR.
 - **Test scope:** run the tests for the crates you touched (`cargo test -p <crate>`); a workspace run is the merge-time gate, not the per-change loop.
