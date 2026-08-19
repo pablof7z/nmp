@@ -1,6 +1,5 @@
 //! Shared test-only fixtures and process seams for NMP integration tests.
 //!
-//! This crate is test infrastructure, not product API. [`reference_fixtures`]
 //! owns the NIP-19 reference corpus every parity surface reads; [`relays`]
 //! owns the in-process scripted relay scenarios are built from; and
 //! [`ConnectionOwner`] gives reconnect tests explicit ownership of every TCP
@@ -23,7 +22,6 @@
 #![forbid(unsafe_code)]
 
 /// Shared NIP-19 reference corpus and its normalized expected values.
-pub mod reference_fixtures;
 /// In-process relay with externally observable contact/query/write facts.
 pub mod relays;
 

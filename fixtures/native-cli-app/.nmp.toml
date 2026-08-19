@@ -1,3 +1,0 @@
-schema = 1
-capabilities = ["nip29", "nip65"]
-products = ["apple", "android"]
