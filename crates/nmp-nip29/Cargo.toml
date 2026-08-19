@@ -56,3 +56,9 @@ nmp-store.workspace = true
 nmp-router.workspace = true
 nmp-transport.workspace = true
 nmp-test-support.workspace = true
+# `first_group_list_action_survives_restart.rs` closes and reopens a real
+# engine over one on-disk store file, and its `#[tokio::test]`s need a
+# multi-thread runtime (the production `tokio` edge above carries `time`
+# only).
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
