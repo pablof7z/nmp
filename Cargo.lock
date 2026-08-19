@@ -932,7 +932,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "hex",
- "libc",
  "nmp-grammar",
  "nmp-resolver",
  "nmp-router",
@@ -1076,7 +1075,6 @@ dependencies = [
 name = "nmp-resolver"
 version = "0.1.0"
 dependencies = [
- "libc",
  "nmp-grammar",
  "nmp-store",
  "nostr",
@@ -1096,7 +1094,6 @@ name = "nmp-runtime"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
- "libc",
  "nmp-engine",
  "nmp-grammar",
  "nmp-local-signer",
