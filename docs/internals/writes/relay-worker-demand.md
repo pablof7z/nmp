@@ -249,21 +249,18 @@ state rebuilt from complete bootstrap results; it is not a second delivery autho
 
 ### Route revisions and parked intents
 
-[#975](https://github.com/pablof7z/nmp/issues/975) designs route revision:
-re-running Auto routing may mint new durable lanes for an existing intent.
-The projection must hook the lane-minting boundary, not only today's initial
-bootstrap call, so route revisions cannot bypass it.
+Route revision (#975) re-runs Auto routing and may mint new durable lanes for
+an existing intent. It goes through the same lane-minting boundary as initial
+bootstrap: `commit_route_revision`,
+`crates/nmp-engine/src/core/lane_projection.rs`.
 
-The future parked-write state from
-[#968](https://github.com/pablof7z/nmp/issues/968) owns no lane while awaiting a
-route. It therefore creates no relay-worker demand and must cause no
-per-dispatch store read. A large parked population could still make an
-O(pending) in-memory union expensive; the current production profile
-under-predicts that future population.
+A parked write (#968) owns no lane while awaiting a route, so it creates no
+relay-worker demand and no per-dispatch store read. A large parked population
+would make the O(pending) in-memory union expensive; the profile that justified
+the current shape did not include one.
 
-The implementation keeps the simple reducer-local union. A global
-relay-session reference-count projection remains a possible follow-up only if
-the in-memory walk itself becomes material under the future parked population.
+The implementation is the simple reducer-local union. A global relay-session
+reference-count projection was considered and not built.
 
 ## Atomicity, ordering, and recovery
 
@@ -339,9 +336,9 @@ The implementation is correct only if all of these hold:
    as committed.
 6. Public, NIP-42, account, and session identities do not alias merely because
    their relay URLs match.
-7. Future route revision must use the same lane-minting/projection boundary as
+7. Route revision goes through the same lane-minting/projection boundary as
    initial bootstrap.
-8. A future parked intent with no lane must contribute no worker and cause no
+8. A parked intent with no lane contributes no worker and causes no
    per-dispatch store read.
 9. The store transaction, not the projection, is the final authority for
    terminal intent closure.
