@@ -15,7 +15,6 @@ owns:
 related:
   - docs/design/durable-write-signing-and-retry.md
   - docs/internals/writes/relay-worker-demand.md
-  - docs/internals/conventions/schema-epoch-discard.md
 issues:
   - https://github.com/pablof7z/nmp/issues/903
   - https://github.com/pablof7z/nmp/issues/1027

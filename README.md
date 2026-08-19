@@ -261,7 +261,7 @@ Diagnostics are a **permanent, read-only proof plane** — source plan, wire fil
 - [Builder guide](docs/builder/README.md) — product model, examples, platform guidance
 - [Vision](docs/VISION.md) — north star and settled invariants
 - [Known gaps](docs/known-gaps.md) — the honest built-vs-missing list
-- [Contributor guide](AGENTS.md) — standing conventions and verification discipline
+- [Contributor guide](AGENTS.md) — cold-start reading order and working discipline
 
 ## Security & trust boundary
 

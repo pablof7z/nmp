@@ -23,9 +23,6 @@ related:
   - docs/internals/routing/resolvers.md
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/no-backwards-compatibility.md
-  - docs/internals/conventions/bech32-boundary.md
-  - docs/internals/conventions/naming-no-invented-categories.md
 issues:
   - "#47 identity override — the semantics this type inherits and restates"
 ---
@@ -75,7 +72,7 @@ pub enum Identity {
 ```
 
 replacing `identity_override: Option<PublicKey>` on `WriteIntent` outright —
-no wrapper, no alias, per `conventions/no-backwards-compatibility.md`. The
+no wrapper, no alias. The
 enum is not `Option` renamed: `Active` is a positive statement ("resolve the
 current account at acceptance and pin it"), not the absence of one, and the
 name shows up in receipts, diagnostics, and app code where `None` would say
@@ -188,9 +185,8 @@ type"):
 > B. But .explicit shouldn't be an npub... npub (any bech32) is outward-facing decoration; internally it should be a pubkey. Nothing internal should use bech32 encoding, bech32 encodings are to show something to the user or to receive something from a user (e.g. "this is user npub1...." (displaying something to the external user), or the app saying nmp "load nevent1...." (because the user copy-pasted an nevent1))
 
 So `Identity::Explicit(PublicKey)` — a real key type, never a string, never
-bech32. The full statement of the rule and its other consequences live in
-`conventions/bech32-boundary.md`; what this document owns is the concrete
-casualty on the identity surface.
+bech32. What this document owns is the concrete casualty on the identity
+surface.
 
 **The casualty:** `FfiWriteIntent.identity_override` today accepts hex OR
 bech32 npub *by design*. Its own doc comment

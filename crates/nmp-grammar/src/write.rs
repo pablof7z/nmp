@@ -322,7 +322,7 @@ pub enum Identity {
     /// Always a [`PublicKey`], never an `npub` or any other bech32 form:
     /// bech32 is how something is shown to a person or received from one,
     /// and an app that took an npub from a paste box decodes it at that
-    /// boundary (`docs/internals/conventions/bech32-boundary.md`).
+    /// boundary.
     Explicit(PublicKey),
 }
 

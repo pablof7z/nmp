@@ -85,9 +85,8 @@ pub enum Verdict {
     /// The relay sent an event whose id we already know, carrying a
     /// DIFFERENT signature. Drop the frame; accuse nobody.
     ///
-    /// Rule 3 of `docs/internals/conventions/signature-verification.md`,
-    /// which owns this. In short: one event id has arbitrarily many valid
-    /// signatures — NIP-01's id preimage is
+    /// One event id has arbitrarily many valid signatures — NIP-01's id
+    /// preimage is
     /// `[0, pubkey, created_at, kind, tags, content]`, so `sig` is not
     /// covered, and `nostr` signs with `OsRng` auxiliary randomness. A
     /// mismatch is therefore evidence of nothing about the relay, and this

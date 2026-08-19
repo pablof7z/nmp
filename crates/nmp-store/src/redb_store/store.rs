@@ -679,8 +679,7 @@ impl RedbStore {
     /// adoption, alias, drain, or destructive-reset path. Continuing requires
     /// deliberate discard and recreation: relay-backed cache rows can be
     /// reacquired, but accepted unpublished writes and the rest of their
-    /// publish queue evidence are permanently lost
-    /// (`docs/internals/conventions/schema-epoch-discard.md`).
+    /// publish queue evidence are permanently lost.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, |path| {
             let backend = RequiredLockedFileBackend::open(path)?;

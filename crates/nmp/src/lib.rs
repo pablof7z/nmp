@@ -205,8 +205,7 @@ pub use subscription::{
 // them, or the app said nothing and NMP routes it -- and nothing infers
 // that from the selection's shape (#847). `Demand::public`,
 // `Demand::author_outboxes` and `Demand::pinned` are DELETED, along with
-// the invented category they named; see
-// `docs/internals/conventions/naming-no-invented-categories.md` section 3.
+// the invented category they named.
 pub use nmp_grammar::{
     Binding, CacheMode, Demand, DemandError, Derived, Filter, Freshness,
     IdentityField, IndexedTagName, LiveQuery, LiveQueryError, ReadRouting, Selector, SetAlgebra,

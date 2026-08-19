@@ -3,7 +3,6 @@
 //! point is `tests/bdd.rs` (`harness = false`); this `src/` tree exists only
 //! so that binary can `use nmp_bdd::{...}` the `World` + step catalog.
 
-
 pub mod steps;
 
 /// Does this step sentence say the scenario crosses a process boundary?

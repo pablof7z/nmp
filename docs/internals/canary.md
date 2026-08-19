@@ -234,10 +234,8 @@ churn; C18 clean shutdown.
 that appeared exactly once in this entire repository, in the line above,
 introduced by the commit that created the Canary. No definition anywhere, no
 matching public API, no `semantic` surface in `crates/nmp/src/`, and no
-protocol category by that name: a named category that does not exist, which
-standing convention 3 forbids
-(`docs/internals/conventions/naming-no-invented-categories.md`). The name now
-comes from the public surface — "capability" is
+protocol category by that name: a named category that does not exist. The
+name now comes from the public surface — "capability" is
 `docs/internals/crate-architecture.md` rule 2's own word and `nmp-ffi`'s own
 feature keys, "NIP-22 comments" is the protocol's name and the name of
 `Packages/NMP/Sources/NMP/NIP22.swift`.

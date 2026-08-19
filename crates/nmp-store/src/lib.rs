@@ -68,9 +68,7 @@
 //! record).
 //!
 //! Verification is a once-at-ingest act and nothing on the way OUT of this
-//! crate ever re-verifies. `docs/internals/conventions/signature-verification.md`
-//! owns that rule and enumerates every admitting door; what follows is only
-//! what it means here, and it deliberately does not restate the doc.
+//! crate ever re-verifies.
 //!
 //! This crate's own doors: [`RedbStore::insert`] takes relay-observed bytes
 //! the transport gate already proved, and
@@ -342,9 +340,8 @@ thread_local! {
     /// Every schnorr check [`VerifiedSignature::verify`] has run ON THIS
     /// THREAD.
     ///
-    /// The falsifier for rule 4 of
-    /// `docs/internals/conventions/signature-verification.md` (#1782): a boot
-    /// over an already-populated store must not move this number at all.
+    /// #1782: a boot over an already-populated store must not move this
+    /// number at all.
     ///
     /// Per-THREAD rather than per-process because the test harness runs the
     /// rest of the crate's suite in parallel and plenty of it verifies fixture
@@ -352,7 +349,7 @@ thread_local! {
     /// `nmp-store` verifies off the calling thread (the crate owns no
     /// workers), so a thread-local count is exact for every store door.
     ///
-    /// On that convention's "instrumentation must not be able to lie": this
+    /// This instrumentation must not be able to lie, so it
     /// counts ATTEMPTS, incremented unconditionally on entry, before
     /// `Event::verify` can return. `nostr` owns the schnorr operation and
     /// cannot be instrumented from outside it, so the increment sits beside
