@@ -85,10 +85,10 @@ async wakeup **directly** (not a second queue, no polling, no timer):
 ### Async receiver wrappers (Send + Sync)
 
 The blocking `RowsReceiver`/`HistoryReceiver`/`LatestReceiver` are deliberately
-`!Sync` (single consumer). UniFFI stream objects are `Arc<Object>` and must be
-`Send + Sync`, so the FFI path uses `Async*Receiver` wrappers that hold the
-mailbox `Arc<Inner<T>>` (which *is* `Send + Sync`: `Mutex` + `Condvar` +
-`Waker`) plus:
+`!Sync` (single consumer). The direct-Rust async facade (`AsyncSubscription`,
+`AsyncDiagnosticsSubscription` in `crates/nmp/src/subscription.rs`) instead
+uses `Async*Receiver` wrappers that hold the mailbox `Arc<Inner<T>>` (which
+*is* `Send + Sync`: `Mutex` + `Condvar` + `Waker`) plus:
 
 - an `AtomicBool reading` guard: a second concurrent `next()` while one is in
   flight is **structurally rejected** with a typed misuse error
@@ -132,68 +132,15 @@ the state on every wake); no post-cancel frame is delivered (`close()` changes
 the state and discards the slot under the same lock, and later producer updates
 are no-ops). No spin loop, no timer.
 
-## Handle surface (UniFFI 0.29 async objects)
-
-UniFFI 0.29 async is already used here (`NmpEngine::relay_information` is an
-exported `async fn`; generated Swift `func … async throws -> T`, Kotlin
-`suspend fun … : T`). A waker-based `next()` future has no I/O, so it needs no
-reactor and no thread — UniFFI's RustFuture machinery polls it and the mailbox
-wakes it.
-
-Each long-lived stream family is a `#[derive(uniffi::Object)]` handle:
-
-| family      | object              | methods                                              |
-|-------------|---------------------|------------------------------------------------------|
-| row/window  | `NmpRowStream` + private `NmpRowPull` | sync `begin_next()`; ticket `async receive()`, sync `commit()`/`abort()`; stream `cancel()`/`request_rows(u64)` |
-| diagnostics | `NmpDiagnosticsStream` | `async next() -> Option<FfiDiagnosticsSnapshot>`; `cancel()` |
-| receipts    | `NmpReceiptStream`  | `async next() -> Option<FfiWriteStatus>`; `cancel()` |
-| follow      | `NmpFollowStream`   | `async next() -> Option<FfiFollowSnapshot>`; `cancel()` |
-| follow-act. | `NmpFollowActionStream` | `async next() -> Option<FfiFollowActionStatus>`  |
-
-`observe`/`observe_demand`/`observe_diagnostics`/`observe_following`/`follow`/
-`unfollow`/`publish`/`publish_composed`/`reattach_receipt` become plain
-(synchronous) constructors returning the handle `Arc` — no observer callback
-param, no reservation, no thread. `None` from `next()` is the terminal signal
-(replacing `on_closed`). The callback traits (`RowObserver`, `DiagnosticsObserver`,
-`ReceiptObserver`, `FollowObserver`, `FollowActionObserver`) are deleted.
-
-### Cancellation & lifecycle
+## Cancellation & lifecycle
 
 - `cancel()` is idempotent (the existing `ObservationCancel` `AtomicBool` guard)
   and calls the mailbox `close()` (immediate pending-`next()` wakeup to `None`)
   **and** the engine withdrawal (`unsubscribe`/`unsubscribe_history`/diag cancel).
-- Dropping the foreign wrapper drops the `Arc<Object>`; the object's `Drop`
-  calls `cancel()` — closing the Rust handle. (Swift ARC / Kotlin `Cleaner`.)
+- Dropping the handle's `Arc` runs its `Drop`, which calls `cancel()` — closing
+  the Rust handle.
 - Engine shutdown drops every producer `LatestSender`, closing every mailbox and
   waking every pending `next()` to `None`.
-- Swift iterator/task cancellation reaches `handle.cancel()` through the
-  iterator-owned core's `deinit` and `withTaskCancellationHandler`; normal
-  loop exit (`break`) therefore withdraws demand even though Swift never
-  creates a producer task or continuation. Kotlin `Flow` collection
-  cancellation reaches the same call through `finally`. A cancelled handle
-  yields no further frames.
-
-## Native SDK wrappers
-
-- **Swift:** each handle wraps as a direct `AsyncSequence`: one app
-  `Iterator.next()` synchronously claims one native row ticket, awaits its
-  `receive()`, and commits before mapping or cadence control. The
-  reference-owned iterator core has an enum lifecycle and shares an
-  enum-backed, lock-protected claim, so only one iterator owns the handle; a
-  competitor receives typed `NMPError.concurrentNext` before touching native
-  state. The core's `deinit` cancels the handle and releases the claim, which
-  covers normal `break`; `withTaskCancellationHandler` covers task
-  cancellation. There is no producer task, continuation, prefetch, or second
-  Swift queue. Current-state streams cadence-limit returned snapshots to about
-  one per 16 ms without pulling ahead, leaving conflation in the one native
-  mailbox.
-- **Kotlin:** each handle wraps as a `Flow` whose row loop synchronously calls
-  `beginNext()`, awaits `receive()`, commits before folding/emitting, and aborts
-  every non-commit path in `finally`; `handle.cancel()` still runs at collection
-  teardown. Ordinary observation flows are cold and open one independent native
-  handle per collection; the windowed handle's frames flow is explicitly
-  single-collection. `.conflate()` is removed because the engine mailbox
-  already folds intermediate state.
 
 ## The rescoped blocking-adapter pool
 
@@ -236,13 +183,11 @@ implementation:
 1. **Post-cancel-frame race** — fixed by the three `SlotState` values above
    (consumer `Cancelled` discards the value and no-ops the producer; producer
    `ProducerGone` drains-then-ends). Verified by mailbox unit tests.
-2. **Wake-after-unlock is load-bearing.** UniFFI may resume the foreign
-   continuation inline on the waking thread (Kotlin `Dispatchers.Unconfined`),
-   which re-enters `poll_recv` and re-takes the slot lock; waking under the lock
-   would self-deadlock a non-reentrant `std::Mutex`. Every producer transition
-   therefore takes the waker out under the lock and wakes it *after* releasing.
-   Supported consumption is through the SDK wrappers on real dispatchers/executors
-   so app collector code never runs on the engine reducer thread.
+2. **Wake-after-unlock is load-bearing.** A waker may resume its continuation
+   inline on the waking thread, which re-enters `poll_recv` and re-takes the
+   slot lock; waking under the lock would self-deadlock a non-reentrant
+   `std::Mutex`. Every producer transition therefore takes the waker out under
+   the lock and wakes it *after* releasing.
 3. **Receipts & follow-actions are FIFO fact streams, not latest-wins.** They
    use a distinct waker-aware **fixed-capacity FIFO** (`fifo_channel`, capacity
    32), not the conflating `latest_channel`. Retry concurrency is bounded, but
@@ -262,23 +207,12 @@ implementation:
    cancellation sends an exact detach command, so a pending write cannot
    accumulate dead registrations while parked without another status
    (bounded-delivery.md §3).
-4. **`sign_event`** stays a handle (`NmpSignEventHandle`) and gains
-   `async fn signed() -> FfiSignedEvent` (one-shot; a second call is a typed
-   misuse), replacing the `SignEventObserver` callback. Explicit `cancel()` is
-   retained because Swift task cancellation never reaches Rust.
-5. **Platform cancellation asymmetry (verified against generated 0.29
-   bindings).** Swift cancellation does not automatically reach Rust, so the
-   direct iterator core wraps each native pull in
-   `withTaskCancellationHandler` and explicitly calls `handle.cancel()`. Its
-   reference-owned `deinit` covers normal loop exit, including `break`; a
-   denied competing iterator never owns and therefore never cancels the
-   accepted handle. Kotlin can cancel after UniFFI reports Rust READY but
-   before generated completion retrieves the result. A private row ticket now
-   exists before that await: foreign completion synchronously commits it, and
-   cancellation/free/drop aborts it. An unbounded delta remains retained until
-   commit while reducer output composes into the existing one-slot successor,
-   bounding the edge at one claimed frame plus one composed successor.
-6. **NIP-46 session-lifetime workers move to session-owned threads.** Permanent
+4. **`sign_event` stays a handle (`SignEventOperation`), not a callback.**
+   `recv()` consumes the operation for the one signed result — a second call
+   is a compile error, since `recv` takes `self` by value — replacing the
+   observer-callback shape. Dropping the operation before completion cancels
+   the exact signer RPC.
+5. **NIP-46 session-lifetime workers move to session-owned threads.** Permanent
    slot occupants (session worker + event forwarder, session-lifetime) behind one
    fixed counter would be a miniature of the very defect — an unrelated
    `relay_information()` refused because two signer sessions are open. The
@@ -287,44 +221,15 @@ implementation:
    session count) instead of the shared pool. The remaining internal pool then
    hosts only genuinely *transient* blocking adapters (NIP-11 flights, AUTH
    foreign calls, remote-signer result waiters) — one honest class.
-7. **Swift cadence control does not require a queue.** Snapshot iterators delay
-   delivery, when necessary, to about one frame per 16 ms, then issue the next
-   native pull only when the app asks again. The engine mailbox can therefore
-   conflate replay bursts while Swift owns no `FrameCoalescer`, continuation,
-   or buffered frame. The cadence falsifier proves spacing and the direct-pull
-   falsifier proves no prefetch.
-8. **Swift iterator ownership is reference-owned and teardown-complete.**
-   Merely guarding overlapping Rust pulls does not cover a normal
-   `for try await` loop break: an eager background pump could stay parked,
-   retaining both native demand and the Swift iterator claim. Every sequence
-   therefore shares an enum-backed `NMPPullIteratorGate`, while the accepted
-   iterator retains one `NMPPullIteratorCore`. Dropping the iterator cancels
-   native demand and releases the claim exactly once; a competitor receives
-   `NMPError.concurrentNext` without touching the handle. The normal-break,
-   drop, direct-pull, and competing-iterator falsifiers cover these paths.
-
-### READY-before-complete cancellation closure (#762)
-
-The private `NmpRowPull` closes the former Kotlin per-call cancellation gap
-without adding an app noun. `begin_next()` atomically claims the stream before
-the cancellable await. `receive()` is start-once; `commit()` consumes the
-candidate only after foreign code has retrieved it; `abort()` or ticket drop
-restores an unbounded delta exactly. Stream cancellation discards both the
-claim and retained candidate terminally. Windowed snapshots use the same
-ticketed transport for SDK parity but remain self-contained and need no replay.
-Direct Rust `AsyncSubscription` and the other snapshot/fact stream families
-are unchanged.
 
 ## Falsifiers
 
-See `crates/*/tests` and the SDK test suites. The acceptance tests in #680
+See `crates/*/tests`. The acceptance tests in #680
 (thread-scaling ≥1000 handles, real 64+ composition, slow 10k-change consumer,
-cancellation races, normal Swift loop exit, finite FIFO lag under 40 durable
+cancellation races, finite FIFO lag under 40 durable
 retry cycles, paged receipt replay, receipt detach/reattach, 128 alternating
 close/drop reattachments while permanently parked at `AwaitingCapability`,
-shutdown with pending `next()`, READY-before-complete generated Kotlin
-cancellation, retained-frame replay, commit/abort/cancel races, repeated
-cancellation bounds, window-snapshot non-replay, Swift commit-before-map,
-Swift/Kotlin/SDK parity, 29er reproduction, symbol audit)
+shutdown with pending `next()`, retained-frame replay, commit/abort/cancel races, repeated
+cancellation bounds, window-snapshot non-replay, 29er reproduction, symbol audit)
 fail under the old one-thread-per-observer/unbounded-fact-delivery design and
 pass under this one.

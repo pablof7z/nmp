@@ -33,26 +33,15 @@ blessed tag names.
 
 ## Literal: fixed app demand
 
-```swift
-let selection = NMPFilter(
-    kinds: .literal([appKind]),
-    authors: .literal(selectedAuthors),
-    tags: ["d": .literal(selectedRecordIds)]
-)
-```
-
-A literal is still live because the local store and planned sources continue to
+A selection whose kinds, authors, and tag values are all literal sets is
+still live because the local store and planned sources continue to
 change. "Reactive" here means the binding's input changes without replacing the
 descriptor.
 
 ## Reactive: current pubkey as one input
 
-```swift
-let addressedToCurrentUser = NMPFilter(
-    kinds: .literal([appKind]),
-    tags: ["p": .reactive(.currentPubkey)]
-)
-```
+Consider a selection whose `p` tag binds to the reactive current-pubkey root,
+alongside a literal kind.
 
 Changing current pubkey re-roots this demand. It does not change a simultaneous
 literal query containing all account pubkeys, clear the shared cache, or retarget
@@ -66,24 +55,9 @@ hidden callback registry.
 ## Derived: let stored Nostr state drive another field
 
 Suppose an app-owned index event contains `e` tags naming the records the app
-should observe. The app declares the relationship once:
-
-```swift
-let indexDemand = NMPDemand(
-    selection: NMPFilter(
-        kinds: .literal([appIndexKind]),
-        authors: .reactive(.currentPubkey)
-    ),
-    access: .public
-)
-
-let selectedRecords = NMPFilter(
-    ids: .derived(
-        inner: indexDemand,
-        project: .tag("e")
-    )
-)
-```
+should observe. The app declares the relationship once: an inner demand
+selecting the app's index kind for the reactive current pubkey, publicly
+accessed, whose projected `e` tags drive the outer selection's `ids`.
 
 When the current user's index changes, NMP diffs the projected ids. It opens
 demand for newly named records, withdraws records no longer named, preserves
@@ -120,17 +94,9 @@ additional Derived hop.
 
 ## Set operations: compose closed sets
 
-```swift
-let visibleAuthors: NMPBinding = .setOp(
-    .diff,
-    [allowedAuthors, blockedAuthors]
-)
-
-let selection = NMPFilter(
-    kinds: .literal([appKind]),
-    authors: visibleAuthors
-)
-```
+A `Diff` binding over an allowed-authors set and a blocked-authors set — used
+as the `authors` binding on a selection with a literal kind — computes the
+visible authors.
 
 `Union`, `Intersect`, and `Diff` operate on resolved sets. The engine can explain
 which child contributed or withdrew each value and can recompile only affected
@@ -138,24 +104,9 @@ wire demand.
 
 ## Reusable fragments are ordinary values
 
-An app or protocol module may package a constructor:
-
-```swift
-func recordsNamedByCurrentUser(
-    indexKind: UInt16
-) -> NMPBinding<EventId> {
-    .derived(
-        inner: NMPDemand(
-            selection: NMPFilter(
-                kinds: .literal([indexKind]),
-                authors: .reactive(.currentPubkey)
-            ),
-            access: .public
-        ),
-        project: .tag("e")
-    )
-}
-```
+An app or protocol module may package a constructor: a function taking an
+index kind and returning the same derived-ids binding shown above, so callers
+never repeat the inner demand by hand.
 
 Calling the helper produces the same public graph as writing it inline.
 Diagnostics prints the expansion. The helper owns no subscription, cache, or
@@ -168,20 +119,9 @@ feature.
 
 ## Selection is not the whole descriptor
 
-The same selection can be acquired under different routing or authenticated identity:
-
-```swift
-let publicDemand = NMPDemand(
-    selection: selection,
-    access: .public
-)
-
-let authenticatedDemand = NMPDemand(
-    selection: selection,
-    routing: group.readRouting,
-    access: .auth(groupIdentity)
-)
-```
+The same selection can be acquired under different routing or authenticated
+identity: paired with public access it is one demand, and paired with a
+module-minted routing and an explicit AUTH identity it is a distinct one.
 
 `group.readRouting` is an `.explicit` relay set scoped by the NIP-29 module to one
 typed group/host context. The app may supply that protocol-defined public host;
@@ -193,10 +133,10 @@ evidence only where the full context makes sharing valid.
 ## Why selectors are closed
 
 An app closure such as `project: { rows in ... }` would prevent stable hashing,
-incremental dependency tracking, cross-platform parity, and diagnostics. When a
+incremental dependency tracking, and diagnostics. When a
 real protocol cannot be expressed by the selector vocabulary, the correct next
 step is a public grammar proposal with defined identity, routing, persistence,
-printing, and platform projection.
+and printing.
 
 It is not an escape hatch.
 

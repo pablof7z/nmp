@@ -5,11 +5,8 @@ they say nothing and NMP works it out.
 
 ## Queries route themselves
 
-```swift
-let demand = NMPDemand(selection: selection)
-```
-
-That is the whole declaration. `routing` defaults to `.auto`, which authorizes
+A demand needs only a selection. That is the whole declaration. `routing`
+defaults to `.auto`, which authorizes
 NMP to discover and use the NIP-65 write relays of every author the selection
 resolves, and to follow relay hints and prior provenance. **The app relays the
 operator configured are read from as well, always** — they are not a fallback
@@ -27,14 +24,8 @@ and no routing error to handle.
 
 ## Overriding it
 
-The one override is an exact relay set:
-
-```swift
-let demand = NMPDemand(
-    selection: selection,
-    routing: .explicit([hostRelay])
-)
-```
+The one override is an exact relay set, passed as an explicit routing value on
+the demand.
 
 `.explicit` asks those relays and nothing else — never widened to outbox,
 directory, app, fallback or indexer relays, whatever NMP later learns. It must
@@ -48,23 +39,15 @@ same two `NMPWriteRouting` uses. There is no third one, and no generic
 ## Access context is separate
 
 The same relays may answer differently under different AUTH identities or
-visibility grants, so access is its own axis:
-
-```swift
-let demand = NMPDemand(
-    selection: groupSelection,
-    routing: .explicit([groupHost]),
-    access: .nip42(publicKey: groupIdentity)
-)
-```
+visibility grants, so access is its own axis: a demand can pair an explicit
+route to a group host with an explicit NIP-42 identity.
 
 This works against both relay shapes. A relay that challenges unsolicited on
 connect is answered on the challenge; a relay that only challenges in response
 to a request — strfry, and most deployed relays — is answered on the challenge
 its `CLOSED auth-required` provokes, because the read transmits its request
-first whether or not it names an identity (#1889). Canary scenario C15 drives
-the whole round trip, plus re-AUTH after a reconnect, against a real strfry
-process.
+first whether or not it names an identity (#1889), including the re-AUTH case
+after a reconnect.
 
 A protocol module composes these for you rather than handing you a relay to
 pass around: `NMPGroup.read` returns a live query already carrying one branch
@@ -78,26 +61,16 @@ identity, safe wire sharing, diagnostics, and acquisition evidence.
 Ordinary author publication publishes per the author's outbox, to the
 operator's app relays, and — for kind:0, kind:3 and kind:1xxxx — to the
 configured indexers. Those lanes are additive and all of them apply; the app
-declares none of them:
-
-```swift
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable
-))
-```
+declares none of them. A durable publish call needs only the draft and the
+durability mode.
 
 The app does not pass the author's current relay list. If routing facts change,
 the durable intent may gain a new append-only relay lane without erasing prior
 attempt evidence.
 
 Some protocols make a relay part of the operation itself. That context comes
-from the protocol module:
-
-```swift
-let group = Nip29.group(id: groupId, host: groupRelay)
-let receipt = try group.publish(photoDraft, using: engine)
-```
+from the protocol module: a NIP-29 group value constructed from a group id and
+host relay, whose own `publish` call routes the draft through the engine.
 
 The public host is a semantic NIP-29 parameter. The module turns that pair into
 opaque context usable only for that group operation; it does not grant a generic

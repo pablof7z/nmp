@@ -25,22 +25,8 @@ content rendering exists.
 
 ## Parse without I/O
 
-Swift:
-
-```swift
-import NMPContent
-
-let document = parseNostrContent(
-    event.content,
-    syntax: event.kind == 30_023 ? .markdown : .plainText
-)
-```
-
-Kotlin:
-
-```kotlin
-val document = parseNostrContent(content, NostrContentSyntax.PlainText)
-```
+`parseNostrContent` takes the event content and a syntax hint (plain text or
+markdown) and returns a `NostrContentDocument`. It performs no I/O.
 
 The parser preserves original UTF-8 source ranges, original reference text,
 separate occurrence identity, and the exact decoded locator variant and
@@ -69,36 +55,16 @@ no automatic kind:0, routing, freshness, cache, or relay-admission choice. Malfo
 exact data until an optional acquisition owner explicitly validates or
 promotes them.
 
-The shared corpus in `fixtures/reference-locators.json` proves these values
-through the direct Rust, FFI, Swift, and Kotlin decoder/parser surfaces. It also
-proves that a bare public key and an authored profile locator do not collapse
-into the same variant.
+A bare public key and an authored profile locator do not collapse into the
+same variant.
 
 ## The component opens and owns observations
 
 A component that chooses resolution explicitly converts only the locator
 variants it understands into ordinary `NMPDemand` values. For example, a
 profile owner may deliberately interpret either a public key or profile
-locator as kind:0:
-
-```swift
-func profileDemand(for target: NostrReferenceTarget) throws -> NMPDemand {
-    let pubkey: String
-    switch target {
-    case .pubkey(let value), .profile(let value, _):
-        pubkey = value
-    default:
-        throw UnsupportedProfileLocator()
-    }
-    return NMPDemand(
-        selection: NMPFilter(
-            kinds: [0],
-            authors: .literal([pubkey]),
-            limit: 1
-        )
-    )
-}
-```
+locator as kind:0, and construct a demand selecting that author's kind:0 with
+a limit of one; any other locator variant is rejected as unsupported.
 
 That conversion belongs to the profile component/protocol owner or the app,
 not to decoding. A generic event loader can choose exact id/coordinate
@@ -121,8 +87,7 @@ the engine may nevertheless use one compatible wire subscription. Dropping the
 last handle withdraws live demand without deleting durable store truth.
 
 Visibility is one optional way to scope a chosen observation. It is not itself
-a reason to create one. The SwiftUI helper and standard components are covered
-in [SwiftUI content and components](35-swiftui-ui.md).
+a reason to create one.
 
 ## What NMP still owns
 
@@ -210,7 +175,7 @@ This is a clean break; none of the deleted names has a compatibility alias.
 | Removed API or behavior | Migration |
 |---|---|
 | `NMPContentClient` | Delete it. Call `parseNostrContent` directly; keep the app's existing `NMPEngine` only where a selected component needs observation. |
-| `NostrContentSession` / Kotlin `ContentSession` | Keep the immutable `NostrContentDocument`. Move observation ownership into the selected component or loader. |
+| `NostrContentSession` | Keep the immutable `NostrContentDocument`. Move observation ownership into the selected component or loader. |
 | `NostrContentClaim`, `claim(referenceID:)`, and the unconditional claim modifier | Delete them. A no-fetch component opens nothing; a resolving component owns ordinary query handles, optionally through `observeWhileVisible`. |
 | Session resource snapshots/states/evidence merging | Read each component's ordinary `RowBatch` values and their exact scoped evidence. Do not construct a UI-global winner or absence verdict. |
 | `HydrationPolicy`, active/resolved counts, grace windows | Delete them. Preserve only immutable cycle/depth context; rely on NMP's core handle coalescing and finite mechanism ceilings. |

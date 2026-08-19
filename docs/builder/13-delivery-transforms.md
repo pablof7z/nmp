@@ -6,37 +6,6 @@ presentation, map into view models, or join with non-Nostr state.
 
 NMP does not need a blessed `.filter`, `.sorted`, or `.map` wrapper for this.
 
-## Swift
-
-```swift
-for await snapshot in try engine.observe(.single(demand)) {
-    let visible = snapshot.rows
-        .filter(productPolicy.admits)
-        .sorted(using: productPolicy.order)
-        .map(ViewRow.init)
-
-    model.apply(visible, evidence: snapshot.acquisition)
-}
-```
-
-## Kotlin
-
-```kotlin
-engine.observe(LiveQuery.single(demand))
-    .map { snapshot ->
-        RenderState(
-            rows = snapshot.rows
-                .filter(productPolicy::admits)
-                .sortedWith(productPolicy.order),
-            acquisition = snapshot.acquisition,
-            shortfall = snapshot.shortfall
-        )
-    }
-    .collect(state::set)
-```
-
-## Rust
-
 ```rust
 while let Some(snapshot) = snapshots.recv() {
     let mut rows: Vec<_> = snapshot

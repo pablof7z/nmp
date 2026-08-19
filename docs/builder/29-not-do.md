@@ -98,4 +98,4 @@ route path.
 ---
 
 <!-- nav-footer -->
-<sub>← [Guarantees and bug classes](28-patterns.md) · [Index](README.md) · [Platform SDK guides](30-platform-guides.md) →</sub>
+<sub>← [Guarantees and bug classes](28-patterns.md) · [Index](README.md)</sub>

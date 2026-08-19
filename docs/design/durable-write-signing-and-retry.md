@@ -2,7 +2,7 @@
 
 - **Status:** IMPLEMENTED - crash-safe acceptance, canonical pending rows,
   signer reattachment, the one durable retry scheduler, and truthful governed
-  lane-state projection across Rust/FFI/Swift/Kotlin satisfy this contract.
+  lane-state projection in the `nmp` facade satisfy this contract.
 - **Owns:** the meaning of `Accepted`, pending-row semantics, signer selection,
   receipt persistence, retry ownership, and bounded progress when read and
   write authenticated identities compete for physical relay sessions.
@@ -156,7 +156,6 @@ idempotent once that fact exists. Unknown ids, signed writes, superseded
 writes, and each other terminal state are distinct typed refusals. Store
 failure is a typed error: ownership and signer work remain live, and no
 observer sees `Cancelled` unless the compensation transaction committed.
-UniFFI, Swift, and Kotlin project the same result and refusal axes.
 
 `Enqueued`, `sent`, and `converged` are never synonyms. Product policy may
 interpret a set of per-relay facts; the engine reports them without inventing a
@@ -366,7 +365,7 @@ Required proofs include:
 - transport reconnect cannot duplicate durable buffering ownership;
 - at `max_relays = 1`, an ordinary public route-discovery query plus a durable
   write to the same relay progresses through exact single publish, ACK, and
-  public-query restoration through the public Swift API on the macOS host;
+  public-query restoration;
 - a protected read emits only read admission and cannot claim the write's
   same-relay time-sharing authority;
 - restart preserves attempt ordinal and next eligibility;

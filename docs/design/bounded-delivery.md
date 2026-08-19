@@ -1,8 +1,8 @@
 # Bounded delivery, overload, and shortfall
 
-- **Status:** PARTIAL - ordinary query, window, diagnostics, Swift, and Kotlin
-  observation delivery are bounded; ingestion pressure and several graph,
-  wire, cache, and result limits are not yet enforced end to end.
+- **Status:** PARTIAL - ordinary query, window, and diagnostics observation
+  delivery are bounded; ingestion pressure and several graph, wire, cache,
+  and result limits are not yet enforced end to end.
 - **Owns:** observer buffering, durable fact delivery, graph/wire/result limits,
   ingestion backpressure, and explicit shortfall.
 
@@ -33,11 +33,8 @@ facts in either mode.
 
 The Rust ordinary-row producer therefore holds one pending transition per event
 id in a single mailbox slot, while windowed queries and diagnostics hold one
-complete latest snapshot. Swift issues one native pull per app pull and owns no
-second delivery queue; its snapshot iterators cadence-limit returns without
-prefetching. Kotlin also pulls serially from the native handle. Cancellation or
-drop withdraws observation according to the query refcount contract; it does
-not leave an unbounded producer queue.
+complete latest snapshot. Cancellation or drop withdraws observation according
+to the query refcount contract; it does not leave an unbounded producer queue.
 
 This bounds delivery backlog, not the semantic cardinality of an unwindowed
 query result: the pending transition can still be proportional to the change
@@ -159,7 +156,7 @@ These are local mechanism facts, not a synthesized health score.
 
 Required proofs include:
 
-- a burst into a slow Swift/Kotlin observer has bounded memory and eventually
+- a burst into a slow observer has bounded memory and eventually
   yields the latest exact local state;
 - a paused receipt observer across more retry transitions than the live FIFO
   can hold receives typed lag, retains a finite prefix, and can traverse the

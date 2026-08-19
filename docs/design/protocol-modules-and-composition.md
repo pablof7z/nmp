@@ -50,10 +50,9 @@ other foreign event kind published in a group.
 
 ## 6. Facade and platform projection
 
-Direct Rust apps and FFI use the same invariant-preserving facade. Swift and
-Kotlin expose native spellings of the same draft, context, demand, and receipt
-values. A protocol crate must not require an app to reach into mechanism crates
-or register itself into an NMP application container.
+Direct Rust apps use the same invariant-preserving facade. A protocol crate
+must not require an app to reach into mechanism crates or register itself into
+an NMP application container.
 
 Module operations may use public engine capabilities, but capability access is
 bounded and typed. A module cannot obtain raw signer material, arbitrary store
@@ -62,9 +61,9 @@ mutation, or unrestricted routing control.
 An operation that needs no engine capability does not receive an Engine
 receiver for symmetry. NIP-22 comment composition is the concrete model: the
 protocol owner takes explicit semantic input, author, timestamp, and optional
-correlation, then returns the ordinary write intent. FFI and both native SDKs
-project that as a protocol-owned free function; core publication remains the
-one generic `publish` → receipt lifecycle. A separate wrapper noun or
+correlation, then returns the ordinary write intent as a protocol-owned free
+function; core publication remains the one generic `publish` → receipt
+lifecycle. A separate wrapper noun or
 protocol-specific publication overload would create a second owner of the
 same write.
 

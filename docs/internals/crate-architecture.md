@@ -1114,20 +1114,9 @@ needs a mechanism door the facade will never open; the production defect is
 a consumer that names one anyway when the facade already offers what it
 needs.
 
-The one exception is `nmp-ffi`, which also names capability crates directly.
-It is not a hole: it does that only for things `nmp` deliberately never
-re-exports, because compiled materializers have to be linked into the
-staticlib. That is the target shape working. **Do not "fix" it** by routing
-`nmp-ffi` through the facade — that would put capability crates back in
-`nmp`'s dependency list, which is rule 2 inverted.
-
 ### Platform artifacts and harnesses — all correct today
 
-`nmp-ffi` (the one staticlib; it legitimately names capability crates per
-feature, because compiled materializers must be linked — it is an assembly,
-not the product core), `nmp-cli` (capability selection; zero NMP deps — a
-build tool must not link what it builds), `nmp-bdd`, `nmp-parity`,
-`nmp-test-support`, `nmp-consumer-check`, `nmp-nip65-consumer-check`,
+`nmp-bdd`, `nmp-test-support`, `nmp-consumer-check`, `nmp-nip65-consumer-check`,
 `tools/*`, the detached `benchmarks/*` workspaces. The manifest-is-the-proof
 crates must not be folded into tests; the proof is the manifest.
 
@@ -1151,9 +1140,8 @@ Mechanical, no checker required:
    ≈7,500 target already: the #1720 engine/runtime cut and #1707's own
    capability eviction landed in parallel and compounded rather than
    merely adding. Crude, gameable by moving code, so secondary to (1).
-4. **Crates changed by adding a capability** — **one** for direct-Rust apps
-   (the capability crate alone; `nmp` needs no companion edit), **two**
-   including `nmp-ffi` when a native projection is wanted. Target reached.
+4. **Crates changed by adding a capability** — **one** (the capability crate
+   alone; `nmp` needs no companion edit). Target reached.
 
 **The exception is gone.** `nmp-runtime` used to own automatic-outbox-discovery
 glue (`nmp-runtime/src/nip65.rs`, feature-gated) that depended on `nmp-nip65`,
@@ -1232,8 +1220,8 @@ the value types — `PendingWrite` owning its own transitions rather than
   capabilities and the routing API must give it nothing to grip.
 - The load-bearing boundaries: `nmp-store`'s single write transaction;
   `nmp-signer`'s zeroize-only manifest; `nmp-grammar`'s dependency-light hub
-  position; the manifest-is-the-proof crates; `nmp-cli`'s zero NMP deps;
-  and the fact that no crate below the facade names a routing protocol.
+  position; the manifest-is-the-proof crates; and the fact that no crate
+  below the facade names a routing protocol.
 - No backend abstraction over the store without a real second backend
   (#1495), and no invented seams: a trait with one production implementor
   and no cycle to break is dead surface.
@@ -1257,13 +1245,6 @@ the value types — `PendingWrite` owning its own transitions rather than
 
 Marked open on purpose; do not infer answers.
 
-1. **FFI scaling for hundreds of capabilities.** Compiled materializers must
-   be linked into the native staticlib, so per-capability accumulation
-   moves to `nmp-ffi` rather than disappearing. Hand-written per-NIP
-   Swift/Kotlin projection does not scale to hundreds of kinds; the likely
-   direction is a generic FFI surface (the two nouns + registered-payload
-   minting) with typed capability vocabulary in native packages, but nobody
-   has designed it.
 2. **What constitutes the deterministic engine, and whether any owner
    inside it earns a package.**
    The engine/runtime boundary is settled. The internal package

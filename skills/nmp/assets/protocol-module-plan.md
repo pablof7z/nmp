@@ -44,9 +44,6 @@
 | Tier | Public semantic API | Ownership/teardown | Current or target |
 |---|---|---|---|
 | Rust | | | |
-| FFI | | | |
-| Swift | | | |
-| Kotlin | | | |
 
 ## Governance and falsifiers
 

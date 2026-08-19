@@ -5,7 +5,7 @@ may change when a falsifier proves the current shape unsafe or incomplete.
 
 "Provisional" does not mean casual drift. Public changes require evidence,
 cross-surface/persistence impact review, explicit human signoff, synchronized
-Rust/Swift/Kotlin falsifiers, and removal of the superseded path.
+falsifiers, and removal of the superseded path.
 
 ## What builders can rely on
 
@@ -35,9 +35,8 @@ Known pressure exists around:
 - filter-only query identity becoming selection + source + access;
 - aggregate coverage becoming cache/acquisition/shortfall evidence;
 - current account splitting into current-pubkey input and signer providers;
-- crash-safe receipt/pending-row records;
-- optional protocol-module packaging; and
-- Android/native secure-provider projection.
+- crash-safe receipt/pending-row records; and
+- optional protocol-module packaging.
 
 The guide uses one coherent illustrative spelling so the product can be
 evaluated. It does not promise those identifiers.
@@ -47,8 +46,8 @@ evaluated. It does not promise those identifiers.
 1. Pin a commit or release tag.
 2. Read the surface-change entry and [current status](03-status-map.md) before
    upgrading.
-3. Regenerate/rebuild matched Rust and native bindings together.
-4. Run the platform and protocol-module falsifiers your app depends on.
+3. Rebuild against the pinned commit.
+4. Run the protocol-module falsifiers your app depends on.
 5. Delete use of the superseded shape rather than keeping compatibility
    adapters in application code.
 
@@ -59,7 +58,7 @@ governance snapshots define the actual surface.
 
 Before declaring v2, NMP must prove one canonical facade, crash-safe writes,
 scoped evidence, bounded delivery, signer providers, protocol composition,
-permanent diagnostics, and Rust/Swift/Kotlin parity. Only then should semantic
+and permanent diagnostics. Only then should semantic
 versioning turn current provisional shapes into compatibility promises.
 
 ---

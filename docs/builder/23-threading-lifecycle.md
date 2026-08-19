@@ -11,19 +11,8 @@ effects. Network frames, clocks, signer results, AUTH callbacks, and other
 nondeterministic inputs enter through explicit capability boundaries.
 
 App callbacks and presentation code do not execute inside the engine reducer.
-A SwiftUI consumer still follows normal main-actor rules:
-
-```swift
-.task {
-    for await snapshot in try engine.observe(.single(demand)) {
-        rows = snapshot.rows
-    }
-}
-```
-
-Kotlin consumers collect a `Flow` in their chosen coroutine scope. Rust callers
-use the facade's observation type. Platform projections may differ in syntax,
-not in ownership or ordering semantics.
+A consumer observes through the facade's observation type using its
+platform's ordinary task/scope rules.
 
 ## Query and diagnostic observations are latest state
 
@@ -96,15 +85,6 @@ task even if a cloned engine handle, live subscription, or cancellation token
 survives.
 The independent 250 ms capability-decision grace remains an engine-loop
 deadline, so a slow HTTP endpoint cannot hold up WebSocket work.
-
-The public Swift acquisition path is runtime-qualified on macOS and an actual
-iOS Simulator process. Host XCTest executes a local-hostname NIP-11 fetch through
-`NMPEngine.relayInformation(for:policy:)`, proves the MainActor can progress
-while Rust waits for HTTP, and preserves typed malformed-document refusal.
-Simulator XCTest executes a public-hostname fetch through the same facade and
-therefore exercises the iOS platform resolver. Master packages the complete
-device + simulator + macOS XCFramework slice set. Physical-device runtime
-evidence remains separate.
 
 ## Current implementation
 

@@ -90,26 +90,18 @@ candidates: a constructor argument, or a `.with()` chain. The answer was
 **neither** — `identity` is a *defaulted field* on `WriteIntent`, defaulting
 to `Active` (`#[default] Active`, `crates/nmp-grammar/src/write.rs:315`).
 
-Why not `.with()`: UniFFI Records have no methods, so a `.with_identity()`
-chain cannot project across FFI at all — the pattern would exist in Rust and
-be unspeakable in Swift/Kotlin, splitting the API's shape per platform for no
-gain. Why not a required constructor argument: it taxes the common case. The
-overwhelming majority of writes publish as the current account; forcing every
-one of them to say so is exactly the ceremony this design exists to delete.
+Why not `.with()`: a builder-chain method on `WriteIntent` would exist
+alongside the plain struct-literal construction every composer and test
+already uses, splitting the API's shape for no gain. Why not a required
+constructor argument: it taxes the common case. The overwhelming majority of
+writes publish as the current account; forcing every one of them to say so is
+exactly the ceremony this design exists to delete.
 
-A defaulted field is the one spelling that is idiomatic on *both* sides of
-the boundary: in Rust, `WriteIntent` stays the all-pub record that composers
-and tests already construct (`..Default::default()` or struct literal); at
-FFI, `#[uniffi(default = ...)]` would make it an omittable labeled argument.
-
-That last half did not survive contact with UniFFI. `FfiWriteIntent.identity`
-carries no default and must be stated
-(`crates/nmp-ffi/src/types.rs:849-857`): UniFFI 0.29 record defaults accept
-only literals, so an enum-valued default is not expressible at that boundary
-at all. The ergonomic native tiers — `NMP`'s `WriteIntent`,
-`com.nmp.sdk.WriteIntent` — default it to `.active` in their own language,
-which is where app code writes it. In Rust the common case still writes
-nothing; the explicit case writes `identity: Identity::Explicit(pk)`.
+A defaulted field is the idiomatic spelling in Rust: `WriteIntent` stays the
+all-pub record that composers and tests already construct
+(`..Default::default()` or struct literal), with `identity` defaulting to
+`Active`. The common case still writes nothing; the explicit case writes
+`identity: Identity::Explicit(pk)`.
 
 ## 4. Per-payload semantics, and why the differences are the point
 
@@ -201,28 +193,21 @@ bech32. The full statement of the rule and its other consequences live in
 ; what this document owns is the concrete
 casualty on the identity surface.
 
-**The casualty:** `FfiWriteIntent.identity_override` used to accept hex OR
-bech32 npub *by design*, on the argument that "an identity is the one input an
-app most plausibly holds in display form". That is a genuine argument — apps
-really do hold identities in display form — and under this rule it is
-genuinely wrong: holding a value in display form is a fact about the app's UI,
-and the place display forms are decoded is therefore the app's own boundary,
-not NMP's write plane. `FfiIdentity::Explicit { pubkey: String }`
-(`crates/nmp-ffi/src/types.rs:820-841`) now takes 64-char hex and nothing
-else; a well-formed `npub` is refused with
-`FfiError::InvalidPublicKey` before any engine call. The app decodes with
-`decode_nostr_entity` (the exported bech32 codec,
-`crates/nmp-ffi/src/entity.rs`) at the moment it *receives* the display form
-from a user, and hands NMP a pubkey.
+**The enforcement:** naming a real key type forecloses the leniency question
+before it can be asked. `Identity::Explicit` takes `PublicKey`
+(`crates/nmp-grammar/src/write.rs:326`) — never a string, so there is no
+argument to have about whether it should also accept a bech32 `npub` "for
+convenience"; the type does not admit one. An app that holds an identity in
+display form decodes it at its own boundary, with `decode_nostr_entity` (the
+bech32 codec `nmp-grammar` owns and `nmp` re-exports), and hands NMP a
+`PublicKey`.
 
-The failure mode the old leniency invites is boundary creep: once one write
-field accepts either encoding "for convenience", every pubkey-shaped input is
-an argument about which encodings it takes, error surfaces double (invalid
-hex vs invalid bech32 vs valid-bech32-wrong-variant — the `nsec` refusal in
-`crates/nmp-ffi/src/convert.rs:177` exists because of exactly this), and
-"what does NMP accept here" stops having one answer. One decode door
-(`decode_nostr_entity`), one internal representation (`PublicKey`), zero
-bech32 below the app boundary.
+The failure mode a leniency exception would invite is boundary creep: once
+one write field accepted either encoding "for convenience", every
+pubkey-shaped input becomes an argument about which encodings it takes, and
+error surfaces double (invalid hex vs invalid bech32 vs
+valid-bech32-wrong-variant). One decode door (`decode_nostr_entity`), one
+internal representation (`PublicKey`), zero bech32 below the app boundary.
 
 ## 7. A capability crate never resolves the author — OWNER RULING, 2026-08-17
 

@@ -1,13 +1,9 @@
 # Diagnostics is the permanent proof surface
 
 NMP owns machinery the app deliberately does not. Diagnostics makes every
-invisible decision inspectable without becoming a control API.
-
-```swift
-for await snapshot in engine.observeDiagnostics() {
-    diagnosticsModel.apply(snapshot)
-}
-```
+invisible decision inspectable without becoming a control API. It is its own
+permanent observation stream, folded into app state the same way a query
+snapshot is.
 
 Observing diagnostics cannot change demand, routes, retry, limits, or store
 state.

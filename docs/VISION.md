@@ -322,18 +322,15 @@ See `docs/design/bounded-delivery.md` for the contract.
 | Diagnostics and destructive engine reset | When reset/logout is requested | User-facing reset confirmation |
 
 The supported app assembly path is one invariant-preserving Rust facade used by
-direct Rust consumers and by FFI. Swift and Kotlin SDKs project that facade into
-native reactive types. Mechanism crates are implementation units, not alternate
+direct Rust consumers. Mechanism crates are implementation units, not alternate
 ways for apps to assemble a partially-correct engine.
 
 This ownership table does not require each app to rebuild the open-ended Nostr
-content renderer. Optional content/UI packages may consume the same public
-facade to provide reusable parsing, exact locator values, component-scoped
-ordinary observations, native primitives, and styled source-installable
-components. They remain replaceable consumers above the engine, never a third
-engine noun or a source of routing, store, navigation, or product-policy truth.
-See
-`docs/design/ui-components-strategy.md`.
+content renderer. Optional content packages may consume the same public
+facade to provide reusable parsing, exact locator values, and component-scoped
+ordinary observations. They remain replaceable consumers above the engine,
+never a third engine noun or a source of routing, store, navigation, or
+product-policy truth.
 
 ## 8. Validation record
 
@@ -341,10 +338,6 @@ The original milestone gates established the thesis in stages: grammar,
 compiler/router, store/transport/outbox, Swift boundary, an iOS falsifier, then a
 second-platform proof. Those implementation verdicts remain recorded in reviews
 and GitHub Issues; they do not make later architectural corrections retroactive.
-
-The minimal JVM Kotlin/Flow projection and live-relay falsifier landed in #54.
-It proves the reactive dialect and deterministic cancellation shape, not the
-full Android/AAR/Compose milestone or parity with the promoted target contract.
 
 GitHub Issues are the tactical queue. `docs/known-gaps.md` states what remains
 unbuilt.

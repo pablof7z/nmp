@@ -11,7 +11,6 @@ Match evidence to the claim. Compilation proves shape; it does not prove relay a
 | Scripted async test | bounded lifecycle and status sequencing | store/transport integration |
 | Facade integration | canonical store, routing, signing, observation | process-loss recovery unless restarted |
 | Crash/restart | atomic acceptance and durable reattachment | public relay interoperability |
-| Platform parity | native wrappers preserve Rust semantics | device/package integration unless run there |
 | Bounded live smoke | packaging and actual relay/signature path | deterministic exhaustive correctness |
 
 ## Consumer workflow
@@ -30,29 +29,8 @@ Match evidence to the claim. Compilation proves shape; it does not prove relay a
 Direct Rust supported-facade proof:
 
 ```sh
-cargo test -p nmp-consumer-check
 cargo test -p <each-touched-crate>
 ```
-
-Swift from a clean-clone shape:
-
-```sh
-scripts/build-swift-xcframework.sh --sim-only
-cd Packages/NMP
-swift test
-```
-
-Use a full/device xcframework and real device when the claim concerns device signing, package integration, or device-only behavior.
-
-Kotlin/JVM:
-
-```sh
-scripts/build-kotlin-jvm.sh
-cd Packages/NMPKotlin
-./gradlew test
-```
-
-This does not prove Android AAR, lifecycle, Keystore, package visibility, `Intent`, or Compose behavior.
 
 Repository merge gate after targeted loops:
 
@@ -72,7 +50,6 @@ At minimum exercise:
 - source disconnect/reconnect while demand remains live;
 - no planned source and local-limit shortfalls;
 - last-observer teardown;
-- two Kotlin collectors versus one explicitly shared flow;
 - pagination/window replacement without a permanent duplicate observation; and
 - query/NIP-02 observation refusal with no escaped handle, plus terminal NIP-02 action refusal on the returned `FollowAction`.
 
@@ -88,8 +65,8 @@ Exercise the product-relevant subset:
 - an unacked `RelayState::Sent` is never treated as terminal and never offers blind retry;
 - pre-acceptance failure leaves no durable row/receipt;
 - `Ok` from publish is acceptance, so a returned handle names a write in custody; NIP-22 uses an ordinary `WriteIntent` with no second lifecycle, and NIP-29's `Group::publish` returns the same ordinary receipt stream;
-- `cancel` before signing commits `NotSent(Cancelled)` and refuses with a typed `CancelWriteError` afterwards; a bounded `publishQueue(afterReceiptID:limit:)` page shows a write parked on an unavailable signing provider, and `cancel` + `removePublishQueueEntry` genuinely removes it;
-- the queue read is paged, not exhaustive: cursor + `limit` return a stable ordering with no entry skipped or repeated across pages, and `publishQueue(forEventID:)` returns every open receipt owning identical event bytes rather than one of them;
+- `cancel` before signing commits `NotSent(Cancelled)` and refuses with a typed `CancelWriteError` afterwards; a bounded `publish_queue` page shows a write parked on an unavailable signing provider, and `cancel` + `remove_publish_queue_entry` genuinely removes it;
+- the queue read is paged, not exhaustive: cursor + `limit` return a stable ordering with no entry skipped or repeated across pages, and `publish_queue_for_event` returns every open receipt owning identical event bytes rather than one of them;
 - `result()` reduces to the promised `ReceiptResult`, preserving each destination's last state on a mixed publish/reject rather than a Boolean, and reports `ClosedWithoutOutcome`/`ReplayUnavailable` instead of inventing a terminal;
 - a relay fact's `event_id` identifies the exact bytes it is evidence about, so a receipt spanning successor generations never attributes one generation's relay evidence to another;
 - `SigningState::InFlight` and `AwaitingSigner` stay distinguishable end to end, since only the second is the app's cancel-and-remove obligation;
@@ -98,15 +75,14 @@ Exercise the product-relevant subset:
 - restart replays the durable `WriteFact` history in finite pages — `RelayWaiting::NotConnected`/`NeedsAuth`/`Eligible`/`BackingOff`, `Sent`, and terminal relay states — and reports lag as the typed `FactStreamLagged` rather than dropping frames;
 - old remote-signer close cannot detach its replacement;
 - app-stored whole-session payload is separate from event-store reset;
-- detaching a fact stream leaves the durable write intact, and is distinguishable in test from `cancel` ending the obligation; and
-- Kotlin receipt collection remains drained/bounded by ownership policy and repeated reattachment does not accumulate unnoticed bridges.
+- detaching a fact stream leaves the durable write intact, and is distinguishable in test from `cancel` ending the obligation.
 
 ## Protocol-module falsifiers
 
-Use the checklist in [Protocol authoring](protocol-authoring.md), then compare the same semantic operation through direct Rust and every projected native tier. Compare final unsigned/signed bytes, authority, rows, evidence, receipt facts, and teardown—not merely JSON shape.
+Use the checklist in [Protocol authoring](protocol-authoring.md), then verify the same semantic operation through direct Rust. Compare final unsigned/signed bytes, authority, rows, evidence, receipt facts, and teardown—not merely JSON shape.
 
 For engine-free composition such as NIP-22 comments, additionally prove that the
-operation is a protocol-owned free function at every tier, returns the ordinary
+operation is a protocol-owned free function, returns the ordinary
 `WriteIntent` noun, and reaches pending rows, receipts, correlation, and
 cancellation through generic `publish`. The absence of an engine method,
 protocol-specific intent carrier, and protocol-specific publication overload is
@@ -124,7 +100,7 @@ Drive a known demand through a scripted relay and assert semantic records:
 - query source evidence and shortfall; and
 - transport degradation when induced.
 
-Do not golden-test screenshots or health scores. Do not assert unprojected Rust-only fields from Swift/Kotlin — the rejection counters stop at raw UniFFI. Do not write a test for local-store degradation or recovery on any tier: there is no such state to observe, so any such test is asserting a surface that does not exist. Do cover the surfaces that *are* projected: `authSessions` for AUTH lifecycle and `stalledWrites`/`stalledWriteTotals` for stuck obligations.
+Do not golden-test screenshots or health scores. Do not write a test for local-store degradation or recovery: there is no such state to observe, so any such test is asserting a surface that does not exist. Do cover `auth_sessions` for AUTH lifecycle and `stalled_writes`/`stalled_write_totals` for stuck obligations.
 
 ## Boundedness
 

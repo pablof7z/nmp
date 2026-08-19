@@ -5,12 +5,8 @@ success boolean.
 
 ## Publish an event
 
-```swift
-let receipt = try await engine.publish(WriteIntent(
-    payload: .event(kind: appKind, tags: appTags, content: encodedContent),
-    routing: .auto
-))
-```
+Publishing takes a `WriteIntent` naming the event payload (kind, tags,
+content) and its routing — `.auto` says nothing and lets NMP route it.
 
 The payload is unsigned until NMP signs it. The engine or an enabled protocol
 module may validate closed typed context, but no stage mutates an already
@@ -115,18 +111,7 @@ expected pubkey, and id and carries a valid signature.
 ## Provider unavailability is a durable state
 
 If the selected signer is unavailable, the row remains visible and the receipt
-reports `awaitingSigner(pubkey)`.
-
-```swift
-for await fact in receipt.facts {
-    switch fact {
-    case .awaitingSigner(let pubkey):
-        showSignerUnavailable(pubkey)
-    default:
-        apply(fact)
-    }
-}
-```
+reports `awaitingSigner(pubkey)` among the facts the receipt stream delivers.
 
 A configured provider being unavailable is not terminal failure. The obligation
 survives until that provider becomes available, the app cancels it, protocol
@@ -140,7 +125,7 @@ Explicit cancellation or terminal pre-signature failure removes the pending row
 through the ordinary store door. If it provisionally displaced a replaceable
 winner, that previous row is offered back through the same insertion logic.
 
-The supported Rust, Swift, and Kotlin engines expose cancellation by stable
+The supported engine exposes cancellation by stable
 receipt id. It is legal only while the accepted write is still unsigned:
 successful cancellation returns `WriteCancellationOutcome.cancelled` and
 persists the matching receipt fact, repeating it is idempotent, and unknown,
@@ -240,11 +225,8 @@ lanes.
 ## Protocol-aware publication
 
 An opt-in module can construct a typed operation while preserving the same
-receipt plane:
-
-```swift
-let receipt = try group.publish(photoDraft, durability: .durable)
-```
+receipt plane: a group's own `publish` call takes a photo draft and a
+durability policy and returns the ordinary receipt.
 
 The group contributes only NIP-29 context; the photo module owns the draft
 schema; core accepts, signs, stores, routes, and reports one intent.

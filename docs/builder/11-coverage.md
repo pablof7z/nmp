@@ -82,26 +82,11 @@ shrink or remove that watermark in the same correctness path.
 
 ## Choose freshness per observation
 
-Freshness is a closed policy on the existing query handle:
-
-```swift
-let feedAvatar = NMPDemand(
-    selection: profileFilter,
-    freshness: .maxAge(seconds: 4 * 60 * 60)
-)
-
-let profilePage = NMPDemand(
-    selection: profileFilter,
-    freshness: .live
-)
-
-let preview = NMPDemand(
-    selection: eventFilter,
-    routing: .explicit(explicitRelays),
-    cache: .strict,
-    freshness: .cacheOnly
-)
-```
+Freshness is a closed policy on the existing query handle. The same profile
+selection can be observed two ways: a feed avatar accepting four-hour-old
+coverage under `maxAge`, or a profile page demanding `live`. A preview can
+pair an explicit route, strict cache, and `cacheOnly` freshness to serve only
+what is already cached from a pinned relay set.
 
 - `live` serves cached rows immediately and keeps ordinary remote acquisition
   open until the handle is dropped.

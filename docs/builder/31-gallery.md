@@ -45,28 +45,11 @@ which account each row addresses.
 
 ## 4. NIP-02 reusable authors
 
-```swift
-let authors = Nip02.myFollows()
-let selection = NMPFilter(
-    kinds: .literal(callerSelectedKinds),
-    authors: authors
-)
-```
-
-The NIP-02 module owns the kind:3 projection. The caller chooses outer kinds
+The NIP-02 module owns the kind:3 projection and exposes a reusable follows
+binding. The caller chooses outer kinds
 and presentation. Core owns neither a home feed nor kind:1 preference.
 
 ## 5. NIP-29 group management
-
-```swift
-let list = parseSimpleGroupsListTolerant(row)          // NIP-51 Simple groups via NIP-29 capability
-let selected = list.items[0]                           // app-owned selection
-let scope = try NMPRelayScope.on([selected.hostRelay]) // named once -- NIP-29
-let group = scope.group(selected.groupID)
-let receipt = try group.addUser(
-    engine: engine, authorPubkeyHex: myPubkeyHex, pubkeyHex: pubkey, role: "admin"
-)
-```
 
 The remembered group/host list is NIP-51 kind `10009`. `nmp-nip29` exposes its
 observational decode as part of NMP's remembered-groups product capability;
@@ -79,51 +62,27 @@ NIP-29 operation needs.
 
 ## 6. NIP-C7 chat message in a NIP-29 group
 
-```swift
-let message = NipC7.chat(text)
-let receipt = try group.publish(message, using: engine)
-```
-
 Two owners compose without a content monopoly: NIP-C7 owns the kind:9 schema
 and NIP-29 adds only group context. Core signs once and routes one intent.
 
 ## 7. Podcast identity override
 
-```swift
-let receipt = try engine.publish(.init(
-    draft: episodeDraft,
-    durability: .durable,
-    signer: .identity(podcastIdentity)
-))
-```
-
-The podcast key signs this event without becoming current pubkey. If its
+A write can select a signing identity other than the current pubkey. The
+podcast key signs this event without becoming current pubkey. If its
 signing provider is offline, the canonical pending row remains visible and the receipt
 waits for the configured provider to become available.
 
 ## 8. Explicitly non-durable presence signal
 
-```swift
-let receipt = try engine.publish(.init(
-    draft: presenceDraft,
-    durability: .nonDurable
-))
-```
-
-The publication obligation is not resumed after process loss. Receipt facts are
+A write can opt out of durable acceptance. The
+publication obligation is not resumed after process loss. Receipt facts are
 still observable and reattachable; process loss becomes an explicit policy-
 abandoned terminal rather than silent disappearance.
 
 ## 9. AUTH-scoped protocol query
 
-```swift
-let demand = group.demand(
-    selection: groupOwnedSelection,
-    accessIdentity: groupIdentity
-)
-```
-
-The module mints validated host authority. Evidence remains scoped to the AUTH
+A protocol module can mint a demand scoped to a validated host authority.
+Evidence remains scoped to the AUTH
 identity and cannot prove acquisition for another context.
 
 ## 10. Permanent diagnostics

@@ -49,8 +49,7 @@ opaque subscription or invent a favored home-feed composition.
 - Do not claim an empty page or local window represents the global result.
 
 The public shape should be promoted only after it proves separate acquisition
-and presentation cursors, bounded memory, stable identity, and parity across
-Rust, Swift, and Kotlin.
+and presentation cursors, bounded memory, and stable identity.
 
 ---
 

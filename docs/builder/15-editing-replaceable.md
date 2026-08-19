@@ -59,49 +59,18 @@ survive restart. A newer valid relay event is materialized with the same
 operation, producing a successor generation under the same receipt. The app
 does not refetch, rebuild, retry, or allocate a second lifecycle.
 
-## Swift API
-
-Use the action directly when an application owns its own presentation:
-
-```swift
-let action = nmp.follow(targetPubkey)
-
-for await status in action.status {
-    switch status {
-    case .receipt(_, let writeStatus):
-        render(writeStatus)
-    case .failed(let reason):
-        render(reason)
-    }
-}
-```
-
-Successful action state is the ordinary receipt stream. Immediate typed
+The action's status stream is the ordinary receipt stream. Immediate typed
 failure covers malformed target, signed-out account, engine closure, or an
 unavailable receipt. A missing automatic-route provider is refused before
 custody.
-
-For a bindable live relationship:
-
-```swift
-let following = try NMPFollowing(engine: nmp, target: targetPubkey)
-
-NMPFollowButton(following: following)
-NMPUserCard(pubkey: targetPubkey, profile: profile, following: following)
-```
-
-`NMPFollowing` copies NMP's relationship, availability, and receipt facts onto
-the main actor. `NMPFollowButton` renders that state and forwards a tap. It is
-actionable for a known cached relationship and for the explicit no-list state;
-neither type parses tags, chooses a base, selects relays, signs, retries, or
-invents success.
 
 ## Extending the pattern
 
 `ReplaceableOperation` is the generic Rust write payload for protocol modules
 that need retained, replayable semantic edits. Only an engine-issued
-registration can mint it. The raw FFI write API deliberately cannot: native
-apps reach it through a typed protocol action that owns the schema and policy.
+registration can mint it. The raw write API deliberately cannot: an
+application reaches it through a typed protocol action that owns the schema
+and policy.
 
 Another replaceable protocol helper must still define and falsify:
 
@@ -123,11 +92,10 @@ The shipped falsifiers cover:
 - capability-default first value, cached-source materialization, restart, and
   later-source replay under one receipt;
 - signed-out and providerless refusal without a write;
-- a real loopback indexer/outbox relay through both direct Rust and the iOS FFI
-  surface: initial state, follow/ACK, reactive following state, duplicate
+- a real loopback indexer/outbox relay through direct Rust: initial state,
+  follow/ACK, reactive following state, duplicate
   follow, preservation of an existing contact, unfollow/ACK, and reactive
-  not-following state;
-- Swift action-state mapping and Gallery accessibility/runtime behavior.
+  not-following state.
 
 ---
 

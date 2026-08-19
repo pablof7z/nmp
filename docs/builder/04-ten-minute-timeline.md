@@ -9,34 +9,18 @@ draft, and inspect both result streams. There is no NMP app object or provider.
 
 ## 1. Define what belongs to the app
 
-The app chooses its protocol and presentation policy:
-
-```swift
-enum AppProtocol {
-    // This number belongs to the app/protocol, not NMP core.
-    static let recordKind: UInt16 = 9_999
-}
-```
+The app chooses its protocol and presentation policy: an app-owned constant
+naming its record kind (say, 9999) belongs to the app/protocol, not to NMP
+core.
 
 In a real protocol, an opt-in NIP module would expose the kind and typed
 builder. Raw kinds remain available for app-owned or experimental protocols.
 
 ## 2. Construct one engine
 
-```swift
-import NMP
-
-let engine = try NMPEngine(configuration: .init(
-    store: .persistent(applicationSupport: "nmp.store"),
-    bootstrap: .indexers([
-        "wss://purplepag.es",
-        "wss://relay.primal.net"
-    ])
-))
-
-let privateKey = try NMPPrivateKey(bytes: importedSecretBytes)
-try engine.session.add(privateKey: privateKey, makeCurrent: true)
-```
+Constructing the engine takes a persistent store location and a set of
+bootstrap indexer relays. Adding a private-key account and marking it current
+follows.
 
 Bootstrap relays are operator discovery policy. They are not a list that every
 query or write is broadcast to. NMP discovers and compiles actual source lanes
@@ -47,24 +31,14 @@ dependency container you already own, or process service. NMP does not provide
 an application container.
 
 The private-key-backed account is needed only for the write later in this
-guide. A read-only app adds a decoded public-key-only account with
-`engine.session.add(publicKey:makeCurrent:)` when a binding needs current
-selection; signing is unsupported for that account rather than temporarily
-unavailable.
+guide. A read-only app adds a decoded public-key-only account to the session
+and marks it current when a binding needs current selection; signing is
+unsupported for that account rather than temporarily unavailable.
 
 ## 3. Declare a query value
 
-```swift
-let demand = NMPDemand(
-    selection: NMPFilter(
-        kinds: .literal([AppProtocol.recordKind]),
-        authors: .literal([selectedAuthor])
-    ),
-    access: .public
-)
-```
-
-This query is deliberately boring. It proves the primitive path without
+A demand pairs a selection — the app's record kind and a literal author — with
+public access. This query is deliberately boring. It proves the primitive path without
 smuggling a feed, follows list, profile convention, or favored kind into core.
 
 The three descriptor dimensions matter:
@@ -76,19 +50,9 @@ The three descriptor dimensions matter:
 
 ## 4. Observe native snapshots
 
-```swift
-for await snapshot in try engine.observe(.single(demand)) {
-    rows = snapshot.rows
-
-    for source in snapshot.acquisition {
-        renderSourceFact(source)
-    }
-
-    if !snapshot.shortfall.isEmpty {
-        renderLocalLimits(snapshot.shortfall)
-    }
-}
-```
+Observing the demand delivers snapshots: rows to render, per-source
+acquisition facts to render, and any shortfall to surface as a local-limit
+notice.
 
 The first snapshot may contain cached rows before any socket connects. Later
 snapshots update the same local view as sources connect, require AUTH, reach
@@ -97,64 +61,25 @@ EOSE, reconcile a watermark, disconnect, or hit a local limit.
 There is no `syncHealth` or global `complete` flag. The app interprets scoped
 facts for its own UX.
 
-In SwiftUI, the loop belongs in the view/model task you already use:
+The observation loop belongs in the view/model task or scope you already use.
 
-```swift
-.task(id: demand) {
-    for await snapshot in try engine.observe(.single(demand)) {
-        model.apply(snapshot)
-    }
-}
-```
-
-Cancellation and ARC release the observation. The app never sends `CLOSE` or
+Cancellation releases the observation. The app never sends `CLOSE` or
 reopens a Nostr `REQ` itself.
 
 ## 5. Publish an immutable draft
 
-```swift
-let draft = NMPDraft(
-    kind: AppProtocol.recordKind,
-    tags: [],
-    content: encodedRecord
-)
+A draft carries the app's record kind, tags, and content. Publishing it
+durably returns a receipt whose facts are rendered as they arrive.
 
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable
-))
-
-for await fact in receipt.facts {
-    renderWriteFact(fact)
-}
-```
-
-The signer registered for `$currentPubkey` is the default. The app can override
-it for one operation:
-
-```swift
-let receipt = try engine.publish(.init(
-    draft: draft,
-    durability: .durable,
-    signer: .identity(podcastIdentity)
-))
-```
-
-That override does not change the current pubkey.
+The signer registered for the current pubkey is the default. The app can
+override it for one operation by naming an explicit identity on the publish
+call; that override does not change the current pubkey.
 
 ## 6. Understand the immediate local result
 
 After durable `accepted(intentId)`, any matching query sees the canonical local
-row through the store's normal invalidation path:
-
-```swift
-switch row.signature {
-case .pending:
-    renderPending()
-case .signed(let signature):
-    renderPublished(signature: signature)
-}
-```
+row through the store's normal invalidation path: its signature state is
+either pending or signed, and the app renders each state accordingly.
 
 There is no app-maintained optimistic copy. When the configured provider
 becomes available, the same row
@@ -177,13 +102,7 @@ Those are observations, not a single success boolean.
 
 ## 7. Keep diagnostics permanent
 
-```swift
-for await diagnostics in engine.observeDiagnostics() {
-    diagnosticsModel.apply(diagnostics)
-}
-```
-
-Render the current source plan, exact wire filters, connection/AUTH state,
+Diagnostics is its own permanent observation stream. Render the current source plan, exact wire filters, connection/AUTH state,
 events received by relay and kind, coverage watermarks, limits, and write
 attempts. That screen is the proof surface for machinery the app deliberately
 does not own.

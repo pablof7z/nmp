@@ -8,19 +8,9 @@ No NMP type needs to own the scene graph.
 
 ## Hold the engine in app-owned state
 
-The exact spellings remain provisional, but the dependency shape is simple:
-
-```swift
-@Observable
-final class LibraryModel {
-    let nmp: NMPEngine
-    var rows: [NMPRow] = []
-
-    init(cacheURL: URL) throws {
-        nmp = try NMPEngine(configuration: .persistent(cacheURL))
-    }
-}
-```
+The exact spellings remain provisional, but the dependency shape is simple: an
+app-owned model type (say, `LibraryModel`) holds the constructed engine
+alongside its own row state.
 
 `LibraryModel` is the app's type. It may also hold a REST client, its own
 database, feature flags, or any other dependency. NMP neither knows nor cares.
@@ -31,31 +21,17 @@ not build an NMP-specific provider hierarchy around it.
 
 ## Observe in the app's natural scope
 
-A view model, reducer effect, SwiftUI task, Kotlin coroutine, or Rust task can
-own an observation:
-
-```swift
-func observeLibrary() async throws {
-    let demand = NMPDemand(
-        selection: .filter(kinds: [9999]),
-        access: .public
-    )
-
-    for await snapshot in try nmp.observe(.single(demand)) {
-        rows = snapshot.rows
-        sourceEvidence = snapshot.acquisition
-    }
-}
-```
+A view model, reducer effect, or task can
+own an observation: it declares a demand and folds each delivered snapshot's
+rows and acquisition evidence into app state.
 
 Dropping the final observation owner withdraws its demand. NMP performs the
 reference counting, dependency repair, REQ close, and reconnect work. The app
 does not mirror subscription lifecycle or keep expanded author and relay sets
 alive.
 
-Use the platform's normal rules when updating UI state. For example, a Swift
-consumer running off the main actor must hop to `MainActor` before changing
-UI-bound properties; NMP does not invent another executor model.
+Use the platform's normal rules when updating UI state; NMP does not invent
+another executor model.
 
 ## Keep app data and NMP data in their owning stores
 
@@ -119,4 +95,4 @@ be an upstream NMP gap rather than downstream application machinery.
 ---
 
 <!-- nav-footer -->
-<sub>[Index](README.md) · [Packaging](08-packaging.md) →</sub>
+<sub>[Index](README.md)</sub>

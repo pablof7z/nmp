@@ -42,7 +42,6 @@ actually calls, not an internal shortcut.
 | One crate working with real collaborators | That crate's integration tests |
 | A complete promise of the public Rust API | `crates/nmp/tests/` through `nmp` |
 | A readable example across several layers | Canonical feature plus `@acceptance`, when the example adds understanding |
-| FFI or native-platform behavior | A shared parity test, or a native Swift or Kotlin test |
 | Compatibility with a public provider or network | Opt-in live check |
 
 Do not list every possible input combination in Gherkin or use public

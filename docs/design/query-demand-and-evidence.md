@@ -1,7 +1,7 @@
 # Query demand and acquisition evidence
 
-- **Status:** BUILT for the full descriptor and scoped evidence contract across
-  Rust, FFI, Swift, and Kotlin (#49/#714/#1106). `Demand` identity is
+- **Status:** BUILT for the full descriptor and scoped evidence contract in the
+  `nmp` facade (#49/#714/#1106). `Demand` identity is
   `Selection + ReadRouting + AuthenticateAs`; every `Derived.inner` carries
   its own complete demand, and its cache/freshness policy is enforced at that
   exact boundary; persisted coverage, wire sharing, and evidence are

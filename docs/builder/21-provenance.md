@@ -58,9 +58,9 @@ module that needs "these relays are this recipient's verified inboxes" owns
 that validation itself and returns one ordinary `WriteIntent` containing an
 `EventBuilder` plus the exact route minted from those verified facts. NMP does
 not currently ship a NIP-17 composer, so this document deliberately does not
-invent a Swift call shape for one. The old `.unsigned(giftWrapDraft)` example
+invent a call shape for one. The old `.unsigned(giftWrapDraft)` example
 was removed with `WritePayload::Unsigned`; the current generic builder payload
-is `.event(kind:tags:content:createdAt:)`, and a future semantic NIP-17 door
+is `WritePayload::Event(EventBuilder)`, and a future semantic NIP-17 door
 must own its composition rather than asking presentation code to fill those
 fields.
 

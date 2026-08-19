@@ -309,12 +309,6 @@ Source anchors as PR #1011 left them — historical, not current (see §11):
   `contextualize_group_event` / `GroupPublication` seam, required both Group
   intent constructors and their schema/no-`previous` falsifiers, and required
   the one read and one write doors.
-- Native projection is still read-only:
-  `crates/nmp-ffi/src/nip29.rs:1-38`,
-  `Packages/NMP/Sources/NMP/NIP29.swift:1-12`, and
-  `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/NIP29.kt:1-13` expose only
-  `groupDiscoveryDemand`. Issue #1015 owns a future native Group publication
-  door; this document claims no Swift, Kotlin, or Android write API.
 
 ---
 
@@ -445,9 +439,6 @@ state the underlying kinds cannot establish.
   `member_list_includes`, `admin_list_includes`, `union`/`intersect`/`minus`.
 - `crates/nmp/src/nip29/read.rs` — folds one branch per host into the one
   `LiveQuery` (`LiveQuery::single`/`LiveQuery::union`), consuming #1108.
-- `crates/nmp-ffi/src/nip29.rs` — `FfiRelayScope`, `FfiGroup`,
-  `FfiGroupPredicate` project the full read/write API, not only
-  discovery; Swift/Kotlin projection is the remaining native work.
 The ownership check that used to be retargeted at this shape — requiring
 `RelayScope`, the evidence-scoped predicates, both falsifiers by name, and
 forbidding `crates/nmp-nip29/src/{group,demand}.rs`, `crates/nmp/src/group.rs`,

@@ -29,14 +29,10 @@
   - [Protocol declarations and operations](27-recipes-and-choosing.md)
   - [Protocol modules](32-extending.md)
   - [Mixed Nostr content](34-content.md)
-  - [SwiftUI content and components](35-swiftui-ui.md)
-  - [Controlled relay identity UI](36-relay-ui.md)
   - [Kind-diverse examples](31-gallery.md)
 - **Integrate**
-  - [Native platform shapes](06-first-app.md)
+  - [Embedding NMP in an app](06-first-app.md)
   - [Brownfield adoption](07-brownfield.md)
-  - [Packaging](08-packaging.md)
-  - [Platform projections](30-platform-guides.md)
 - **Reference**
   - [Glossary](glossary.md)
   - [Why NMP](01-why-nmp.md)

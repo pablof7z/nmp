@@ -7,31 +7,20 @@ code.
 
 ## Modules are optional semantic libraries
 
-Enabling a module adds protocol knowledge around the same engine:
-
-```swift
-import NMP
-import NMPNip29
-import NMPNipC7
-```
+Enabling a module adds protocol knowledge around the same engine, for example
+by depending on `nmp-nip29` or `nmp-nipc7` alongside the core `nmp` crate.
 
 It does not add an NMP app container, register scene lifecycle, create another
 store, or open its own relay pool.
 
-The exact Cargo/SwiftPM/Gradle packaging is provisional. Opt-in code weight and
+The exact Cargo packaging is provisional. Opt-in code weight and
 one canonical engine path are not.
 
 ## Closed reusable declarations
 
-A helper may package the public binding grammar:
-
-```swift
-let authors = Nip02.myFollows()
-let selection = NMPFilter(
-    kinds: .literal(callerSelectedKinds),
-    authors: authors
-)
-```
+A helper may package the public binding grammar: for example, a reusable
+`myFollows()` constructor that a caller composes into its own selection
+alongside caller-chosen kinds.
 
 `myFollows()` expands to the NIP-02 contact-list projection. NMP can print,
 hash, deduplicate, re-root, and diagnose it exactly as if the app wrote the
@@ -46,23 +35,14 @@ values. A helper is not a new reactive primitive or hidden subscription.
 ## Composing across exact owners
 
 Some app features span two protocols. They compose across module boundaries;
-they do not relabel one module's value inside another (#858):
-
-```swift
-for await snapshot in try engine.observe(currentAccountGroupListDemand()) {
-    // NMP's NIP-29 product capability decodes the observational NIP-51 kind:10009 list.
-    guard let list = snapshot.rows.first.map(parseSimpleGroupsListTolerant)
-    else { continue }
-    // The app selects one entry and names the relay(s) it discovers on with
-    // NIP-29. A group can live on more than one relay, so the app names a SET
-    // -- here a singleton, since the list only carried one host per entry.
-    guard let selected = list.items.first else { continue }
-    let scope = try NMPRelayScope.on([selected.hostRelay])
-    let group = scope.group(selected.groupID)
-    // Content selection is schema/app-owned; NIP-29 does not invent a fixed
-    // group content-kind catalog.
-}
-```
+they do not relabel one module's value inside another (#858). Observing the
+current account's group-list demand delivers a row that NMP's NIP-29 product
+capability decodes as the observational NIP-51 kind:10009 list. The app
+selects one entry and names the relay(s) it discovers on with NIP-29 — a
+group can live on more than one relay, so the app names a set, a singleton
+when the list carries only one host per entry. Content selection within the
+resulting group scope is schema/app-owned; NIP-29 does not invent a fixed
+group content-kind catalog.
 
 One product capability, no second projection:
 
@@ -81,9 +61,8 @@ relay scope. The selected group remains app state. NMP maintains no parallel
 cache, second projection, or protocol-specific subscription lifecycle.
 
 Saving that selected group is a typed semantic action, not a whole-event
-rewrite: `engine.addGroupToList(groupId:hostRelay:name:)` in Swift and
-`engine.addGroupToList(groupId, hostRelay, name)` in Kotlin return the ordinary
-receipt. Separate remove-group and add/remove-relay-in-use methods own only
+rewrite: `add_group_to_list` takes the engine and the selected group entry and
+returns the ordinary receipt. Separate remove-group and add/remove-relay-in-use functions own only
 their exact valid public tags. They preserve unrelated order, malformed
 evidence, and private content bytes; the host inside a `group` tag never
 becomes a publication destination.
@@ -91,18 +70,9 @@ becomes a publication destination.
 ## Semantic operations
 
 Protocol operations can own multi-event/state rules that should not leak into
-app code:
-
-```swift
-let scope = try NMPRelayScope.on([selectedHost])  // named once, never per-call
-let group = scope.group("research")
-
-let receipt = try group.createGroup(engine: engine, authorPubkeyHex: myPubkeyHex)
-try group.editMetadata(engine: engine, authorPubkeyHex: myPubkeyHex, name: "Research")
-let adminReceipt = try group.addUser(
-    engine: engine, authorPubkeyHex: myPubkeyHex, pubkeyHex: memberPubkeyHex, role: "admin"
-)
-```
+app code: a relay scope named once (never per-call), a group selected within
+it, and operations such as creating the group, editing its metadata, or
+adding a user with a role, each returning the ordinary receipt.
 
 NIP-29 owns the exact management events, tags, validation, group-state
 transition, and relay-scope authority required by those operations — the app
@@ -111,10 +81,9 @@ still uses core write receipts.
 
 ## Compose foreign drafts without stealing ownership
 
-```swift
-let message = NipC7.chat(text)
-let receipt = try group.publish(message, using: engine)
-```
+A NIP-C7 chat draft published through a NIP-29 group composes both owners into
+one write: NIP-C7 builds the message, the group publishes it through the
+engine.
 
 - NIP-C7 owns the kind:9 chat event schema.
 - NIP-29 adds only validated group context, including the `h` tag and the

@@ -46,9 +46,8 @@ library, or like an application framework in disguise?
 ### Embed it
 
 - [A ten-minute embedding](04-ten-minute-timeline.md)
-- [Native platform shapes](06-first-app.md)
+- [Embedding NMP in an app](06-first-app.md)
 - [Brownfield adoption](07-brownfield.md)
-- [Packaging](08-packaging.md)
 
 ### Read
 
@@ -80,12 +79,9 @@ library, or like an application framework in disguise?
 
 - [Reusable declarations and protocol operations](27-recipes-and-choosing.md)
 - [Guarantees and bug classes](28-patterns.md)
-- [Platform projections](30-platform-guides.md)
 - [Kind-diverse examples](31-gallery.md)
 - [Protocol modules and immutable composition](32-extending.md)
 - [Mixed Nostr content and live references](34-content.md)
-- [SwiftUI content and components](35-swiftui-ui.md)
-- [Controlled relay identity UI](36-relay-ui.md)
 - [Governed provisional API changes](33-versioning.md)
 - [Glossary](glossary.md)
 - [Open design: bounded/windowed observation](12-collection-mode.md)
