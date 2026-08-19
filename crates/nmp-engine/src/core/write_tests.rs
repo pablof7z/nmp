@@ -920,6 +920,188 @@ mod semantic_successor_tests {
         );
     }
 
+    /// A resolved coordinate question must CLOSE on the wire, not only in the
+    /// router's head.
+    ///
+    /// `release_coordinate_coverage` withdraws the observation the publish
+    /// gate opened, and that withdrawal mutates the router either way --
+    /// which is exactly what makes a lost CLOSE invisible from engine state.
+    /// The only honest witness is the frame: `WireOp::Close` naming this
+    /// coordinate REQ's own sub id, in an `Effect::Wire` addressed to the
+    /// read session it was opened on. `PlanDeltaMode::Incremental` means no
+    /// later recompile re-derives it, so a CLOSE dropped here is a
+    /// subscription the relay holds open for the life of the connection.
+    ///
+    /// Driven through the real publish path -- prepare, sign, connect,
+    /// admission flush, clean EOSE -- and never by calling the coverage door
+    /// directly, because the leak is in what the gate does with the door's
+    /// answer.
+    #[test]
+    fn a_resolved_coordinate_question_closes_its_req_on_the_wire() {
+        let author = Keys::generate();
+        let existing_person = Keys::generate().public_key();
+        let added_person = Keys::generate().public_key();
+        let source_relay = RelayUrl::parse("wss://close-source.example").unwrap();
+        let destination = RelayUrl::parse("wss://close-destination.example").unwrap();
+        let mut store = RedbStore::temporary().expect("temporary Redb store");
+        store
+            .insert(
+                source(&author, 1, "base body", &[existing_person]),
+                RelayObserved::new(source_relay.clone(), Timestamp::from(1)),
+            )
+            .unwrap();
+        let mut core = EngineCore::new(store, 10);
+        core.handle(EngineMsg::SetActivePubkey(Some(author.public_key())));
+        core.install_replaceable_materializer(ReplaceableMaterializerRegistration {
+            program: [31; 16],
+            format: [32; 16],
+            materializer: Arc::new(AddPeople),
+        });
+
+        let read_session = RelaySessionKey::unauthenticated(destination.clone());
+        let read_handle = TransportRelayHandle {
+            slot: 40,
+            generation: 1,
+        };
+        let write_session =
+            RelaySessionKey::new(destination.clone(), Some(author.public_key()));
+        let write_handle = TransportRelayHandle {
+            slot: 1,
+            generation: 1,
+        };
+        core.handle(EngineMsg::RelayConnected(read_handle, read_session.clone()));
+        core.handle(EngineMsg::RelayConnected(
+            write_handle,
+            write_session.clone(),
+        ));
+
+        let mut seen: Vec<Effect> = Vec::new();
+
+        let operation = nmp_grammar::ReplaceableOperation::from_registered_default_parts(
+            [31; 16],
+            [32; 16],
+            Kind::ContactList,
+            String::new(),
+            added_person.to_bytes().to_vec(),
+        )
+        .unwrap();
+        let mut preparation = core.prepare_publish(WriteIntent {
+            payload: WritePayload::ReplaceableOperation(operation),
+            routing: WriteRouting::Explicit(vec![destination.clone()]),
+            identity: Identity::Active,
+        });
+        let accepted = loop {
+            match preparation {
+                PublishPreparation::Complete(effects) => break effects,
+                PublishPreparation::Materialize(prepared) => {
+                    let PreparedReplaceableMaterialization { call, continuation } = *prepared;
+                    let outcome = core.run_replaceable_materialization(call);
+                    preparation =
+                        core.complete_body_complete_replaceable_operation(continuation, outcome);
+                }
+            }
+        };
+        let (owner, generation, unsigned) = accepted
+            .iter()
+            .find_map(|effect| match effect {
+                Effect::RequestSign(receipt, generation, unsigned) => {
+                    Some((*receipt, *generation, unsigned.clone()))
+                }
+                _ => None,
+            })
+            .expect("the delta generation requests one signature");
+        let signed = unsigned.sign_with_keys(&author).unwrap();
+        seen.extend(core.handle(EngineMsg::SignerCompleted(
+            owner,
+            generation,
+            Ok(signed.clone()),
+        )));
+        seen.extend(core.handle(EngineMsg::AuthProbeReleased(write_handle, write_session)));
+
+        // The coverage door's own coordinate REQ. Accept its handoff so it is
+        // a real live wire owner -- the only shape whose withdrawal owes the
+        // relay a CLOSE.
+        let mut coordinate_sub_id = None;
+        for _ in 0..3 {
+            if coordinate_sub_id.is_some() {
+                break;
+            }
+            let next = Timestamp::from(core.clock.as_secs().saturating_add(1));
+            let flushed = core.handle(EngineMsg::FlushWireAdmission(next));
+            let mut round_accepts = Vec::new();
+            for effect in &flushed {
+                if let Effect::Wire(delta) = effect {
+                    for (session, ops) in &delta.ops {
+                        if session != &read_session {
+                            continue;
+                        }
+                        for op in ops {
+                            let WireOp::Req(sub_id, filter) = op else {
+                                continue;
+                            };
+                            round_accepts.push(RequestHandoffOutcome::Accepted {
+                                attempt_id: delta.attempt_id(session, sub_id, filter),
+                                handle: read_handle,
+                            });
+                            coordinate_sub_id = Some(sub_id.clone());
+                        }
+                    }
+                }
+            }
+            for accept in round_accepts {
+                seen.extend(core.on_wire_request_handoff(accept));
+            }
+            seen.extend(flushed);
+        }
+        let coordinate_sub_id =
+            coordinate_sub_id.expect("the coverage door places its own coordinate REQ");
+        let observation = *core
+            .semantic_publish_coverage
+            .values()
+            .next()
+            .expect("the lane owns an open coordinate observation before the answer arrives");
+
+        // A clean EOSE with nothing stored: this relay is PROVEN not to hold
+        // the coordinate, which is the `ProvenAbsent` green light the gate
+        // releases coverage on.
+        seen.extend(core.handle(EngineMsg::RelayFrame(
+            read_handle,
+            read_session.clone(),
+            RelayFrame::from_message(nostr::RelayMessage::EndOfStoredEvents(
+                std::borrow::Cow::Owned(nostr::SubscriptionId::new(wire_sub_id_string(
+                    &coordinate_sub_id,
+                ))),
+            )),
+        )));
+        for _ in 0..3 {
+            let next = Timestamp::from(core.clock.as_secs().saturating_add(1));
+            seen.extend(core.handle(EngineMsg::FlushWireAdmission(next)));
+        }
+
+        // Non-vacuity, first: the release actually ran on this run. Without
+        // this the wire assertion below could pass by never being reached.
+        assert!(
+            !core.semantic_publish_coverage.values().any(|id| *id == observation),
+            "this test proves nothing unless the lane's coordinate question was released"
+        );
+
+        let closed = seen.iter().any(|effect| match effect {
+            Effect::Wire(delta) => delta.ops.iter().any(|(session, ops)| {
+                *session == read_session
+                    && ops
+                        .iter()
+                        .any(|op| matches!(op, WireOp::Close(sub_id) if *sub_id == coordinate_sub_id))
+            }),
+            _ => false,
+        });
+        assert!(
+            closed,
+            "releasing a resolved coordinate question must put its CLOSE on the wire; the \
+             router-side withdrawal happens either way, so a dropped effect leaves the relay \
+             holding a REQ nothing will ever close"
+        );
+    }
+
     #[test]
     fn capability_default_fallback_uses_a_preexisting_canonical_source() {
         let author = Keys::generate();
