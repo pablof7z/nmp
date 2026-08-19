@@ -442,7 +442,7 @@ pub use diagnostics::{
 };
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
-use history_lifecycle::HistorySessions;
+use history_lifecycle::{HistoryRows, HistorySessions};
 #[cfg(test)]
 use history_lifecycle::WindowProjection;
 #[cfg(test)]
@@ -1503,14 +1503,11 @@ struct HistoryState {
     acquisitions: BTreeMap<HandleId, Option<u64>>,
     target_rows: usize,
     acquired_tie_seconds: BTreeSet<u64>,
-    /// The bounded canonical payload set. History delivery is latest-wins,
-    /// so every emitted frame must be able to stand alone after intermediate
-    /// deltas are overwritten.
-    last_rows: BTreeMap<EventId, Row>,
-    /// Same membership as `last_rows`, ordered canonically newest-first.
-    /// This makes top/bottom rebalance O(log max_rows), never an O(total)
-    /// sort after every committed row mutation.
-    order: BTreeSet<(Reverse<u64>, EventId)>,
+    /// The bounded canonical payload set and its canonical newest-first
+    /// order, as one owned fact ([`history_lifecycle::HistoryRows`], #1921).
+    /// The two used to be separate fields here, hand-paired by `CoreState`
+    /// at thirteen sites.
+    rows: HistoryRows,
     /// Per-BRANCH acquisition evidence in canonical branch order (#1108).
     last_evidence: Option<Vec<AcquisitionEvidence>>,
     projection_complete: bool,
