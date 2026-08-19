@@ -5,10 +5,10 @@ use nostr::{Event, PublicKey, Timestamp};
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::semantic_edit::{
-    plan_accept, plan_rematerialize, plan_source_install, recovered, validate_resource_state,
+    plan_accept, plan_source_install, recovered, validate_resource_state,
     SemanticAccept, SemanticCohortClose, SemanticCohortCloseOutcome,
     SemanticDestinationPlanClosure, SemanticInstallOutcome, SemanticOperation,
-    SemanticRematerialize, SemanticResourceState, SemanticSourceInstall, SemanticTransitionPlan,
+    SemanticResourceState, SemanticSourceInstall, SemanticTransitionPlan,
 };
 use crate::{
     AcceptOutcome, IntentId, LocalOrigin, PersistenceError, PromoteOutcome, Provenance,
@@ -985,67 +985,6 @@ pub(super) fn close_cohort(
     }
     #[cfg(test)]
     store.crash_if(super::store::RedbCrashPoint::SemanticCohortCloseBeforeCommit);
-    write.commit_prepared(outcome)
-}
-
-pub(super) fn install(
-    store: &mut RedbStore,
-    rematerialize: SemanticRematerialize,
-) -> Result<SemanticInstallOutcome, PersistenceError> {
-    let coordinate = rematerialize.coordinate.clone();
-    let mut write = GovernedWrite::begin(store)?;
-    let outcome = write.apply(|ingest, write_txn| {
-        let resources = write_txn
-            .open_table(SEMANTIC_RESOURCES)
-            .map_err(persist_err)?;
-        let operations = write_txn
-            .open_table(SEMANTIC_OPERATIONS)
-            .map_err(persist_err)?;
-        let Some(previous) = load_resource_from_tables(&resources, &operations, &coordinate)?
-        else {
-            return Ok(SemanticInstallOutcome::Stale);
-        };
-        let high_water = write_txn
-            .open_table(SEMANTIC_MATERIALIZATION_HIGH_WATER)
-            .map_err(persist_err)?;
-        let coordinate_key = coordinate_key(&coordinate)?;
-        let persisted_high_water = high_water
-            .get(coordinate_key.as_slice())
-            .map_err(persist_err)?
-            .map(|value| crate::MaterializationId(value.value()));
-        if previous.last_materialization_id != persisted_high_water {
-            return Err(PersistenceError::new(
-                "semantic materialization high-water diverged from resource",
-            ));
-        }
-        drop(high_water);
-        drop(operations);
-        drop(resources);
-        let plan = match plan_rematerialize(previous, rematerialize) {
-            Ok(plan) => plan,
-            Err(crate::SemanticRefusal::InvalidSourceRevision) => {
-                return Ok(SemanticInstallOutcome::Stale)
-            }
-            Err(refusal) => return Ok(SemanticInstallOutcome::Refused(refusal)),
-        };
-        let delivery_transition = plan
-            .removed_generation
-            .clone()
-            .zip(plan.next.as_ref().and_then(|next| next.generation.clone()));
-        let outcome = apply_plan(ingest, write_txn, coordinate.clone(), None, plan)?;
-        if let Some((previous, next)) = delivery_transition {
-            install_successor_delivery_lanes(write_txn, &previous, &next)?;
-        }
-        Ok(outcome)
-    })?;
-    if matches!(
-        outcome,
-        SemanticInstallOutcome::Stale | SemanticInstallOutcome::Refused(_)
-    ) {
-        return Ok(outcome);
-    }
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticRematerializeBeforeCommit);
     write.commit_prepared(outcome)
 }
 
