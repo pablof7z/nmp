@@ -1,0 +1,34 @@
+[package]
+name = "nmp-canary"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The canary application's engine-facing layer: the queries, the writes, and
+# the view-model shapes a NIP-29 rooms client needs, written against the
+# supported public surface only.
+#
+# The dependency list IS part of the evidence. An app is supposed to name
+# `nmp` plus one line per capability it uses. Two lines below are neither:
+#
+# - `serde_json`, needed ONLY to read a kind:0 profile. NMP re-exports no
+#   metadata value and no capability crate owns kind:0, so an app that wants
+#   to draw an avatar parses the JSON itself. See `findings::PROFILE_*`.
+# - `tokio`, needed ONLY because the documented NIP-29 room-watching door
+#   (`GroupObservation::next`) is an `async fn` and neither `nmp` nor
+#   `nmp-nip29` re-exports an executor to await it on. See `findings::ASYNC_*`.
+#
+# Deliberately NOT named: `nostr` and `nmp-grammar`. Every place that cost
+# something is recorded as a finding rather than paid for with a dependency
+# line.
+[dependencies]
+nmp.workspace = true
+nmp-nip02.workspace = true
+nmp-nip18.workspace = true
+nmp-nip25.workspace = true
+nmp-nip29.workspace = true
+nmp-content.workspace = true
+nmp-outbox.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
