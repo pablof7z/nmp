@@ -22,10 +22,6 @@ Feature: A source that has finished answering says so
   and no value here may ever collapse these per-source facts into one verdict
   about the query.
 
-  # nmp:id=COVERAGE-FINISHED-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_relay_that_finished_its_request_is_distinguishable_from_one_still_answering
-  # nmp:falsifier=Stop recording the stored-events terminal against the wire request that earned it; both relays report an outstanding request forever and only a timer can tell them apart.
   Scenario: A relay that finished with nothing is not a relay that has not answered
     # The two states that used to be one. Both relays are connected, both
     # have sent no rows, and before this one of them was lying by omission.
@@ -38,10 +34,6 @@ Feature: A source that has finished answering says so
     And relay "unfinished" reports an outstanding request
     And neither reports any global complete or authoritative-empty state
 
-  # nmp:id=COVERAGE-FINISHED-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::finishing_a_bounded_request_proves_nothing_and_says_so
-  # nmp:falsifier=Report a finished request only when it also earned a coverage watermark; a bounded read never finishes, which is the exact case the consumer's own test client hits on every read.
   Scenario: Finishing is not a claim that anything was proven
     # The boundary that stops the new fact from becoming the old collapsed
     # verdict. A request the caller bounded may claim no interval at all --
@@ -54,10 +46,6 @@ Feature: A source that has finished answering says so
     Then the relay reports that it finished its stored events
     And the relay reports no proven watermark
 
-  # nmp:id=COVERAGE-FINISHED-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_empty_result_is_never_proven_by_a_source_that_has_not_answered
-  # nmp:falsifier=Report a source as finished on any terminal that is not end of stored events; a refusal and a disconnection both start claiming the relay answered.
   Scenario: Nothing else counts as finishing
     # The negative half, and the reason this is a settlement rather than a
     # progress indicator. Neither a relay that never accepted the question

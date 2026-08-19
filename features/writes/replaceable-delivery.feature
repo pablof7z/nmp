@@ -1,12 +1,6 @@
 Feature: Replaceable writes keep only useful delivery work
   @ledger-9
 
-  # nmp:id=WRITES-REPLACEABLE-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-store::every_nip01_replaceable_class_retires_its_offline_predecessor
-  # nmp:evidence=rust:nmp::superseding_a_replaceable_write_cancels_its_pending_signer
-  # nmp:evidence=rust:nmp::subscribe_publish_and_reconnect_replay_over_a_real_relay
-  # nmp:falsifier=disabling same-coordinate retirement leaves both obligations recoverable or lets the older signer and relay work continue
   Scenario Outline: A newer offline replaceable write retires the older obligation
     Given my relay list names "offline-relay" as my write relay
     And I am logged in as my own account
@@ -33,12 +27,6 @@ Feature: Replaceable writes keep only useful delivery work
     # makes that distinction exact: after a newer value wins, an older unsent
     # value can never become useful again.
 
-    # nmp:id=WRITES-REPLACEABLE-002
-    # nmp:status=built
-    # nmp:evidence=rust:nmp-store::superseded_unsent_body_and_receipt_are_destroyed_across_redb_reopen
-    # nmp:evidence=rust:nmp-store::explicit_not_handed_off_evidence_destroys_the_obsolete_receipt_and_correlation
-    # nmp:evidence=rust:nmp::cancellation_never_restores_an_unpublished_replaceable_predecessor
-    # nmp:falsifier=removing exact supersession retirement leaves the old event or receipt visible after Redb reopens
     Scenario: A newer replaceable write destroys its unsent predecessor
       Given an unpublished kind 0 write for my account
       When I publish a newer kind 0 write for the same account
@@ -47,11 +35,6 @@ Feature: Replaceable writes keep only useful delivery work
       And cancelling the newer write does not restore the older unpublished value
       And a started attempt explicitly proven not handed off is treated as unsent
 
-    # nmp:id=WRITES-REPLACEABLE-003
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::expired_local_acceptance_is_refused_before_custody_and_retains_nothing
-    # nmp:evidence=rust:nmp::already_expired_publish_is_refused_before_receipt_custody
-    # nmp:falsifier=routing AlreadyExpired through retained refusal custody allocates a receipt and fails the empty queue assertion
     Scenario: An already-expired attempt never becomes durable write history
       Given a presence event whose expiration has already passed
       When I try to publish it
@@ -63,13 +46,6 @@ Feature: Replaceable writes keep only useful delivery work
     # an unsafe blind retry. It therefore follows the same terminal-receipt
     # retention rule as every other completed write, with no special class.
 
-    # nmp:id=WRITES-REPLACEABLE-004
-    # nmp:status=built
-    # nmp:evidence=rust:nmp-store::a_newer_replaceable_stops_an_older_started_obligation_but_keeps_bounded_safety_evidence
-    # nmp:evidence=rust:nmp-store::all_terminal_receipt_kinds_share_one_fifo
-    # nmp:evidence=rust:nmp-store::terminal_receipt_fifo_survives_redb_reopen
-    # nmp:evidence=rust:nmp-parity::direct_and_ffi_reattach_are_semantically_identical_for_a_terminal_retained_receipt
-    # nmp:falsifier=Give superseded receipts their own retention class; replacement traffic can crowd or outlive unrelated terminal history under a policy the global FIFO does not explain.
     Scenario: Replaced-write safety evidence follows the global terminal FIFO
       Given replaceable writes whose older values may have crossed a handoff
       Then their old event bodies and delivery machinery are permanently removed
@@ -80,10 +56,6 @@ Feature: Replaceable writes keep only useful delivery work
       But current obligations are never classified as disposable
       And possible-handoff ambiguity is retained only as that bounded safety evidence
 
-    # nmp:id=WRITES-REPLACEABLE-005
-    # nmp:status=built
-    # nmp:evidence=rust:nmp-store::replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record
-    # nmp:falsifier=trusting only the valid NotHandedOff prefix deletes the predecessor receipt and correlation despite the malformed required tail
     Scenario: Corrupt delivery evidence is never mistaken for safe deletion
       Given a persisted attempt says it was not handed off
       But the rest of that attempt record is incomplete or malformed

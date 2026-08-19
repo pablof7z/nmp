@@ -42,9 +42,6 @@ Feature: The routes that were removed stay removed
 
   # ---- nothing to say them with ----------------------------------------
 
-  # nmp:id=ROUTING-REMOVEDROUTES-001
-  # nmp:status=built
-  # nmp:falsifier=Restore any retired spelling as a variant on one surface only -- the Kotlin sealed class, say -- and the gate names that spelling, that file and the replacement the caller says instead.
   Scenario Outline: A retired routing has no app-reachable spelling
     # Not "is discouraged" and not "is deprecated": there is no value an app
     # can construct that means any of these, on any platform. The replacement
@@ -62,10 +59,6 @@ Feature: The routes that were removed stay removed
       | group-host            | these exact relays, minted by nmp-nip29 |
       | author-relay-list     | figure it out                        |
 
-  # nmp:id=ROUTING-REMOVEDROUTES-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-grammar::routing_is_two_words_and_explicit_is_verbatim
-  # nmp:falsifier=Add a third variant naming a NIP or a strategy to the Rust enum; the gate's surface enumeration reports the extra word and the exhaustive FFI conversion match stops compiling.
   Scenario: There is no third routing word to reach for
     # The standing guard on the surface itself. A third word appearing in an
     # API review is a design regression against a settled ruling, whatever it
@@ -75,10 +68,6 @@ Feature: The routes that were removed stay removed
     And it finds nothing that names a NIP
     And it finds nothing that names a strategy
 
-  # nmp:id=ROUTING-REMOVEDROUTES-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_group_write_routes_explicitly_to_the_whole_scope_and_never_to_the_author_outbox
-  # nmp:falsifier=Widen the group's minted route from the scope's hosts to Auto; the host admits nothing, the write parks, and the author's own discovered outbox becomes a destination the app never named.
   Scenario: A group write still crosses the app surface only through the group door
     # What the reversal must NOT have loosened. `Explicit` being general does
     # not mean an app hand-routes group writes: "the app shouldn't say 'publish
@@ -94,10 +83,6 @@ Feature: The routes that were removed stay removed
 
   # ---- old journal rows ------------------------------------------------
 
-  # nmp:id=ROUTING-REMOVEDROUTES-004
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1320
   Scenario Outline: A durable write journalled under an old spelling is kept, not reinterpreted
     # The retained-but-unreadable rule, which is what "no backwards
     # compatibility" means for data that already exists on disk. An obligation
@@ -124,10 +109,6 @@ Feature: The routes that were removed stay removed
       | nip65-bootstrap-hex |
       | pinned-host-hex     |
 
-  # nmp:id=ROUTING-REMOVEDROUTES-005
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1320
   Scenario: An unreadable old row does not stop the writes around it
     # Retention must be inert, not obstructive: a store carrying one
     # unreadable obligation still recovers every readable one and still
@@ -142,10 +123,6 @@ Feature: The routes that were removed stay removed
 
   # ---- what the removals must not have taken with them -----------------
 
-  # nmp:id=ROUTING-REMOVEDROUTES-006
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_explicit_route_over_a_live_directory_is_verbatim_and_claims_no_privacy
-  # nmp:falsifier=Add the author's discovered outbox to an exact route's answer; both known relays are live and authenticated, so the event reaches all three and the one-destination witness fails.
   Scenario: Fail-closed survived the removal of the private route
     # `PrivateNarrow`'s discipline transfers to `Explicit` intact: verbatim
     # execution, no widen path, and a directory that is never consulted. What

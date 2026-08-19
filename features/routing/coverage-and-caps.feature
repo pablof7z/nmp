@@ -1,8 +1,4 @@
 Feature: Enough relays to be safe, never a flood
-  # nmp:id=ROUTING-COVERAGEANDCAPS-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-router::feasible_two_source_author_coverage_stays_under_the_whole_demand_cap
-  # nmp:falsifier=changing the product coverage request from k=2 to k=1 makes the exact owner proof fail
   @ledger-4
   Scenario Outline: Every author is read from at least two relays, under a cap
     Given I am logged in as an account that follows <authors> people

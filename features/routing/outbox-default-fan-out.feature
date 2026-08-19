@@ -43,10 +43,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- the author's own outbox -----------------------------------------
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_unaddressed_note_still_unions_the_author_outbox_with_the_app_relays
-  # nmp:falsifier=Make the operator app relays conditional on a thin author outbox; a note from a healthy two-relay author stops reaching them and the exact four-destination witness fails.
   Scenario: An event addressed to nobody still reaches two sources, not one
     # The floor case, and already more than master does: with nobody p-tagged
     # there is no fan-out to compute, and the answer is STILL the union of the
@@ -58,10 +54,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer-1", and "app-indexer-2"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::the_author_is_reached_at_their_outbound_half_and_never_their_inbound_half
-  # nmp:falsifier=Contribute the author's inbound half alongside their outbound one; the relay where they collect mail becomes a destination for their own note and the exact witness fails.
   Scenario: The author is reached at their write relays, never their read relays
     # The mirror image of the recipient rule below, and the reason both halves
     # have to be stated: an author fact has two sets, and outbox reads a
@@ -76,10 +68,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- the p-tagged recipients' inboxes ---------------------------------
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_recipient_is_reached_at_their_inbound_half_and_never_their_outbound_half
-  # nmp:falsifier=Contribute a p-tagged recipient's outbound half instead of their inbound one; the note goes to the relays Bob publishes to and never to the ones he reads.
   Scenario: A p-tagged recipient adds their inbox, never their outbox
     # THE load-bearing distinction of this file. Bob's outbound relay appears
     # purely so the assertion that the resolver consumes only his inbound set
@@ -91,10 +79,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", and "bob-inbox"
     And the note is never routed to "bob-outbox"
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::every_p_tagged_recipient_contributes_their_own_inbox
-  # nmp:falsifier=Contribute only the first p-tagged recipient's inbox; two of three addressees stop being reached and the exact five-destination witness fails.
   Scenario: Every p-tagged recipient contributes their own inbox
     # The fan-out is per recipient, not "the first one" and not "the union of
     # whoever the directory happened to have warm". Three addressees, three
@@ -106,11 +90,6 @@ Feature: Where an ordinary event goes when the app says nothing
     When I publish a note saying "morning, all three of you" that p-tags Bob, Carol, and Dave
     Then the note is routed to exactly "author-write-1", "author-write-2", "bob-inbox", "carol-inbox", and "dave-inbox"
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-nip65::parser_preserves_unmarked_read_write_and_drops_only_unreadable_rows
-  # nmp:evidence=rust:nmp::a_recipient_is_reached_at_their_inbound_half_and_never_their_outbound_half
-  # nmp:falsifier=Treat an unmarked relay-list row as write-only; the commonest relay-list shape in the wild leaves the inbound set empty and contributes no inbox at all.
   Scenario: An unmarked relay in a recipient's list is an inbox too
     # NIP-65's marker rule, which `read_relays` states precisely: read-marked
     # entries AND unmarked entries are both read relays; only a `"write"`-
@@ -126,10 +105,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- how the built author, app and recipient sources combine ----------
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-006
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::the_built_outbox_sources_compose_by_union_with_no_precedence
-  # nmp:falsifier=Give the three sources precedence instead of unioning them, so a recipient's inbox replaces the author's outbox; the exact five-destination witness fails.
   Scenario: All three sources land in one route, not three competing ones
     # The composition case. There is no precedence between the sources and no
     # "most specific wins" -- the resolver's answer is a set UNION, so an
@@ -140,10 +115,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1", "author-write-2", "app-indexer-1", "app-indexer-2", and "bob-inbox"
     And routing is complete
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-007
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_relay_two_outbox_sources_name_is_offered_the_event_exactly_once
-  # nmp:falsifier=Open a delivery obligation per contributing source instead of per (intent_id, relay); the host the author's outbox and Bob's inbox share is opened twice and offered the note twice.
   Scenario: A relay named by two sources is one destination, not two
     # Union, not concatenation. Bob reads from a relay I also write to, which
     # is extremely ordinary; that must cost ONE lane, not two publications of
@@ -155,10 +126,6 @@ Feature: Where an ordinary event goes when the app says nothing
     Then the note is routed to exactly "author-write-1" and "author-write-2"
     And the note is published to "author-write-1" exactly once
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-008
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::the_outbox_answer_never_names_a_relay_outside_its_evidence_owned_sources
-  # nmp:falsifier=Let the resolver read every author the directory happens to hold rather than only identities the event names; an unrelated cached author's relays enter the route.
   Scenario: An unrelated cached author's relays never enter the route
     # Parent provenance adds a new evidence-owned source; it does not license
     # a scan of every warm routing fact. A stranger appears only as the
@@ -173,11 +140,6 @@ Feature: Where an ordinary event goes when the app says nothing
 
   # ---- replies retain their observed relay context ----------------------
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-009
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_reply_unions_one_verified_parent_source_and_ignores_the_authored_hint
-  # nmp:evidence=rust:nmp::verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does_not
-  # nmp:falsifier=Drop the canonical parent-provenance contribution; the mechanism answer and real relay witness both lose conversation-relay while all author/app/recipient behavior stays green.
   Scenario: A reply returns to the relay where NMP observed its parent
     # The missing fourth contribution. The parent has exactly one verified
     # source, so this scenario does not smuggle in an unanswered choice among
@@ -190,11 +152,6 @@ Feature: Where an ordinary event goes when the app says nothing
     When I publish a reply to that parent event
     Then the reply is routed to exactly "author-write-1", "author-write-2", and "conversation-relay"
 
-  # nmp:id=ROUTING-OUTBOXDEFAULT-010
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_unverified_parent_hint_never_widens_auto_routing
-  # nmp:evidence=rust:nmp::verified_parent_provenance_becomes_a_real_lane_while_raw_hint_text_does_not
-  # nmp:falsifier=Read the relay cell from the signed parent tag as a destination; the live negative-control relay is contacted and receives the reply despite never carrying its parent.
   Scenario: An unverified parent relay hint does not widen Auto routing
     # The negative boundary. Signed bytes prove who authored the hint; they do
     # not prove the named relay ever held the parent. Explicit routing remains

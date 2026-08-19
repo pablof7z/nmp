@@ -44,10 +44,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
 
   Rule: An unresolved route parks, and no clock ever ends it
 
-    # nmp:id=WRITES-PARKED-001
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Let a time budget abandon a write parked on an unresolved route; a user who was merely offline loses a message NMP never proved undeliverable.
     Scenario: Publishing before the first relay list has been fetched parks
@@ -60,10 +56,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       And the write is never reported as settled
       And the intent is still durably held
 
-    # nmp:id=WRITES-PARKED-002
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Expire a write parked on an unresolved route after any elapsed time; the ninety-day park must still be held with its destination set still open.
     Scenario: No amount of time abandons a write parked on an unresolved route
@@ -77,10 +69,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       And the intent is still durably held
       And nothing abandoned the write on NMP's own initiative
 
-    # nmp:id=WRITES-PARKED-003
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Require the app to notice, retry or re-publish for an arriving relay list to unpark the write; the same write must go out, not a second copy.
     Scenario: A parked route resumes on its own when the knowledge arrives
@@ -93,10 +81,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       And the receipt reports a destination set naming "wss://relay.mine.example"
       And the same write is delivered -- not a second copy of it
 
-    # nmp:id=WRITES-PARKED-004
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Drop the park across a restart; an app that reattaches to a persisted receipt id must not be told nothing, which is indistinguishable from data loss.
     Scenario: A park survives a restart and resumes after it
@@ -111,10 +95,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
 
   Rule: A missing signer parks with no cap either, and the app is the only other exit
 
-    # nmp:id=WRITES-PARKED-005
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Abandon a write awaiting a signer after any elapsed time; a device whose signer is simply not plugged in yet loses the write.
     Scenario: A write awaiting a signer is never abandoned by time
@@ -128,10 +108,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       And the write is never reported as settled
       And the intent is still durably held
 
-    # nmp:id=WRITES-PARKED-006
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Resume a signer-parked write when any other signer attaches; the write must wait for the exact frozen key, never a currently-active substitute.
     Scenario: A signer-parked write resumes only for its own frozen identity
@@ -142,10 +118,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       When a signer for my account is registered
       Then the write is signed
 
-    # nmp:id=WRITES-PARKED-007
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Leave a signer-parked write in the queue after the app cancels it and removes its entry; cancel-then-remove is the termination path, so an entry nothing will ever move must actually go.
     Scenario: Cancelling then removing the queue entry is the other way a signer-parked write ends
@@ -176,10 +148,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
     # second is the point of the enumeration door; telling them about the
     # first is crying wolf on every healthy write.
 
-    # nmp:id=WRITES-PARKED-015
-    # nmp:status=built
-    # nmp:evidence=rust:nmp::a_signature_in_flight_is_not_reported_as_a_write_parked_on_a_missing_signer
-    # nmp:falsifier=Collapse in-flight signing onto the parked-signer state; every healthy write reads as stuck, and the app cannot find the writes whose only termination path is its own decision to cancel and remove them.
     Scenario: A write whose signer is mid-round-trip is not reported as parked
       # The defect a consumer hit building its own diagnostic: a write
       # published milliseconds earlier, with its signer attached and working,
@@ -193,10 +161,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
 
   Rule: Exhausted knowledge naming zero relays is terminal, not a park
 
-    # nmp:id=WRITES-PARKED-008
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Park a write whose routing completed with zero relays; "we finished looking and there is nowhere to send this" would be reported as "we are still looking", which no app can act on.
     Scenario: A write whose routing finished with nowhere to go is terminal
@@ -210,10 +174,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       And the receipt reports the write as having no destination
       And the write is never reported as settled
 
-    # nmp:id=WRITES-PARKED-009
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Report the same destination fact for a route still resolving and one that resolved to nothing; the two situations have opposite correct app behaviour and collapsing them is #1236.
     Scenario: Still resolving and resolved-to-nothing are told apart
@@ -228,10 +188,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
 
   Rule: A relay that keeps refusing is given up on, and only that relay
 
-    # nmp:id=WRITES-PARKED-010
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Retry a known-unreachable relay without bound; the obligation is held open forever and the app is never told to stop, which is #1031's defect.
     Scenario: A relay that never accepts is eventually given up on
@@ -245,10 +201,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       Then the receipt eventually reports "wss://non-existent.example" as given up on
       And the write is reported as settled
 
-    # nmp:id=WRITES-PARKED-011
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Spend attempts while a lane is disconnected or waiting for authentication; time offline would become evidence, and a merely-offline user's write would be given up on.
     Scenario: Time offline is not evidence and spends no attempt
@@ -261,10 +213,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       Then the receipt reports "wss://offline.example" as waiting for a connection
       And "wss://offline.example" is never reported as given up on
 
-    # nmp:id=WRITES-PARKED-012
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Fail the whole write when one relay is given up on; three relays that published would be reported to the user as a failure.
     Scenario: Giving up on one relay is a footnote, not a failed write
@@ -281,10 +229,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
 
   Rule: Cancellation and removal are the app's doors, and they stay distinct
 
-    # nmp:id=WRITES-PARKED-013
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Let a timeout produce the same terminal fact as an explicit cancellation; nobody decided, and the app cannot tell its own decision from NMP's guess.
     Scenario: Cancellation is a decision somebody made
@@ -294,10 +238,6 @@ Feature: A write that cannot move is parked in the open, and a write that has be
       Then the receipt reports the write as not sent because it was cancelled
       And the intent is no longer held for delivery
 
-    # nmp:id=WRITES-PARKED-014
-    # nmp:status=specified
-    # nmp:gap=evidence
-    # nmp:issue=#1253
     # Defect shape this scenario will falsify once its evidence runs (#1253):
     #   Accept removal of a write that still owns live delivery lanes; removal would silently abandon in-flight work that cancellation exists to compensate.
     Scenario: Removal refuses a write that still owns live work

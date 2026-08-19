@@ -14,10 +14,6 @@ Feature: Explicit write routes stay verbatim for their whole lifetime
   Background:
     Given I am logged in as my own account
 
-  # nmp:id=ROUTING-AUTOANDEXPLICIT-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::accepted_explicit_route_ignores_later_directory_fact_across_restart
-  # nmp:falsifier=Decode the persisted explicit strategy as Auto; recovery appends the later author outbox and the one-destination witness fails.
   @ledger-6
   Scenario: A relay learned after acceptance is never added to an explicit route
     # There is no widen path anywhere: no operation adds a relay to an
