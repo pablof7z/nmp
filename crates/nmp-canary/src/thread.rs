@@ -24,10 +24,13 @@
 //! subtree rooted at this event". NIP-10 replies to a reply carry the root in
 //! `e`-with-marker-root, so one `#e` branch catches most of a thread and
 //! misses any client that only tagged its immediate parent. A correct thread
-//! needs recursive expansion -- observe, read the ids that arrived, reopen
-//! with a bigger id set. `Selector::Ids` plus a `Derived` binding is exactly
-//! the machinery for one hop of that, and the grammar caps `Derived` depth, so
-//! a thread of depth N is not declarable. We do one hop and say so.
+//! needs recursive expansion. `Selector::Ids` plus a `Derived` binding is
+//! exactly the machinery for ONE hop of that -- and a `Derived` binding is a
+//! nested struct literal, so N hops means N levels of nesting written out at
+//! compile time. There is no recursive or unbounded form. (I did not find a
+//! stated depth ceiling in the resolver; the limit here is that the depth has
+//! to be a constant in the source, not that some number refuses it.) We do one
+//! hop and say so.
 //!
 //! ### The depth
 //!
