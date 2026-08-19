@@ -27,7 +27,9 @@ use std::collections::BTreeSet;
 use nmp_grammar::LiveQuery;
 use nostr::PublicKey;
 
-use super::{AuthorRouteReplacement, ObservationEvidence, RowDelta};
+use nostr::RelayUrl;
+
+use super::{AuthorRouteReplacement, RowDelta};
 
 /// What the loop must do to the provider's observation after the reducer's
 /// need set changed.
@@ -87,8 +89,9 @@ pub trait AuthorRouteProvider: Send {
     /// called for a provider that opened none.
     fn observe_rows(&mut self, rows: &[RowDelta]) -> Vec<AuthorRouteUpdate>;
 
-    /// Evidence delivered on the observation this provider asked for —
-    /// per-source settlement above all, which is how a provider learns that
-    /// an author's routes are genuinely absent rather than merely unseen.
-    fn observe_evidence(&mut self, evidence: &[ObservationEvidence]) -> Vec<AuthorRouteUpdate>;
+    /// One source relay of the observation this provider asked for answered
+    /// its REQ in full. This is how a provider learns that an author's routes
+    /// are genuinely absent rather than merely unseen: absence is only
+    /// reportable once every source it asked has settled.
+    fn observe_request_settled(&mut self, relay: &RelayUrl) -> Vec<AuthorRouteUpdate>;
 }

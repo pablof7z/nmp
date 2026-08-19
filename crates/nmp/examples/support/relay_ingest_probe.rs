@@ -423,7 +423,7 @@ impl ProbeRows {
             Self::Unbounded(rows) => rows.recv_timeout(timeout),
             Self::Windowed(batches) => batches
                 .recv_timeout(timeout)
-                .map(|batch| (batch.deltas, batch.evidence, Vec::new())),
+                .map(|batch| (batch.deltas, batch.evidence)),
         }
     }
 }
@@ -819,7 +819,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
             .into());
         }
         match rows.recv_timeout(remaining.min(OBSERVATION_POLL)) {
-            Ok((deltas, evidence, _execution)) => {
+            Ok((deltas, evidence)) => {
                 accepted_quiet_since = None;
                 observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
                 all_sources_reconciled = evidence[0].sources.len() == config.relays
@@ -835,7 +835,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         }
     }
 
-    while let Ok((deltas, _, _)) = rows.recv_timeout(Duration::from_millis(100)) {
+    while let Ok((deltas, _)) = rows.recv_timeout(Duration::from_millis(100)) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
     let observation_and_quiet_elapsed = ingest_started.elapsed();
@@ -907,7 +907,7 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let ingest_attribution = Some(ingest_attribution_json());
     #[cfg(not(feature = "bench-instrumentation"))]
     let ingest_attribution = None;
-    while let Ok((deltas, _, _)) = rows.recv_timeout(Duration::ZERO) {
+    while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
     }
     let memory_after_shutdown = current_memory();

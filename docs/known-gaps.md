@@ -172,11 +172,16 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   wants to show what it just published must instead wait for a fact that
   happens to quote the id (`WriteFact::Relay`, or a signed `SigningState`),
   or re-find its own entry in a publish-queue page.
-- **Direct-Rust unwindowed observation evidence is built; windowed observation
-  evidence remains open (#718).** `Frame.execution` carries
-  resolver/reducer/runtime-owned observation-scoped facts, but windowed
-  observations deliver no execution facts yet. #718 stays open until that
-  projection and its falsifiers land.
+- **An observation reports no execution trace at all (#718).** The typed
+  per-observation trace (`Frame.execution`, nine `ObservationFact` variants
+  covering resolution, REQ placement, settlement, close, defer, withdrawal
+  and mailbox overflow) is deleted. It was built for unwindowed observations
+  only, no application ever read a variant of it, and the one thing anything
+  consumed — a request settled on a relay — is now a direct
+  reducer-to-`AuthorRouteProvider` effect that never reaches an app mailbox.
+  An app that needs to know why a query asked the relays it asked has
+  engine-global diagnostics and nothing query-scoped; #718 stays open on that
+  question, not on the deleted shape.
 
 ## Store & persistence
 

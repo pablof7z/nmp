@@ -1,171 +1,16 @@
-use nmp_grammar::{ConcreteFilter, DescriptorHash, IdentityField, RelaySessionKey};
-use nmp_resolver::{HandleId, ResolutionNodeKind, ResolvedValue};
+use nmp_grammar::{ConcreteFilter, DescriptorHash, RelaySessionKey};
+use nmp_resolver::{HandleId, ResolutionNodeKind};
 use nmp_router::SubId;
 use nmp_store::CoverageInterval;
 use nmp_transport::RelayHandle as TransportRelayHandle;
-use nostr::{RelayUrl, Timestamp};
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 use super::coordinate_coverage::RequestReturnEvidence;
 use super::request_targets::ActiveRequestTarget;
 use super::{
-    AttributionSendId, CoreState, Effect, LocalSendRefusal, RequestAttemptId,
-    RequestAttemptState, RequestHandoffOutcome, RequestSend,
+    AttributionSendId, CoreState, Effect, RequestAttemptId, RequestAttemptState,
+    RequestHandoffOutcome, RequestSend,
 };
-
-/// Ordered execution evidence for one live observation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservationEvidence {
-    /// Monotonic within this OBSERVATION, across all of its branches.
-    /// Sequence numbers are assigned by the reducer that owns the
-    /// observation, never by a delivery adapter and never per branch.
-    pub sequence: u64,
-    /// Which canonical branch produced this fact, or `None` for a fact that
-    /// belongs to the observation as a whole (withdrawal, mailbox overflow).
-    /// Two branches can resolve identical values at identical paths; without
-    /// this, their traces would be indistinguishable.
-    pub branch: Option<usize>,
-    pub fact: ObservationFact,
-}
-
-/// Why a resolver-owned value/filter transition was evaluated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolutionCause {
-    Initial,
-    CurrentAccountChanged,
-    DependencyChanged,
-}
-
-/// The protocol-neutral terminal that settled one actually-sent request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestTerminal {
-    Eose,
-}
-
-/// One exact value already resolved by the query graph.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResolvedBindingValue {
-    Scalar(String),
-    AddressCoordinate {
-        kind: u16,
-        author: String,
-        identifier: String,
-    },
-}
-
-/// Authoritative facts emitted by the owners of resolution and wire state.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ObservationFact {
-    ReactiveInput {
-        path: String,
-        field: IdentityField,
-        revision: u64,
-        values: Vec<ResolvedBindingValue>,
-        fingerprint: String,
-        cause: ResolutionCause,
-    },
-    DerivedSet {
-        path: String,
-        revision: u64,
-        values: Vec<ResolvedBindingValue>,
-        fingerprint: String,
-        cause: ResolutionCause,
-    },
-    ConcreteFilter {
-        path: String,
-        revision: u64,
-        filters: Vec<ConcreteFilter>,
-        fingerprint: String,
-        cause: ResolutionCause,
-    },
-    RelayRequest {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        authenticate_as: Option<nostr::PublicKey>,
-        transport_generation: u64,
-        request_revision: u64,
-        filter: Arc<ConcreteFilter>,
-        /// WHY this relay was asked: the routing lanes that put this REQ on
-        /// the wire — the author's NIP-65 outbound set, a selector hint,
-        /// prior source provenance, or an operator app/fallback lane.
-        ///
-        /// Without this the trace said which relays were asked and never
-        /// why, which is exactly the gap that made the deleted filter-shape
-        /// inference invisible in the first place: a default that decides a
-        /// route has to report the route it decided, or it is the same
-        /// unaccountable magic under a better name.
-        ///
-        /// A SET because coalescing is real — one REQ can be two authors'
-        /// outbox lane and the operator's app lane at once, and reporting a
-        /// single lane would be true but partial.
-        lanes: BTreeSet<nmp_router::Lane>,
-        replay: bool,
-    },
-    RequestSettled {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        authenticate_as: Option<nostr::PublicKey>,
-        transport_generation: u64,
-        request_revision: u64,
-        observed_at: Timestamp,
-        terminal: RequestTerminal,
-    },
-    RelayClosed {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        authenticate_as: Option<nostr::PublicKey>,
-        transport_generation: u64,
-        request_revision: Option<u64>,
-        reason: String,
-    },
-    RequestDeferred {
-        path: String,
-        filter_revision: u64,
-        relay: RelayUrl,
-        authenticate_as: Option<nostr::PublicKey>,
-        request_revision: u64,
-        retry_at: Timestamp,
-        cause: LocalSendRefusal,
-    },
-    Withdrawn,
-    /// The bounded delivery mailbox discarded an exact contiguous sequence
-    /// range. Loss is therefore visible and never masquerades as a complete
-    /// causal trace.
-    Overflow {
-        first_sequence: u64,
-        last_sequence: u64,
-        dropped: u64,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum RememberedResolution {
-    Reactive {
-        revision: u64,
-        fingerprint: String,
-    },
-    ValueSet {
-        revision: u64,
-        fingerprint: String,
-    },
-    Filter {
-        revision: u64,
-        fingerprint: String,
-        atoms: Vec<nmp_grammar::ContextualAtom>,
-    },
-}
-
-/// One BRANCH's remembered resolution state. Sequence numbers live on the
-/// owning observation, not here: the app receives one ordered trace for the
-/// whole live query, not one per branch.
-#[derive(Debug, Default)]
-pub(super) struct ObservationExecutionState {
-    nodes: BTreeMap<String, RememberedResolution>,
-}
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingRequestEvidence {
@@ -175,8 +20,6 @@ pub(super) struct PendingRequestEvidence {
     pub(super) sub_id: SubId,
     pub(super) filter: ConcreteFilter,
     pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
-    pub(super) lanes: BTreeSet<nmp_router::Lane>,
-    pub(super) replay: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -231,58 +74,6 @@ pub(super) enum StoredEvents {
     },
 }
 
-fn resolved_values(values: Vec<ResolvedValue>) -> Vec<ResolvedBindingValue> {
-    values
-        .into_iter()
-        .map(|value| match value {
-            ResolvedValue::Scalar(value) => ResolvedBindingValue::Scalar(value),
-            ResolvedValue::AddressCoordinate {
-                kind,
-                author,
-                identifier,
-            } => ResolvedBindingValue::AddressCoordinate {
-                kind,
-                author,
-                identifier,
-            },
-        })
-        .collect()
-}
-
-fn value_fingerprint(values: &[ResolvedBindingValue]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for value in values {
-        match value {
-            ResolvedBindingValue::Scalar(value) => {
-                hasher.update(&[0]);
-                hasher.update(&(value.len() as u64).to_be_bytes());
-                hasher.update(value.as_bytes());
-            }
-            ResolvedBindingValue::AddressCoordinate {
-                kind,
-                author,
-                identifier,
-            } => {
-                hasher.update(&[1]);
-                hasher.update(&kind.to_be_bytes());
-                hasher.update(&(author.len() as u64).to_be_bytes());
-                hasher.update(author.as_bytes());
-                hasher.update(&(identifier.len() as u64).to_be_bytes());
-                hasher.update(identifier.as_bytes());
-            }
-        }
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
-fn filter_fingerprint(filters: &[ConcreteFilter]) -> String {
-    let mut hasher = blake3::Hasher::new();
-    for filter in filters {
-        hasher.update(filter.hash().as_bytes());
-    }
-    hasher.finalize().to_hex().to_string()
-}
-
 impl CoreState {
     pub(in crate::core) fn record_observed_request(
         &mut self,
@@ -319,8 +110,6 @@ impl CoreState {
             filter: request.filter.clone(),
             coverage_claims: request.coverage_claims,
             owner_demands: request.owner_demands.clone(),
-            lanes: request.lanes.clone(),
-            replay: request.replay,
             request_revision: Some(send.revision()),
             retry_failures: 0,
         });
@@ -334,8 +123,6 @@ impl CoreState {
                 sub_id: request.sub_id.clone(),
                 filter: request.filter.clone(),
                 owner_demands: request.owner_demands,
-                lanes: request.lanes,
-                replay: request.replay,
             });
         (send, attempt_id)
     }
@@ -418,10 +205,13 @@ impl CoreState {
         }
     }
 
-    fn current_request_targets(
+    /// Every observation with a live execution target under any of
+    /// `owner_demands` -- the exact set a settlement on that request is a
+    /// fact about.
+    fn observations_for_demands(
         &self,
         owner_demands: &BTreeSet<nmp_router::DemandKey>,
-    ) -> Vec<(HandleId, String, u64)> {
+    ) -> BTreeSet<super::ObservationId> {
         let (targets, _walk) = self.request_targets.live_targets_for_demands(owner_demands);
         #[cfg(feature = "bench-instrumentation")]
         {
@@ -437,6 +227,9 @@ impl CoreState {
             );
         }
         targets
+            .into_iter()
+            .filter_map(|id| self.branch_observation(id))
+            .collect()
     }
 
     /// Runtime/mechanism acknowledgement for one attempted REQ handoff.
@@ -484,29 +277,10 @@ impl CoreState {
         if queue.is_empty() {
             self.pending_request_evidence.remove(&key);
         }
-        let targets = self.current_request_targets(&request.owner_demands);
         let mut effects = Vec::new();
         match outcome {
             RequestHandoffOutcome::Accepted { handle, .. } => {
                 self.attempts.clear_retry_for_attempt(&attempt);
-                let shared_filter = Arc::new(request.filter.clone());
-                for (id, path, filter_revision) in &targets {
-                    self.emit_observation_fact(
-                        *id,
-                        ObservationFact::RelayRequest {
-                            path: path.clone(),
-                            filter_revision: *filter_revision,
-                            relay: request.session.relay.clone(),
-                            authenticate_as: request.session.authenticate_as,
-                            transport_generation: handle.generation,
-                            request_revision: request.request_revision,
-                            filter: shared_filter.clone(),
-                            lanes: request.lanes.clone(),
-                            replay: request.replay,
-                        },
-                        &mut effects,
-                    );
-                }
                 self.live_wire_requests.insert(
                     (request.session.clone(), request.sub_id.clone()),
                     LiveWireRequest {
@@ -537,7 +311,7 @@ impl CoreState {
                     self.complete_request_replacement(&successor, &mut effects);
                 }
             }
-            RequestHandoffOutcome::Refused { cause, .. } => {
+            RequestHandoffOutcome::Refused { .. } => {
                 self.attribution
                     .discard_send_revision(&request.sub_id, request.request_revision);
                 if !self.attribution.has_inflight(&request.sub_id)
@@ -548,25 +322,6 @@ impl CoreState {
                 }
                 let now = self.clock;
                 self.attempts.schedule_retry(attempt, now);
-                let retry_at = self
-                    .attempts
-                    .retry_due_for_sub(&request.sub_id)
-                    .unwrap_or(now);
-                for (id, path, filter_revision) in targets {
-                    self.emit_observation_fact(
-                        id,
-                        ObservationFact::RequestDeferred {
-                            path,
-                            filter_revision,
-                            relay: request.session.relay.clone(),
-                            authenticate_as: request.session.authenticate_as,
-                            request_revision: request.request_revision,
-                            retry_at,
-                            cause: cause.clone(),
-                        },
-                        &mut effects,
-                    );
-                }
             }
         }
         (effects, evidence_demands)
@@ -584,33 +339,30 @@ impl CoreState {
         Some(request)
     }
 
+    /// One actually-sent REQ reached NIP-01's end of stored events with
+    /// trustworthy settlement evidence.
+    ///
+    /// The only execution fact this engine reports to anything outside it: an
+    /// [`AuthorRouteProvider`](super::AuthorRouteProvider) learns that its own
+    /// source relay answered, which is how "this author has no relay list"
+    /// becomes a settled negative instead of a silence. Nothing else about
+    /// how the request got there is reported, and nothing rides the row
+    /// channel.
     pub(in crate::core) fn emit_request_settled(
         &mut self,
         send: AttributionSendId,
-        observed_at: Timestamp,
-        terminal: RequestTerminal,
         effects: &mut Vec<Effect>,
     ) -> BTreeSet<nmp_router::DemandKey> {
         let Some(request) = self.take_active_request_evidence(send.revision()) else {
             return BTreeSet::new();
         };
-        let targets = self.current_request_targets(&request.owner_demands);
+        let observations = self.observations_for_demands(&request.owner_demands);
         self.finish_stored_events(&request);
-        for (id, path, filter_revision) in targets {
-            self.emit_observation_fact(
-                id,
-                ObservationFact::RequestSettled {
-                    path,
-                    filter_revision,
-                    relay: request.session.relay.clone(),
-                    authenticate_as: request.session.authenticate_as,
-                    transport_generation: request.handle.generation,
-                    request_revision: request.request_revision,
-                    observed_at,
-                    terminal,
-                },
-                effects,
-            );
+        for observation in observations {
+            effects.push(Effect::RequestSettled(
+                observation,
+                request.session.relay.clone(),
+            ));
         }
         request.owner_demands
     }
@@ -618,9 +370,9 @@ impl CoreState {
     /// Retire an actually-finished request whose local facts-before-claims
     /// transaction could not establish trustworthy settlement evidence.
     ///
-    /// The terminal wire frame still ends this exact request, but exposing
-    /// it as [`ObservationFact::RequestSettled`] would let protocol
-    /// consumers derive absence from a locally incomplete view.
+    /// The terminal wire frame still ends this exact request, but reporting
+    /// it through [`CoreState::emit_request_settled`] would let a route
+    /// provider derive absence from a locally incomplete view.
     ///
     /// The stored-events phase is a different claim and does end here (#1235):
     /// "this relay sent everything it had for this request" is a delivery fact
@@ -689,8 +441,6 @@ impl CoreState {
         &mut self,
         session: &RelaySessionKey,
         handle: TransportRelayHandle,
-        reason: String,
-        effects: &mut Vec<Effect>,
     ) {
         self.live_wire_requests
             .retain(|(request_session, _), request| {
@@ -704,25 +454,7 @@ impl CoreState {
             })
             .collect();
         for revision in revisions {
-            let Some(request) = self.take_active_request_evidence(revision) else {
-                continue;
-            };
-            let targets = self.current_request_targets(&request.owner_demands);
-            for (id, path, filter_revision) in targets {
-                self.emit_observation_fact(
-                    id,
-                    ObservationFact::RelayClosed {
-                        path,
-                        filter_revision,
-                        relay: request.session.relay.clone(),
-                        authenticate_as: request.session.authenticate_as,
-                        transport_generation: handle.generation,
-                        request_revision: Some(request.request_revision),
-                        reason: reason.clone(),
-                    },
-                    effects,
-                );
-            }
+            self.take_active_request_evidence(revision);
         }
     }
 
@@ -731,8 +463,6 @@ impl CoreState {
         session: &RelaySessionKey,
         handle: TransportRelayHandle,
         sub_id: &SubId,
-        reason: String,
-        effects: &mut Vec<Effect>,
     ) {
         let key = (session.clone(), sub_id.clone());
         if self
@@ -755,202 +485,29 @@ impl CoreState {
             .copied()
             .collect();
         for revision in revisions {
-            let Some(request) = self.take_active_request_evidence(revision) else {
-                continue;
-            };
-            let targets = self.current_request_targets(&request.owner_demands);
-            for (id, path, filter_revision) in targets {
-                self.emit_observation_fact(
-                    id,
-                    ObservationFact::RelayClosed {
-                        path,
-                        filter_revision,
-                        relay: request.session.relay.clone(),
-                        authenticate_as: request.session.authenticate_as,
-                        transport_generation: handle.generation,
-                        request_revision: Some(request.request_revision),
-                        reason: reason.clone(),
-                    },
-                    effects,
-                );
-            }
+            self.take_active_request_evidence(revision);
         }
     }
 
-    pub(in crate::core) fn reconcile_observation_resolution(
-        &mut self,
-        id: HandleId,
-        cause: ResolutionCause,
-        effects: &mut Vec<Effect>,
-    ) {
+    /// Re-derive which logical demands one branch's resolved filter nodes
+    /// currently execute against, and hand the result to the target owner.
+    pub(in crate::core) fn reconcile_observation_resolution(&mut self, id: HandleId) {
         let snapshot = self.resolver.resolution_snapshot(id);
-        let Some(&BranchOwner {
-            observation,
-            index: branch,
-        }) = self.branch_owner(id).as_ref()
-        else {
-            return;
-        };
-        let mut next_sequence = self
-            .observations
-            .get(&observation)
-            .map(|state| state.next_sequence)
-            .unwrap_or_default();
-        let Some(state) = self.handles.get_mut(&id) else {
-            return;
-        };
-        let mut evidence = Vec::new();
         let mut current_targets = BTreeMap::new();
         for node in snapshot {
-            match node.node_type {
-                ResolutionNodeKind::Reactive { field, values } => {
-                    let values = resolved_values(values);
-                    let fingerprint = value_fingerprint(&values);
-                    let prior = state.execution.nodes.get(&node.path);
-                    let revision = match prior {
-                        Some(RememberedResolution::Reactive {
-                            revision,
-                            fingerprint: old,
-                        }) if old == &fingerprint => *revision,
-                        Some(RememberedResolution::Reactive { revision, .. }) => {
-                            revision.saturating_add(1)
-                        }
-                        _ => 1,
-                    };
-                    let changed = !matches!(
-                        prior,
-                        Some(RememberedResolution::Reactive {
-                            fingerprint: old,
-                            ..
-                        }) if old == &fingerprint
-                    );
-                    state.execution.nodes.insert(
-                        node.path.clone(),
-                        RememberedResolution::Reactive {
-                            revision,
-                            fingerprint: fingerprint.clone(),
-                        },
-                    );
-                    if changed {
-                        evidence.push(issue(
-                            &mut next_sequence,
-                            branch,
-                            ObservationFact::ReactiveInput {
-                                path: node.path,
-                                field,
-                                revision,
-                                values,
-                                fingerprint,
-                                cause,
-                            },
-                        ));
-                    }
-                }
-                ResolutionNodeKind::Derived { values } | ResolutionNodeKind::SetOp { values } => {
-                    let values = resolved_values(values);
-                    let fingerprint = value_fingerprint(&values);
-                    let prior = state.execution.nodes.get(&node.path);
-                    let revision = match prior {
-                        Some(RememberedResolution::ValueSet {
-                            revision,
-                            fingerprint: old,
-                        }) if old == &fingerprint => *revision,
-                        Some(RememberedResolution::ValueSet { revision, .. }) => {
-                            revision.saturating_add(1)
-                        }
-                        _ => 1,
-                    };
-                    let changed = !matches!(
-                        prior,
-                        Some(RememberedResolution::ValueSet {
-                            fingerprint: old,
-                            ..
-                        }) if old == &fingerprint
-                    );
-                    state.execution.nodes.insert(
-                        node.path.clone(),
-                        RememberedResolution::ValueSet {
-                            revision,
-                            fingerprint: fingerprint.clone(),
-                        },
-                    );
-                    if changed {
-                        evidence.push(issue(
-                            &mut next_sequence,
-                            branch,
-                            ObservationFact::DerivedSet {
-                                path: node.path,
-                                revision,
-                                values,
-                                fingerprint,
-                                cause,
-                            },
-                        ));
-                    }
-                }
-                ResolutionNodeKind::Filter { scope, atoms } => {
-                    let filters: Vec<_> = atoms.iter().map(|atom| atom.filter.clone()).collect();
-                    let fingerprint = filter_fingerprint(&filters);
-                    let prior = state.execution.nodes.get(&node.path);
-                    let revision = match prior {
-                        Some(RememberedResolution::Filter {
-                            revision,
-                            fingerprint: old,
-                            ..
-                        }) if old == &fingerprint => *revision,
-                        Some(RememberedResolution::Filter { revision, .. }) => {
-                            revision.saturating_add(1)
-                        }
-                        _ => 1,
-                    };
-                    let changed = !matches!(
-                        prior,
-                        Some(RememberedResolution::Filter {
-                            fingerprint: old,
-                            ..
-                        }) if old == &fingerprint
-                    );
-                    for atom in &atoms {
-                        *current_targets
-                            .entry(super::ActiveRequestTarget {
-                                demand: nmp_router::DemandKey::for_atom(atom),
-                                scope,
-                                path: node.path.clone(),
-                                revision,
-                            })
-                            .or_insert(0) += 1;
-                    }
-                    state.execution.nodes.insert(
-                        node.path.clone(),
-                        RememberedResolution::Filter {
-                            revision,
-                            fingerprint: fingerprint.clone(),
-                            atoms,
-                        },
-                    );
-                    if changed {
-                        evidence.push(issue(
-                            &mut next_sequence,
-                            branch,
-                            ObservationFact::ConcreteFilter {
-                                path: node.path,
-                                revision,
-                                filters,
-                                fingerprint,
-                                cause,
-                            },
-                        ));
-                    }
-                }
+            let ResolutionNodeKind::Filter { scope, atoms } = node.node_type else {
+                continue;
+            };
+            for atom in &atoms {
+                *current_targets
+                    .entry(super::ActiveRequestTarget {
+                        demand: nmp_router::DemandKey::for_atom(atom),
+                        scope,
+                    })
+                    .or_insert(0) += 1;
             }
         }
         self.replace_request_targets_for_handle(id, current_targets);
-        if !evidence.is_empty() {
-            if let Some(state) = self.observations.get_mut(&observation) {
-                state.next_sequence = next_sequence;
-            }
-            effects.push(Effect::EmitObservationEvidence(observation, evidence));
-        }
     }
 
     pub(in crate::core) fn remove_request_targets_for_handle(&mut self, id: HandleId) {
@@ -1000,52 +557,10 @@ impl CoreState {
         self.request_targets.deactivate_handle_demand(id, demand);
     }
 
-    /// Issue one branch-scoped execution fact into its OBSERVATION's ordered
-    /// trace. Facts about an engine-internal handle that belongs to no
-    /// observation are dropped, exactly as their row emits already are.
-    pub(in crate::core) fn emit_observation_fact(
-        &mut self,
-        id: HandleId,
-        fact: ObservationFact,
-        effects: &mut Vec<Effect>,
-    ) {
-        let Some(BranchOwner { observation, index }) = self.branch_owner(id) else {
-            return;
-        };
-        let Some(state) = self.observations.get_mut(&observation) else {
-            return;
-        };
-        state.next_sequence = state.next_sequence.saturating_add(1);
-        let evidence = ObservationEvidence {
-            sequence: state.next_sequence,
-            branch: Some(index),
-            fact,
-        };
-        effects.push(Effect::EmitObservationEvidence(observation, vec![evidence]));
-    }
-
-    /// Which observation and canonical branch index a resolver handle serves.
-    pub(in crate::core) fn branch_owner(&self, id: HandleId) -> Option<BranchOwner> {
-        self.handles.get(&id).map(|state| BranchOwner {
-            observation: state.observation,
-            index: state.index,
-        })
+    /// Which observation a resolver branch handle serves. An engine-internal
+    /// handle that belongs to none answers `None`, exactly as its row emits
+    /// are already dropped.
+    fn branch_observation(&self, id: HandleId) -> Option<super::ObservationId> {
+        self.handles.get(&id).map(|state| state.observation)
     }
 }
-
-/// The observation and canonical branch index one resolver handle serves.
-#[derive(Debug, Clone, Copy)]
-pub(super) struct BranchOwner {
-    pub(super) observation: super::ObservationId,
-    pub(super) index: usize,
-}
-
-fn issue(next_sequence: &mut u64, branch: usize, fact: ObservationFact) -> ObservationEvidence {
-    *next_sequence = next_sequence.saturating_add(1);
-    ObservationEvidence {
-        sequence: *next_sequence,
-        branch: Some(branch),
-        fact,
-    }
-}
-

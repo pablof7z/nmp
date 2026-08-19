@@ -132,7 +132,7 @@ pub use nmp_engine::core::ReceiptReplayCursor;
 use nmp_engine::core::{
     self, AcquisitionEvidence, AuthorRouteProvider, DiagnosticsSnapshot, Effect, EngineCore,
     EngineMsg, HistoryAdvanceError, HistoryQuery, HistorySessionId,
-    ObservationEvidence, ObservationId, ObservationOpen, ProviderReroot, PublishError,
+    ObservationId, ObservationOpen, ProviderReroot, PublishError,
     PublishPreparation, ReattachOutcome, ReceiptId, RowDelta,
 };
 use nmp_engine::publish_queue::{
@@ -189,11 +189,7 @@ struct EnginePoolRuntime {
 /// rebased onto the receiver's previous batch + the query's latest per-source
 /// acquisition evidence (see [`RowsReceiver`] and the module doc's "One
 /// reducer-to-runtime delivery path" note).
-pub type RowsMsg = (
-    Vec<RowDelta>,
-    Vec<AcquisitionEvidence>,
-    Vec<ObservationEvidence>,
-);
+pub type RowsMsg = (Vec<RowDelta>, Vec<AcquisitionEvidence>);
 
 // A runtime-level integration falsifier: it spawns a real `EngineThread` and
 // asserts typed refusals reach the app. It lived under `core/` and reached
@@ -1866,9 +1862,9 @@ fn engine_loop(
                     &registry,
                     dispatch_runtime,
                 );
-                // Deliver the terminal observation-scoped withdrawal fact
-                // before dropping the sender; the app then observes channel
-                // disconnect deterministically.
+                // Dropping the sender is the withdrawal: the app observes
+                // channel disconnect deterministically, after every effect
+                // this unsubscribe produced has already been dispatched.
                 row_channels.remove(&id);
             }
             Cmd::Engine(EngineMsg::SetActivePubkey(pk)) => {
@@ -2689,16 +2685,20 @@ fn dispatch_effect(
                 return;
             }
             if let Some(tx) = row_channels.get(&id) {
-                tx.send((rows, evidence, Vec::new()));
+                tx.send((rows, evidence));
             }
         }
-        Effect::EmitObservationEvidence(id, evidence) => {
+        // A settlement is a fact for the route provider bound to this
+        // observation and for nothing else. No app mailbox carries it.
+        Effect::RequestSettled(id, relay) => {
             let provider_updates = {
                 let mut slot = runtime.route_provider.borrow_mut();
                 slot.as_mut()
                     .filter(|slot| slot.bound == Some(id))
                     .and_then(|slot| {
-                        guarded_provider_call(slot, |provider| provider.observe_evidence(&evidence))
+                        guarded_provider_call(slot, |provider| {
+                            provider.observe_request_settled(&relay)
+                        })
                     })
             };
             if let Some(updates) = provider_updates {
@@ -2713,10 +2713,6 @@ fn dispatch_effect(
                     registry,
                     runtime,
                 );
-                return;
-            }
-            if let Some(tx) = row_channels.get(&id) {
-                tx.send_evidence(evidence);
             }
         }
         Effect::EmitHistory(id, batch) => {

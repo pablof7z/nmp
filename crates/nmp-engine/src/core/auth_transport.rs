@@ -882,8 +882,6 @@ impl CoreState {
                     filter: &req.filter,
                     coverage_claims: req.coverage_claims.clone(),
                     owner_demands: req.owner_demands.clone(),
-                    lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
-                    replay: true,
                 });
                 plain_reqs.push(req.clone());
             }
@@ -1046,12 +1044,7 @@ impl CoreState {
             if current != handle || session != reported_session {
                 return effects;
             }
-            self.close_requests_for_session(
-                &session,
-                handle,
-                format!("transport disconnected: {reason:?}"),
-                &mut effects,
-            );
+            self.close_requests_for_session(&session, handle);
             // A coordinate answer is a fact about one relay SESSION, and any
             // question still outstanding on this one died with the socket.
             // Releasing it here rather than waiting for the publish
@@ -1179,8 +1172,6 @@ impl CoreState {
                     filter: &req.filter,
                     coverage_claims: req.coverage_claims.clone(),
                     owner_demands: req.owner_demands.clone(),
-                    lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
-                    replay: true,
                 });
             }
             if !reqs.is_empty() {
@@ -1719,7 +1710,7 @@ impl CoreState {
                 });
                 let settled = committed_coverage.is_some();
                 let terminal_demands = if let Some(send) = completed_send.filter(|_| settled) {
-                    self.emit_request_settled(send, self.clock, RequestTerminal::Eose, &mut effects)
+                    self.emit_request_settled(send, &mut effects)
                 } else if let Some(send) = completed_send {
                     self.retire_request_evidence(send)
                 } else {
@@ -1771,15 +1762,13 @@ impl CoreState {
                 effects.extend(self.on_auth_restricted(handle, session, message.into_owned()));
             }
             RelayMessage::Closed {
-                subscription_id,
-                message,
+                subscription_id, ..
             } => {
-                let reason = message.into_owned();
                 if let Some(sub_id) = self
                     .attribution
                     .sub_id_for_wire(&session, subscription_id.as_str())
                 {
-                    self.close_requests_for_sub(&session, handle, &sub_id, reason, &mut effects);
+                    self.close_requests_for_sub(&session, handle, &sub_id);
                 }
             }
             // Closed (non-auth) / Notice / Count remain separate protocol
