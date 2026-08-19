@@ -130,15 +130,48 @@ fn semantic_coordinate() -> Coordinate {
     }
 }
 
+/// A real, `store`-canonical (relay-observed) source event for the U5
+/// semantic fixtures below. `apply_plan`'s first-materialization match
+/// requires an installed `QualifiedSource::Event` to name the exact event
+/// that already won the coordinate's address index, so every fixture below
+/// that materializes through `install_replaceable_materialization` needs
+/// this actually `insert`ed, not merely signed. `seed_semantic_source` does
+/// that once, durably, before any crash point runs; `semantic_source` and
+/// `semantic_accept_write` below all reference the same deterministic event
+/// by content/timestamp, so every call names the identical id.
+fn semantic_source_event() -> Event {
+    qualified_source("u5-semantic-source", 1)
+}
+
+fn seed_semantic_source(store: &mut RedbStore) {
+    let relay = RelayUrl::parse(RELAY).unwrap();
+    store
+        .insert(
+            semantic_source_event(),
+            RelayObserved::new(relay, Timestamp::from(1)),
+        )
+        .unwrap();
+}
+
 fn semantic_source() -> crate::SourceEvidence {
+    let source = semantic_source_event();
     crate::SourceEvidence {
         plan: crate::SourcePlanId([3; 32]),
         access: crate::AccessContextId([4; 32]),
-        qualified: crate::QualifiedSource::Absent,
+        qualified: crate::QualifiedSource::Event {
+            event_id: source.id,
+            created_at: source.created_at,
+        },
     }
 }
 
-fn semantic_accept_write() -> AcceptWrite {
+fn semantic_accept_write(store: &RedbStore) -> AcceptWrite {
+    let source = semantic_source_event();
+    let source_event = store
+        .query(&Filter::new().id(source.id))
+        .unwrap()
+        .pop()
+        .expect("seed_semantic_source inserted the qualifying source first");
     AcceptWrite {
         payload: crate::AcceptWritePayload::ReplaceableOperation(Box::new(crate::SemanticAccept {
             coordinate: semantic_coordinate(),
@@ -150,10 +183,10 @@ fn semantic_accept_write() -> AcceptWrite {
             starting_source: crate::StartingSourceRequirement {
                 plan: crate::SourcePlanId([3; 32]),
                 access: crate::AccessContextId([4; 32]),
-                source: crate::StartingSource::Absent,
+                source: crate::StartingSource::Event(source.id),
             },
             source: semantic_source(),
-            source_event: None,
+            source_event: Some(source_event),
             plan: crate::SemanticPlan::new(1, vec![42]).unwrap(),
             materialized: None,
             contributing_operations: Vec::new(),
@@ -331,12 +364,13 @@ fn semantic_promotion_target(
         .unwrap()
         .unwrap();
     let generation = snapshot.current.generation.as_ref().unwrap();
+    // `query`'s result order is documented as unordered, so pick the
+    // materialized row by the id the snapshot names rather than by
+    // whichever ContactList-by-author row the store happens to return
+    // last -- a qualifying source event by the same author (kind and
+    // coordinate force that) is a second candidate row once one exists.
     let row = store
-        .query(
-            &Filter::new()
-                .kind(Kind::ContactList)
-                .author(keys().public_key()),
-        )
+        .query(&Filter::new().id(generation.materialization.event_id))
         .unwrap()
         .pop()
         .unwrap();
@@ -473,7 +507,8 @@ fn redb_crash_worker() {
             let mut store =
                 RedbStore::open_with_crash_point(path, RedbCrashPoint::SemanticAcceptBeforeCommit)
                     .expect("open semantic accept worker store");
-            let _ = store.accept_write(semantic_accept_write());
+            let accept = semantic_accept_write(&store);
+            let _ = store.accept_write(accept);
         }
         "semantic-install-before-commit" => {
             let mut store = RedbStore::open_with_crash_point(
@@ -803,7 +838,10 @@ fn accept_is_all_or_nothing_at_both_internal_transaction_boundaries() {
 #[test]
 fn semantic_accept_and_materialization_are_crash_atomic() {
     let (_dir, path) = fixture();
-    RedbStore::open(&path).expect("initialize semantic store");
+    {
+        let mut store = RedbStore::open(&path).expect("initialize semantic store");
+        seed_semantic_source(&mut store);
+    }
     crash(&path, "semantic-accept-before-commit");
 
     {
@@ -814,9 +852,8 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             .is_none());
         assert!(store.recover_publish_queue().unwrap().is_empty());
         assert!(store.reattach_receipt(1).unwrap().is_none());
-        let accepted = store
-            .accept_write(semantic_accept_write())
-            .expect("accept after rollback");
+        let accept = semantic_accept_write(&store);
+        let accepted = store.accept_write(accept).expect("accept after rollback");
         assert_eq!(accepted.journaled_intent_id(), Some(IntentId(1)));
         assert_eq!(accepted.journaled_receipt_id(), Some(1));
     }
@@ -829,6 +866,10 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
             .unwrap()
             .unwrap();
         assert!(snapshot.current.generation.is_none());
+        // The qualifying source event (seeded before the crash sequence
+        // started) is present either way; what the crash must not have
+        // committed is a LOCAL materialization, which always carries the
+        // sentinel signature until promotion (#768).
         assert!(store
             .query(
                 &Filter::new()
@@ -836,7 +877,8 @@ fn semantic_accept_and_materialization_are_crash_atomic() {
                     .author(keys().public_key())
             )
             .unwrap()
-            .is_empty());
+            .iter()
+            .all(|row| row.event.sig != sentinel_signature()));
         let receipt = store.reattach_receipt(1).unwrap().unwrap();
         assert!(matches!(
             receipt.payload,
@@ -980,14 +1022,16 @@ fn semantic_shared_promotion_is_crash_atomic() {
     let (_dir, path) = fixture();
     let (receipt_a, receipt_b) = {
         let mut store = RedbStore::open(&path).unwrap();
-        let first = store.accept_write(semantic_accept_write()).unwrap();
+        seed_semantic_source(&mut store);
+        let first_accept = semantic_accept_write(&store);
+        let first = store.accept_write(first_accept).unwrap();
         let first_intent = first.journaled_intent_id().unwrap();
         let first_receipt = first.journaled_receipt_id().unwrap();
         let snapshot = store
             .replaceable_operation_snapshot(&semantic_coordinate())
             .unwrap()
             .unwrap();
-        let mut second_write = semantic_accept_write();
+        let mut second_write = semantic_accept_write(&store);
         let crate::AcceptWritePayload::ReplaceableOperation(second) = &mut second_write.payload
         else {
             unreachable!()
@@ -1038,12 +1082,13 @@ fn semantic_shared_promotion_is_crash_atomic() {
     crash(&path, "semantic-promote-before-commit");
     {
         let mut store = RedbStore::open(&path).unwrap();
+        let snapshot = store
+            .replaceable_operation_snapshot(&semantic_coordinate())
+            .unwrap()
+            .unwrap();
+        let materialized_event_id = snapshot.current.generation.unwrap().materialization.event_id;
         let row = store
-            .query(
-                &Filter::new()
-                    .kind(Kind::ContactList)
-                    .author(keys().public_key()),
-            )
+            .query(&Filter::new().id(materialized_event_id))
             .unwrap()
             .pop()
             .unwrap();
@@ -1094,7 +1139,8 @@ fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() 
 
     let (receipt_a, receipt_b, intent_a, intent_b, close, stale_install) = {
         let mut store = RedbStore::open(&path).unwrap();
-        let first_write = semantic_accept_write();
+        seed_semantic_source(&mut store);
+        let first_write = semantic_accept_write(&store);
         let first = store.accept_write(first_write).unwrap();
         let intent_a = first.journaled_intent_id().unwrap();
         let receipt_a = first.journaled_receipt_id().unwrap();
@@ -1103,7 +1149,7 @@ fn terminal_destinations_close_every_semantic_receipt_and_compact_the_program() 
             .replaceable_operation_snapshot(&semantic_coordinate())
             .unwrap()
             .unwrap();
-        let mut second_write = semantic_accept_write();
+        let mut second_write = semantic_accept_write(&store);
         let crate::AcceptWritePayload::ReplaceableOperation(second) = &mut second_write.payload
         else {
             unreachable!()

@@ -177,7 +177,6 @@ pub(super) fn operation_range(
 
 fn encode_starting_source(encoder: &mut Encoder, source: StartingSource) {
     match source {
-        StartingSource::Absent => encoder.u8(0),
         StartingSource::Event(event_id) => {
             encoder.u8(1);
             encoder.fixed(event_id.as_bytes());
@@ -188,7 +187,6 @@ fn encode_starting_source(encoder: &mut Encoder, source: StartingSource) {
 
 fn decode_starting_source(decoder: &mut Decoder<'_>) -> Result<StartingSource, PersistenceError> {
     match decoder.u8()? {
-        0 => Ok(StartingSource::Absent),
         1 => Ok(StartingSource::Event(
             EventId::from_slice(&decoder.array::<32>()?)
                 .map_err(|_| invariant("invalid starting event id"))?,
@@ -203,7 +201,6 @@ fn encode_evidence(encoder: &mut Encoder, evidence: &SourceEvidence) {
     encoder.fixed(&evidence.access.0);
     match evidence.qualified {
         QualifiedSource::Unresolved => encoder.u8(0),
-        QualifiedSource::Absent => encoder.u8(1),
         QualifiedSource::Event {
             event_id,
             created_at,
@@ -220,7 +217,6 @@ fn decode_evidence(decoder: &mut Decoder<'_>) -> Result<SourceEvidence, Persiste
     let access = AccessContextId(decoder.array()?);
     let qualified = match decoder.u8()? {
         0 => QualifiedSource::Unresolved,
-        1 => QualifiedSource::Absent,
         2 => QualifiedSource::Event {
             event_id: EventId::from_slice(&decoder.array::<32>()?)
                 .map_err(|_| invariant("invalid qualified event id"))?,

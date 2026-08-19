@@ -418,9 +418,7 @@ impl CoreState {
         // generation means every operation is `Qualified` or
         // `CapabilityDefault` (`ensure_all_qualified` refuses a candidate
         // otherwise), `CapabilityDefault` returned above, and `Qualified`
-        // over anything but a qualified absence retains its source event.
-        // Qualified absence is the one hole, and nothing in the engine ever
-        // mints `QualifiedSource::Absent`.
+        // always retains its source event.
         let source = snapshot
             .and_then(|snapshot| snapshot.source.as_ref())
             .map(|stored| UnsignedEvent::from(stored.event.clone()))
@@ -630,7 +628,6 @@ impl CoreState {
                             QualifiedSource::Event { event_id, .. } => {
                                 StartingSource::Event(event_id)
                             }
-                            QualifiedSource::Absent => StartingSource::Absent,
                             QualifiedSource::Unresolved => requirement.source,
                         },
                     }
@@ -641,7 +638,6 @@ impl CoreState {
                 access: source_access,
                 source: match source.qualified {
                     QualifiedSource::Event { event_id, .. } => StartingSource::Event(event_id),
-                    QualifiedSource::Absent => StartingSource::Absent,
                     QualifiedSource::Unresolved => source_event_id
                         .map_or(StartingSource::CapabilityDefault, StartingSource::Event),
                 },
@@ -684,7 +680,7 @@ impl CoreState {
 
         let source_floor = match source.qualified {
             QualifiedSource::Event { created_at, .. } => created_at.as_secs().saturating_add(1),
-            QualifiedSource::Absent | QualifiedSource::Unresolved => 0,
+            QualifiedSource::Unresolved => 0,
         };
         let prior_floor = snapshot
             .as_ref()
