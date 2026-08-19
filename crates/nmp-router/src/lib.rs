@@ -46,6 +46,8 @@ mod diag;
 mod facts;
 mod ownership;
 mod plan;
+#[cfg(test)]
+mod rebuild_agreement_tests;
 mod route;
 mod router;
 mod solver;
