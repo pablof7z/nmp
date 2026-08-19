@@ -46,10 +46,6 @@ pub struct EngineThread {
     /// (never a worker) after the reducer stops spawning; dropping the last
     /// `Arc` aborts remaining adapter tasks, firing their Drop guards.
     runtime: Arc<tokio::runtime::Runtime>,
-    /// The one value every `Tick` this thread dispatches reads its instant
-    /// from. See [`EngineClock`] for why the runtime reads a clock at all
-    /// instead of calling `Timestamp::now()` at each site.
-    clock: EngineClock,
     /// How many times this engine thread's loop has come around to arm its
     /// wait. See [`EngineThread::wait_arms`]. The engine loop publishes the
     /// count unconditionally — a falsifier that only holds for a specially
@@ -136,7 +132,7 @@ const ADAPTER_RUNTIME_WORKERS: usize = 2;
 /// Finite admission limit for live AUTH policy/signer registrations. Unlike
 /// legacy zero-valued relay settings, zero AUTH capabilities intentionally
 /// admits none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RuntimeConfig {
     pub max_auth_capabilities: usize,
     /// The publish attempt ceiling (#1031) threaded from
@@ -150,6 +146,15 @@ pub struct RuntimeConfig {
     /// pass these two lists through it (#1142 boundary cleanup).
     pub app_relays: Vec<RelayUrl>,
     pub fallback_relays: Vec<RelayUrl>,
+    /// The wall clock this engine's reducer reads, supplied by the host the
+    /// same way its `AuthorRouteProvider` is. Default is unpinned: every read
+    /// is `Timestamp::now()` and the caller wrote no clock code at all.
+    ///
+    /// Installed BEFORE the engine thread starts, which is the whole reason
+    /// it is construction input rather than a value handed back afterwards:
+    /// store recovery reads it, and by the time a caller could reach a
+    /// value returned from construction, recovery has already run.
+    pub clock: EngineClock,
 }
 
 impl Default for RuntimeConfig {
@@ -159,6 +164,7 @@ impl Default for RuntimeConfig {
             max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
             app_relays: Vec::new(),
             fallback_relays: Vec::new(),
+            clock: EngineClock::new(),
         }
     }
 }
@@ -373,9 +379,12 @@ impl EngineThread {
             }
         };
 
-        let clock = EngineClock::wired(cmd_tx.clone());
+        // The host's clock, installed on this thread's inbox BEFORE the
+        // thread starts, so a time stated before construction is the time
+        // `recover_on_boot` runs at.
+        let engine_clock = runtime_config.clock.clone();
+        engine_clock.install(cmd_tx.clone());
         let (startup_ready_tx, startup_ready_rx) = mpsc::channel();
-        let engine_clock = clock.clone();
         let self_inbox = cmd_tx.clone();
         let engine_pool = pool.clone();
         let engine_stop = pool_stop_tx.clone();
@@ -441,7 +450,6 @@ impl EngineThread {
                 bridge_join: Some(bridge_join),
                 drain_inbox: cmd_tx.clone(),
                 runtime,
-                clock,
                 #[cfg(feature = "test-instrumentation")]
                 wait_arms,
             },
@@ -484,20 +492,6 @@ impl EngineThread {
     #[must_use]
     pub fn adapter_runtime(&self) -> tokio::runtime::Handle {
         self.runtime.handle().clone()
-    }
-
-    /// This thread's wall clock, so an owner that has to STATE what time the
-    /// engine is running at can.
-    ///
-    /// Exposed on [`EngineThread`] rather than on the app-facing [`Handle`]
-    /// for the same reason [`Self::adapter_runtime`] is: an app has no
-    /// business deciding what time it is, and a value only the thread's owner
-    /// can reach cannot become an app contract by accident. Unpinned by
-    /// default, so a caller that never touches it gets `Timestamp::now()`
-    /// everywhere, byte for byte what the runtime did before this existed.
-    #[must_use]
-    pub fn clock(&self) -> EngineClock {
-        self.clock.clone()
     }
 
     /// Block until the engine and pool-bridge threads have exited. Only

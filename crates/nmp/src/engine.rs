@@ -229,6 +229,7 @@ impl Engine {
             max_publish_attempts: config.max_publish_attempts,
             app_relays,
             fallback_relays,
+            clock: config.clock.clone(),
         };
         let (engine_thread, handle) = match &config.store_path {
             Some(path) => {

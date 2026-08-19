@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use nmp::{Binding, Demand, Engine, EngineConfig, Filter, LiveQuery, Window};
+use nmp::{Binding, Demand, Engine, EngineClock, EngineConfig, Filter, LiveQuery, Window};
 
 const DEFAULT_RELAYS: &[&str] = &[
     "wss://relay.damus.io",
@@ -136,6 +136,8 @@ fn main() {
         max_relays: relays.len().max(1),
         max_auth_capabilities: 4,
         max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+        // These probes drive real relays on real time.
+        clock: EngineClock::new(),
     })
     .expect("engine");
 

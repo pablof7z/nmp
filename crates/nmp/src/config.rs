@@ -7,6 +7,7 @@
 //! Author routes are not configuration. They are neutral, session-owned
 //! facts populated only by an attached protocol component.
 
+use nmp_runtime::EngineClock;
 use nostr::RelayUrl;
 
 use crate::error::EngineError;
@@ -56,6 +57,42 @@ pub struct EngineConfig {
     /// when knowledge is exhausted, when the signer arrives, or when the app
     /// removes it.
     pub max_publish_attempts: u64,
+    /// What time it is, as far as this engine's reducer is concerned.
+    ///
+    /// The default is unpinned and is what an app that has no opinion about
+    /// the clock gets: every reading is the real system clock, and there is
+    /// no code to write. An app that DOES have an opinion -- one replaying a
+    /// recorded session, one on a device whose clock is skewed, one driving a
+    /// scenario that says "30 days pass" -- constructs an [`EngineClock`],
+    /// states a time on it, hands it here, and keeps its clone to state more
+    /// times later:
+    ///
+    /// ```no_run
+    /// use nmp::{Engine, EngineClock, EngineConfig, Timestamp};
+    ///
+    /// let clock = EngineClock::new();
+    /// clock.set(Timestamp::from_secs(1_600_000_000));
+    /// let engine = Engine::new(EngineConfig {
+    ///     clock: clock.clone(),
+    ///     ..EngineConfig::default()
+    /// })?;
+    /// // Later, the same clock moves the engine that is already running.
+    /// clock.advance(std::time::Duration::from_secs(30 * 24 * 60 * 60));
+    /// # Ok::<(), nmp::EngineError>(())
+    /// ```
+    ///
+    /// It is construction input rather than something handed back from a
+    /// running engine because store recovery reads it. A clock reachable only
+    /// after `Engine::new` returns cannot state the time recovery ran at, and
+    /// recovery is exactly where an expiry sweep or a parked write first
+    /// consults the wall.
+    ///
+    /// It governs the REDUCER only. Reconnect backoff and the background-gap
+    /// detector are the transport's own clocks and are untouched by this: a
+    /// question about an expiry wants a stated instant, a question about a
+    /// reconnect wants a compressed schedule, and one knob answering both
+    /// would make the second one lie.
+    pub clock: EngineClock,
 }
 
 impl Default for EngineConfig {
@@ -67,6 +104,7 @@ impl Default for EngineConfig {
             max_relays: nmp_transport::DEFAULT_MAX_RELAYS,
             max_auth_capabilities: nmp_runtime::DEFAULT_MAX_AUTH_CAPABILITIES,
             max_publish_attempts: nmp_engine::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+            clock: EngineClock::new(),
         }
     }
 }
