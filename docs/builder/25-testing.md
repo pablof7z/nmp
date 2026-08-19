@@ -102,23 +102,6 @@ Until this target surface lands, treat internal SDK fakes as repository tests,
 not a stable consumer contract. The honest shipping state is tracked in
 [Current implementation status](03-status-map.md).
 
-## Prove grammar and module boundaries
-
-Engine-level contract tests must show that:
-
-- a nested `Derived` demand uses its own source/identity even when the
-  outer demand names a different protocol host or AUTH identity;
-- changing inner or outer context recompiles only dependent work and never
-  aliases their acquisition evidence;
-- every ASCII letter `A-Z` and `a-z` is accepted as an indexed filter tag key;
-- arbitrary event tag names such as `alt`, `-`, and application-defined strings
-  round-trip and can be projected without becoming generic filter keys;
-- no whitelist grants one protocol tag special treatment; and
-- the NIP-29 remembered-groups product surface exposes and consumes the typed
-  observational value of NIP-51 kind `10009` without claiming protocol
-  ownership of `10009` or kind `30002`, and the underlying list demand never
-  runs through the selected group host.
-
 ## Diagnostics make good golden evidence
 
 The permanent diagnostic snapshot is a structured projection, so it is useful
@@ -136,22 +119,9 @@ of a health score. NMP deliberately exposes no health score.
 
 ## Crash and restart proofs belong to NMP
 
-An app fake cannot prove the durable write contract. NMP's owning test suites
-must kill and reopen the real persistence boundary at every relevant point and
-prove:
-
-- failed acceptance exposes no pending row or `Accepted` receipt;
-- successful acceptance restores the frozen body, pending row, receipt, signer
-  identity, routing state, and displaced candidates together;
-- provider availability transitions resume the same obligation;
-- signature promotion preserves exact body, author, id, and valid signature;
-- cancellation, deletion, expiry, and replaceable supersession cannot strand an
-  open intent;
-- attempts are persisted before dispatch and retain ordinal/eligibility;
-- at-most-once ambiguity is never blindly resent; and
-- receipt facts remain reattachable after open work becomes terminal.
-
-These are facade-level contract tests, not tests of table helpers in isolation.
+An app fake cannot prove the durable write contract. Only a suite that kills
+and reopens the real persistence boundary can, which means these proofs live
+in NMP's own test suites rather than in an app's.
 
 ## Bound every asynchronous test
 
@@ -163,19 +133,6 @@ deterministic CI evidence, cap every wait, and report an unavailable public
 relay as an environmental skip rather than training the suite to tolerate
 random failures. Live tests supplement, but never replace, scripted transport
 and crash-recovery falsifiers.
-
-## Keep the repository toolchain reproducible
-
-The root `rust-toolchain.toml` pins an exact dated nightly, not the moving
-`nightly` alias. The exact host-independent `rustc`, Cargo, Clippy, and
-rustfmt version strings live in `tools/rust-toolchain-versions.env`.
-
-The scripts that used to falsify this pin (asserting no floating nightly, no
-root/toolchain mismatch, no selected-toolchain mismatch, no version drift, and
-no missing required component) are deleted along with the rest of the CI-era
-scripts, and there is no CI. A toolchain bump is currently unproven by any
-mechanism; keeping the root pin, toolchain pin, and version oracle in
-agreement relies on manual review.
 
 ## Suggested test matrix
 

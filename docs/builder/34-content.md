@@ -216,9 +216,3 @@ This is a clean break; none of the deleted names has a compatibility alias.
 | `HydrationPolicy`, active/resolved counts, grace windows | Delete them. Preserve only immutable cycle/depth context; rely on NMP's core handle coalescing and finite mechanism ceilings. |
 | `decodeNostrProfile` / `decodeNIP23Article` from the content package | Move schema interpretation to the exact protocol owner. Use raw-row/generic presentation until that owner ships. |
 | Scripted resource sessions | Use a pure document plus literal/custom components, or inject an observation factory owned by the preview/test. Do not recreate a fake shared acquisition owner. |
-
-The discriminating review question is simple: **name a reasonable application
-policy the current ownership shape makes impossible.** Literal/no-fetch,
-consent-before-network, cache-only preview, and explicit-relay fallback must all
-remain expressible at the selected component boundary. If no real policy is
-excluded, discard the finding instead of inventing another coordinator.

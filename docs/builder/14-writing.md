@@ -57,11 +57,9 @@ who signs it**. Nothing else. Three consequences he stated directly:
   Same day, same subject: `nmp.follow(bob, as: alice)` or `nmp.follow(bob)`.
   See `docs/internals/writes/identity.md` §7.
 
-This is a ruling on direction. It is not a specification, and nothing here
-says what the collapsed types are called or how the pieces that currently
-carry authenticated identity and payload variants land afterwards. Do not implement
-from this paragraph; implement from a design that answers those, and check it
-against these words.
+This is a ruling on direction, not a specification: it does not say what the
+collapsed types are called, or where the pieces that currently carry
+authenticated identity and payload variants land afterwards.
 
 ## Durable acceptance is a transaction
 

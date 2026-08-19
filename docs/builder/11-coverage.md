@@ -178,7 +178,7 @@ the same day, on finding an agent optimizing store size: *"is the whole thing
 you're pursuing is the fucking space on disk the stupid database takes???
 because if that's the case that's so far off from being a priority."* The
 default policy exists so the contract is honest and bounded, not to make the
-store small. Do not open work whose stated goal is fewer bytes on disk.
+store small.
 
 **The default excludes tombstones.** They were ruled PERMANENT on 2026-07-11
 (`docs/design/retraction-and-negative-deltas.md` §7: *"tombstone retention is
@@ -191,9 +191,9 @@ today, so the policy above is a decision without an implementation; see
 `docs/known-gaps.md`. Until it exists, the store-level `RedbStore::gc` door
 remains the only explicit claim-based eviction operation: it reports what it
 evicted and lowers or removes every affected coverage interval in the same
-transaction as the row deletion. Whatever policy lands must preserve that
-governed operation; it must never turn a RAM ceiling or an implicit
-maintenance pass into silent durable deletion.
+transaction as the row deletion. That governed operation is the only
+path by which a canonical event leaves the store today; no RAM ceiling and no
+implicit maintenance pass deletes durably.
 
 ## Access context matters
 
