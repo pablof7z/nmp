@@ -44,7 +44,6 @@ mod config;
 mod diagnostics;
 mod engine;
 mod error;
-mod observation;
 mod subscription;
 
 // The engine is no longer inside this crate. It is two:
@@ -136,7 +135,6 @@ pub use nmp_runtime::session::{
 // what time it is needs no `nmp-runtime` dependency: the facade is the only
 // crate an application names.
 pub use nmp_runtime::EngineClock;
-pub use observation::ObservationEvidence;
 
 /// Monotonic count of real OS threads NMP spawned through its instrumented
 /// paths (#680 falsifier instrumentation). This includes joined engine-owned

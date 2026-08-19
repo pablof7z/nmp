@@ -51,8 +51,6 @@ pub(super) struct RequestAttemptState {
     pub(super) filter: ConcreteFilter,
     pub(super) coverage_claims: std::collections::BTreeSet<CoverageKey>,
     pub(super) owner_demands: std::collections::BTreeSet<nmp_router::DemandKey>,
-    pub(super) lanes: std::collections::BTreeSet<nmp_router::Lane>,
-    pub(super) replay: bool,
     pub(super) request_revision: Option<u64>,
     /// Refusals already observed for this one semantic retry goal.
     /// Carried through Attempting so backoff never resets when the retry
@@ -66,10 +64,6 @@ pub(super) struct RequestSend<'a> {
     pub(super) filter: &'a ConcreteFilter,
     pub(super) coverage_claims: BTreeSet<CoverageKey>,
     pub(super) owner_demands: BTreeSet<nmp_router::DemandKey>,
-    /// The routing lanes that asked for this REQ. Reported verbatim on the
-    /// resulting `ObservationFact::RelayRequest`.
-    pub(super) lanes: BTreeSet<nmp_router::Lane>,
-    pub(super) replay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -328,13 +322,6 @@ impl RequestAttempts {
         }
     }
 
-    /// When the retry parked behind `sub_id` is due, for the deferred-request
-    /// observation fact. One call instead of the two-map hop I5 governs.
-    pub(super) fn retry_due_for_sub(&self, sub_id: &SubId) -> Option<Timestamp> {
-        let key = self.retry_by_sub.get(sub_id)?;
-        self.retries.get(key).map(|retry| retry.due)
-    }
-
     /// Every request awaiting a terminal, as the `(session, evidence sub id)`
     /// pairs acquisition evidence is keyed by.
     pub(super) fn awaiting_evidence_keys(&self) -> BTreeSet<(RelaySessionKey, SubId)> {
@@ -540,8 +527,6 @@ impl CoreState {
                     filter: &filter,
                     coverage_claims: attempt.coverage_claims,
                     owner_demands: attempt.owner_demands,
-                    lanes: attempt.lanes,
-                    replay: attempt.replay,
                 });
             self.attempts
                 .set_retry_failures(attempt_id, pending.failures);

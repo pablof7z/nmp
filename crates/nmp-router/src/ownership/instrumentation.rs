@@ -160,34 +160,6 @@ impl Router {
         Some(current.union(physical).cloned().collect())
     }
 
-    /// Which lanes put this request on the wire — the "why" behind a REQ,
-    /// as opposed to the "where" its `RelaySessionKey` already carries.
-    ///
-    /// A SET, not one lane, because coalescing is real: one request can be
-    /// the author's outbox for two authors AND the operator's app lane, and
-    /// naming only one of those would report a route that is true but not
-    /// the whole reason the relay was asked. An empty set is impossible for
-    /// a request that reached the plan — every route carries a provenance.
-    pub fn request_lanes(
-        &self,
-        session: &RelaySessionKey,
-        sub_id: &SubId,
-    ) -> Option<BTreeSet<crate::facts::Lane>> {
-        let position = self
-            .request_position_by_key
-            .get(&(session.clone(), sub_id.clone()))?;
-        Some(
-            self.prev_plan
-                .reqs
-                .get(session)?
-                .get(*position)?
-                .provenance
-                .iter()
-                .map(|fact| fact.lane)
-                .collect(),
-        )
-    }
-
     /// Claims present when the immutable physical request entered the plan.
     /// These remain coverage authority until physical CLOSE even when their
     /// current local owner detaches.
@@ -202,7 +174,8 @@ impl Router {
 
     /// Exact immutable logical demands owned by one physical request.
     /// Unlike coverage identity, these retain since/until/limit and are the
-    /// only sound key for routing request-execution facts back to observers.
+    /// only sound key for routing a request's settlement back to the
+    /// observations that own it.
     pub fn request_demands(
         &self,
         session: &RelaySessionKey,

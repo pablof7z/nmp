@@ -276,12 +276,7 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use history_lifecycle::{HistoryRows, HistorySessions};
-use observation::{
-    ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
-};
-pub use observation::{
-    ObservationEvidence, ObservationFact, RequestTerminal, ResolutionCause, ResolvedBindingValue,
-};
+use observation::{ActiveRequestEvidence, LiveWireRequest, PendingRequestEvidence};
 use pending_writes::PendingWrites;
 pub use request_attempt::{LocalSendRefusal, RequestAttemptId, RequestHandoffOutcome};
 use request_attempt::{RequestAttemptState, RequestAttempts, RequestSend};
@@ -1077,9 +1072,15 @@ pub enum Effect {
     /// single-branch live query carries exactly one entry; nothing here is
     /// ever rolled up into a global verdict across branches.
     EmitRows(ObservationId, Vec<RowDelta>, Vec<AcquisitionEvidence>),
-    /// Ordered observation-scoped execution facts. Runtime folds these into
-    /// the same bounded observation mailbox as rows and acquisition facts.
-    EmitObservationEvidence(ObservationId, Vec<ObservationEvidence>),
+    /// One REQ this observation owns reached NIP-01's end of stored events on
+    /// this relay, with trustworthy settlement evidence.
+    ///
+    /// The one execution fact anything outside the engine reads: an
+    /// [`AuthorRouteProvider`] learns its own source answered, which is what
+    /// turns "no relay list seen" into a settled absence rather than a
+    /// silence. It goes to the provider bound to this observation and stops
+    /// there -- it never rides the row mailbox.
+    RequestSettled(ObservationId, RelayUrl),
     EmitHistory(HistorySessionId, HistoryBatch),
     HistoryLoadResult(HistorySessionId, Result<(), HistoryAdvanceError>),
     /// The engine-global diagnostics projection (M5 plan §1.2 step 3),
@@ -1185,11 +1186,6 @@ struct BranchState {
     _handle: QueryHandle,
     acquisition: HandleAcquisition,
     observation: ObservationId,
-    /// This branch's index in its observation's canonical branch order. It
-    /// is what keeps a value resolved at one branch from ever being read as
-    /// another branch's evidence.
-    index: usize,
-    execution: ObservationExecutionState,
 }
 
 /// The opaque identity of ONE live observation (#1108).
@@ -1221,9 +1217,6 @@ struct ObservationState {
     /// possibly missed historical snapshot, so the next affected batch must
     /// retry the full oracle before incremental application resumes.
     projection_complete: bool,
-    /// Monotonic within the OBSERVATION, never per branch: the app receives
-    /// one ordered execution trace for the whole live query.
-    next_sequence: u64,
 }
 
 /// The immutable opening-time result of every Demand boundary in one
@@ -2838,11 +2831,7 @@ impl CoreState {
         }
         let ids: Vec<_> = self.handles.keys().copied().collect();
         for id in ids {
-            self.reconcile_observation_resolution(
-                id,
-                ResolutionCause::CurrentAccountChanged,
-                &mut effects,
-            );
+            self.reconcile_observation_resolution(id);
         }
         self.recompile(&mut effects);
         if let Some(pk) = pk {

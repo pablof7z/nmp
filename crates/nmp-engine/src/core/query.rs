@@ -98,7 +98,7 @@ impl CoreState {
         let observation = ObservationId(self.next_observation_id);
         self.next_observation_id = self.next_observation_id.wrapping_add(1);
         let branches: Vec<HandleId> = opened.iter().map(|handle| handle.id()).collect();
-        for (index, (handle, acquisition)) in opened.into_iter().zip(acquisitions).enumerate() {
+        for (handle, acquisition) in opened.into_iter().zip(acquisitions) {
             let id = handle.id();
             self.handles.insert(
                 id,
@@ -106,8 +106,6 @@ impl CoreState {
                     _handle: handle,
                     acquisition,
                     observation,
-                    index,
-                    execution: ObservationExecutionState::default(),
                 },
             );
         }
@@ -119,7 +117,6 @@ impl CoreState {
                 last_rows: BTreeMap::new(),
                 last_evidence: None,
                 projection_complete: false,
-                next_sequence: 0,
             },
         );
 
@@ -146,15 +143,14 @@ impl CoreState {
         };
 
         for branch in &branches {
-            self.reconcile_observation_resolution(*branch, ResolutionCause::Initial, &mut effects);
+            self.reconcile_observation_resolution(*branch);
         }
         // The opening evidence frame reads coverage, so it can fail the same
         // way the canonical row projection above can (#763). It is the last
         // fallible step of the open, and it refuses the open rather than
         // delivering a frame whose sources read as "nothing proven" when the
         // store could not be read at all. The withdrawal is `on_unsubscribe`'s
-        // unwind minus its `Withdrawn` fact: nothing was ever delivered for
-        // this observation, so nothing is owed a terminal fact.
+        // unwind: nothing was ever delivered for this observation.
         let evidence = match self.observation_evidence_for(observation) {
             Ok(evidence) => evidence,
             Err(error) => {
@@ -218,17 +214,6 @@ impl CoreState {
         let Some(state) = self.observations.remove(&id) else {
             return effects;
         };
-        // The terminal fact is issued from the observation's own sequence
-        // before its branches disappear, so a consumer sees an ordered trace
-        // that ends in exactly one `Withdrawn`.
-        effects.push(Effect::EmitObservationEvidence(
-            id,
-            vec![ObservationEvidence {
-                sequence: state.next_sequence.saturating_add(1),
-                branch: None,
-                fact: ObservationFact::Withdrawn,
-            }],
-        ));
         let mut closing = Vec::new();
         for branch in state.branches {
             closing.extend(self.detach_wire_handle(branch));
@@ -846,19 +831,12 @@ impl CoreState {
                             .request_demands(session, sub_id)
                             .cloned()
                             .unwrap_or_default();
-                        let lanes = self
-                            .router
-                            .request_lanes(session, sub_id)
-                            .unwrap_or_default();
-
                         self.record_observed_request(RequestSend {
                             session,
                             sub_id,
                             filter,
                             coverage_claims,
                             owner_demands,
-                            lanes,
-                            replay: false,
                         });
                         kept_ops.push(op.clone());
                     }
@@ -1764,11 +1742,7 @@ impl CoreState {
         let phase_started = std::time::Instant::now();
         if demand_changed {
             for id in &affected {
-                self.reconcile_observation_resolution(
-                    *id,
-                    ResolutionCause::DependencyChanged,
-                    effects,
-                );
+                self.reconcile_observation_resolution(*id);
             }
         }
         let recompiled = demand_changed || force_recompile;

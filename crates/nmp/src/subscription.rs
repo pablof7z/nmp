@@ -38,7 +38,6 @@ use nmp_runtime::{
 };
 
 use crate::diagnostics::DiagnosticsSnapshot;
-use crate::observation::ObservationEvidence;
 
 /// Window policy on the read noun (#485). One real variant today; future
 /// policies (e.g. latest-only, anchored) are new variants on this
@@ -135,11 +134,6 @@ pub struct Frame {
     /// resolved the same value keep separate entries, and one branch's
     /// shortfall is never masked by a sibling's proof.
     pub evidence: Vec<AcquisitionEvidence>,
-    /// Ordered execution facts for this exact observation. These are emitted
-    /// by the resolver/reducer/runtime owners, never inferred from global
-    /// diagnostics. A bounded slow-consumer loss appears as an explicit
-    /// `kind == "overflow"` item.
-    pub execution: Vec<ObservationEvidence>,
 }
 
 /// The complete current contents of a bounded window plus its growth fact.
@@ -282,15 +276,11 @@ impl Subscription {
     pub fn recv(&self) -> Result<Frame, RecvError> {
         match &self.delivery {
             Delivery::Unbounded(rows) => {
-                let (deltas, evidence, execution) = rows.recv()?;
+                let (deltas, evidence) = rows.recv()?;
                 Ok(Frame {
                     deltas,
                     window: None,
                     evidence,
-                    execution: execution
-                        .into_iter()
-                        .map(ObservationEvidence::from_engine)
-                        .collect(),
                 })
             }
             Delivery::Windowed(batches) => {
@@ -302,7 +292,6 @@ impl Subscription {
                         load: batch.load,
                     }),
                     evidence: batch.evidence,
-                    execution: Vec::new(),
                 })
             }
         }
@@ -313,15 +302,11 @@ impl Subscription {
     pub fn recv_timeout(&self, timeout: Duration) -> Result<Frame, RecvTimeoutError> {
         match &self.delivery {
             Delivery::Unbounded(rows) => {
-                let (deltas, evidence, execution) = rows.recv_timeout(timeout)?;
+                let (deltas, evidence) = rows.recv_timeout(timeout)?;
                 Ok(Frame {
                     deltas,
                     window: None,
                     evidence,
-                    execution: execution
-                        .into_iter()
-                        .map(ObservationEvidence::from_engine)
-                        .collect(),
                 })
             }
             Delivery::Windowed(batches) => {
@@ -333,7 +318,6 @@ impl Subscription {
                         load: batch.load,
                     }),
                     evidence: batch.evidence,
-                    execution: Vec::new(),
                 })
             }
         }
@@ -491,18 +475,11 @@ impl AsyncSubscription {
     pub async fn next(&self) -> Result<Option<Frame>, ConcurrentNext> {
         match &self.delivery {
             AsyncDelivery::Unbounded(rows) => {
-                Ok(rows
-                    .next()
-                    .await?
-                    .map(|(deltas, evidence, execution)| Frame {
-                        deltas,
-                        window: None,
-                        evidence,
-                        execution: execution
-                            .into_iter()
-                            .map(ObservationEvidence::from_engine)
-                            .collect(),
-                    }))
+                Ok(rows.next().await?.map(|(deltas, evidence)| Frame {
+                    deltas,
+                    window: None,
+                    evidence,
+                }))
             }
             AsyncDelivery::Windowed(batches) => Ok(batches.next().await?.map(|batch| Frame {
                 deltas: batch.deltas,
@@ -511,7 +488,6 @@ impl AsyncSubscription {
                     load: batch.load,
                 }),
                 evidence: batch.evidence,
-                execution: Vec::new(),
             })),
         }
     }

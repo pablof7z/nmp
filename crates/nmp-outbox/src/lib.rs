@@ -18,8 +18,7 @@
 use std::collections::BTreeSet;
 
 use nmp_engine::core::{
-    AuthorRouteProvider, AuthorRouteReplacement, AuthorRouteUpdate, ObservationEvidence,
-    ObservationFact, ProviderReroot, RowDelta,
+    AuthorRouteProvider, AuthorRouteReplacement, AuthorRouteUpdate, ProviderReroot, RowDelta,
 };
 use nmp_grammar::LiveQuery;
 use nostr::{PublicKey, RelayUrl};
@@ -82,14 +81,8 @@ impl AuthorRouteProvider for Nip65Outbox {
         updates(self.coordinator.observe_current_delta(removed, events))
     }
 
-    fn observe_evidence(&mut self, evidence: &[ObservationEvidence]) -> Vec<AuthorRouteUpdate> {
-        let mut coordinator_updates = Vec::new();
-        for item in evidence {
-            if let ObservationFact::RequestSettled { relay, .. } = &item.fact {
-                coordinator_updates.extend(self.coordinator.settle(self.revision, relay));
-            }
-        }
-        updates(coordinator_updates)
+    fn observe_request_settled(&mut self, relay: &RelayUrl) -> Vec<AuthorRouteUpdate> {
+        updates(self.coordinator.settle(self.revision, relay))
     }
 }
 

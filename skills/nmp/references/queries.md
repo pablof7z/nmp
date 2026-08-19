@@ -40,11 +40,9 @@ outer query; no platform implicitly inherits or reapplies defaults.
 
 ## Delivered state
 
-`Subscription::recv` delivers a `Frame`: `deltas`, `window`, `evidence`, and `execution`. Which of the first two is populated is derived from boundedness, never a knob — an unbounded observation carries exact rebased `deltas` and `window: None`; a windowed observation carries `window: Some(WindowContents { rows, load })` and no deltas. A `Row` contains the event and the set of relays that *hold* it — not whatever delivered it first — so the set grows as more relays are proven to carry the same event.
+`Subscription::recv` delivers a `Frame`: `deltas`, `window`, and `evidence`. Which of the first two is populated is derived from boundedness, never a knob — an unbounded observation carries exact rebased `deltas` and `window: None`; a windowed observation carries `window: Some(WindowContents { rows, load })` and no deltas. A `Row` contains the event and the set of relays that *hold* it — not whatever delivered it first — so the set grows as more relays are proven to carry the same event.
 
 `Frame.evidence` is a list with one entry per canonical branch, in branch order. Read it by branch index; do not treat it as a single value. Each entry contains per-source `reconciledThrough` and current source status, plus `NoPlannedSource`, `NoResolvedDemand`, or `LocalLimit` shortfalls. `SourceStatus` is `Requesting`, `FinishedStoredEvents`, `AwaitingRequest`, `CoverageSatisfied`, `Connecting`, `Disconnected`, `AwaitingAuth { phase }`, `AuthDenied`, or `Error`; the AUTH states are populated for `Nip42` sessions, `AwaitingRequest` means the request is planned and locally owned but the transport has not accepted it yet, and `CoverageSatisfied` means a `MaxAge` scope was satisfied from durable coverage at open time and owns no send attempt. These are scoped facts. They do not prove the Nostr network is complete.
-
-`Frame.execution` is an ordered list of `ObservationEvidence` facts for this exact observation, each with a `sequence`, the canonical `branch` it came from (`None` for observation-wide facts), and a `kind` of `reactive_input`, `derived_set`, `concrete_filter`, `relay_request`, `request_settled`, `relay_closed`, `request_deferred`, `withdrawn`, or `overflow`. A bounded slow-consumer loss appears as an explicit `overflow` item rather than a silent gap. Windowed frames carry an empty `execution`.
 
 ### Ending a bounded read
 

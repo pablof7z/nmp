@@ -1,6 +1,6 @@
 //! Typed ownership for observation execution targets: which branch executes
-//! which filter path against which logical demand, and which of those are
-//! currently active on the wire.
+//! against which logical demand under which acquisition scope, and which of
+//! those are currently active on the wire.
 //!
 //! Three maps in two layers. `by_handle` is what each branch *declares* —
 //! every execution target it owns, active or not. `active_by_handle_demand`
@@ -33,26 +33,25 @@ use nmp_router::DemandKey;
 
 /// One current filter-resolution owner below a branch handle.
 ///
-/// Exact relay demand and acquisition-scope identity are indexed separately
-/// from the execution target. Distinct windows must never alias through their
-/// shared durable coverage key, and two structural Demand occurrences may
-/// resolve the same exact relay atom while only one owns wire participation.
-/// The multiplicity in the owning maps makes replacement and teardown exact
-/// without rescanning remembered resolver nodes.
+/// Exact relay demand and acquisition-scope identity are indexed separately.
+/// Distinct windows must never alias through their shared durable coverage
+/// key, and two structural Demand occurrences may resolve the same exact
+/// relay atom while only one owns wire participation. The multiplicity in
+/// the owning maps makes replacement and teardown exact without rescanning
+/// the resolver.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ActiveRequestTarget {
     pub(super) demand: DemandKey,
     pub(super) scope: usize,
-    pub(super) path: String,
-    pub(super) revision: u64,
 }
 
-/// Reverse-index value for one current observation execution target.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+/// Reverse-index value for one current observation execution target. Scope
+/// is erased here: which branch owns the target is the whole question a
+/// demand lookup answers, and several of a branch's scopes fold into one
+/// entry with the count carrying the fold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct RequestTarget {
     pub(super) handle: HandleId,
-    pub(super) path: String,
-    pub(super) revision: u64,
 }
 
 /// What walking one demand's live targets had to examine, for the bench
@@ -149,11 +148,7 @@ impl RequestTargets {
             if !active_scopes.contains(&target.scope) {
                 continue;
             }
-            let reverse_target = RequestTarget {
-                handle: id,
-                path: target.path.clone(),
-                revision: target.revision,
-            };
+            let reverse_target = RequestTarget { handle: id };
             *active_by_demand
                 .entry(target.demand.clone())
                 .or_default()
@@ -237,7 +232,7 @@ impl RequestTargets {
     pub(super) fn live_targets_for_demands(
         &self,
         owner_demands: &BTreeSet<DemandKey>,
-    ) -> (Vec<(HandleId, String, u64)>, DemandWalk) {
+    ) -> (Vec<HandleId>, DemandWalk) {
         let mut walk = DemandWalk::default();
         let mut targets = BTreeSet::new();
         for demand in owner_demands {
@@ -246,11 +241,7 @@ impl RequestTargets {
                 continue;
             };
             walk.candidates_examined += indexed.len() as u64;
-            targets.extend(
-                indexed
-                    .keys()
-                    .map(|target| (target.handle, target.path.clone(), target.revision)),
-            );
+            targets.extend(indexed.keys().map(|target| target.handle));
         }
         (targets.into_iter().collect(), walk)
     }
@@ -314,17 +305,13 @@ impl RequestTargets {
                         &target.handle, id,
                         "{at}: an activation entry names a target owned by another handle"
                     );
-                    // Every live target must trace back to a declaration with
-                    // the same path, revision and demand. Scope is erased by
-                    // the reverse target, so several declared scopes may fold
-                    // into one live target; the count carries that fold.
+                    // Every live target must trace back to a declaration for
+                    // the same demand. Scope is erased by the reverse target,
+                    // so several declared scopes fold into one live target;
+                    // the count carries that fold.
                     let declared_count: usize = declared
                         .iter()
-                        .filter(|(declared_target, _)| {
-                            declared_target.demand == *demand
-                                && declared_target.path == target.path
-                                && declared_target.revision == target.revision
-                        })
+                        .filter(|(declared_target, _)| declared_target.demand == *demand)
                         .map(|(_, declared_count)| *declared_count)
                         .sum();
                     assert!(

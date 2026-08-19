@@ -438,9 +438,7 @@ impl CoreState {
         let outward = effects
             .into_iter()
             .filter(|effect| match effect {
-                Effect::EmitRows(id, ..) | Effect::EmitObservationEvidence(id, _) => {
-                    !owned.contains(id)
-                }
+                Effect::EmitRows(id, ..) | Effect::RequestSettled(id, _) => !owned.contains(id),
                 _ => true,
             })
             .collect();

@@ -133,7 +133,7 @@ open-questions section.
 | `nmp-outbox` | the NIP-65 outbox ALGORITHM as an `AuthorRouteProvider` implementation | the unit an application names to choose its routing. Nothing in `nmp`, `nmp-engine` or `nmp-runtime` mentions this crate; a competing algorithm is a third-party crate depending on `nmp-engine`/`nmp-router`/`nmp-grammar` and changing zero lines here | correct today |
 
 `AuthorRouteProvider` (declared in `nmp-engine`, three moments: `reroot`,
-`observe_rows`, `observe_evidence`) is the seam. It is **not** an invented
+`observe_rows`, `observe_request_settled`) is the seam. It is **not** an invented
 one: the owner named the requirement — "other developers might want to supply
 their own NIP-65 outbox routing… routing should be a fairly adapter-friendly
 interface" — and the third-party test is stated and passing. The pull side
