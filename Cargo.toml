@@ -39,9 +39,6 @@ members = [
     # canonical product facade.
     "crates/nmp",
     "crates/nmp-consumer-check",
-    # First-class application tooling: `.nmp.toml` capability selection and
-    # prepared Apple/Android products (#1392).
-    "crates/nmp-cli",
     "crates/nmp-bdd",
     "crates/nmp-nip02",
     "crates/nmp-nip65",
@@ -97,7 +94,6 @@ default-members = [
     "crates/nmp-signer",
     "crates/nmp-local-signer",
     "crates/nmp",
-    "crates/nmp-cli",
     "crates/nmp-nip02",
     "crates/nmp-nip65",
     "crates/nmp-outbox",
