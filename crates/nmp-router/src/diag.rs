@@ -5,16 +5,10 @@
 //! limits.
 
 use std::collections::BTreeMap;
-#[cfg(test)]
-use std::collections::BTreeSet;
 
 use nmp_grammar::{ConcreteFilter, RelaySessionKey};
 
-#[cfg(test)]
-use crate::budget::CompileBudget;
 use crate::facts::{Lane, PublicKey};
-#[cfg(test)]
-use crate::plan::RelayPlan;
 use crate::solver::Shortfall;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,53 +58,3 @@ pub struct Diagnostics {
     pub dropped_merge_rules: Vec<&'static str>,
 }
 
-#[cfg(test)]
-pub(crate) fn build(
-    plan: &RelayPlan,
-    budget: &CompileBudget,
-    uncovered_authors: BTreeMap<PublicKey, Shortfall>,
-    dropped_merge_rules: Vec<&'static str>,
-) -> Diagnostics {
-    let mut per_session = BTreeMap::new();
-    for (session, reqs) in &plan.reqs {
-        let mut by_lane: BTreeMap<Lane, usize> = BTreeMap::new();
-        let mut authors_served: BTreeSet<PublicKey> = BTreeSet::new();
-        let mut filters = Vec::new();
-        for req in reqs {
-            filters.push(req.filter.clone());
-            for prov in &req.provenance {
-                *by_lane.entry(prov.lane).or_insert(0) += 1;
-                authors_served.extend(prov.covers_authors.iter().cloned());
-            }
-        }
-        per_session.insert(
-            session.clone(),
-            RelayDiagnostics {
-                session: session.clone(),
-                wire_sub_count: reqs.len(),
-                by_lane,
-                authors_served: authors_served.len(),
-                filters,
-                subscription_budget: budget.max_subscriptions(&session.relay),
-                subscriptions_refused: plan
-                    .subscription_shortfalls
-                    .get(session)
-                    .map_or(0, |shortfall| shortfall.refused),
-                subid_length_limit: budget.max_subid_length(&session.relay),
-                subid_length_rejects_our_ids: budget.rejects_our_subscription_ids(&session.relay),
-            },
-        );
-    }
-    let refused_by_budget = plan
-        .refused_sessions
-        .iter()
-        .filter(|session| plan.subscription_shortfalls.contains_key(*session))
-        .count();
-    Diagnostics {
-        per_session,
-        uncovered_authors,
-        sessions_refused_by_cap: plan.refused_sessions.len() - refused_by_budget,
-        sessions_refused_by_subscription_budget: refused_by_budget,
-        dropped_merge_rules,
-    }
-}

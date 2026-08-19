@@ -85,15 +85,6 @@ pub(super) fn fold_seen_at(
         .or_insert(at);
 }
 
-#[cfg(test)]
-pub(super) fn observation_event_key(key: &[u8]) -> EventKey {
-    EventKey::from_be_bytes(
-        key[..8]
-            .try_into()
-            .expect("validated observation key is thirteen bytes"),
-    )
-}
-
 /// Tables that jointly own one canonical event row. Keeping them behind one
 /// value makes it hard for a write path to mutate the immutable note without
 /// also considering its raw-id mapping, local state, and relay observations.

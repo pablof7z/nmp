@@ -248,12 +248,12 @@ impl CoreState {
     /// newly-sent REQs' attribution snapshots, and push `Effect::Wire` for
     /// whatever op actually changed on the wire.
     pub(in crate::core) fn recompile(&mut self, effects: &mut Vec<Effect>) {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
         self.rebuild_wire_ownership();
         let demand = self.wire_demand();
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.attribution_atoms_rebuilt.set(
             self.attribution_atoms_rebuilt
                 .get()
@@ -311,7 +311,7 @@ impl CoreState {
             return Vec::new();
         }
 
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.router_compiles
             .set(self.router_compiles.get().saturating_add(1));
         let budget = self.compile_budget();
@@ -356,7 +356,7 @@ impl CoreState {
         let mut transferred_claims = BTreeSet::new();
         for update in updates {
             self.extend_plan_execution_metadata(update);
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.request_owner_entries_examined.set(
                 self.request_owner_entries_examined
                     .get()
@@ -368,7 +368,7 @@ impl CoreState {
                 update.filter_hash,
                 &update.added_owner_demands,
             );
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.request_claim_entries_examined.set(
                 self.request_claim_entries_examined
                     .get()
@@ -420,7 +420,7 @@ impl CoreState {
                         .retain(|demand| !removal.removed_owner_demands.contains(demand));
                 }
             }
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.request_owner_entries_examined.set(
                 self.request_owner_entries_examined
                     .get()
@@ -432,7 +432,7 @@ impl CoreState {
                 removal.filter_hash,
                 &removal.removed_owner_demands,
             );
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.request_claim_entries_examined.set(
                 self.request_claim_entries_examined
                     .get()
@@ -578,7 +578,7 @@ impl CoreState {
         let Some(mut pending) = self.pending_request_claim_transfers.remove(key) else {
             return BTreeSet::new();
         };
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         {
             self.request_claim_transfer_attempts
                 .set(self.request_claim_transfer_attempts.get().saturating_add(1));
@@ -595,7 +595,7 @@ impl CoreState {
             .map(|atom| (atom, pending.session.clone(), pending.interval))
             .collect();
         if let Err(_error) = self.record_request_coverage_batch(&batch) {
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.request_claim_transfer_failures
                 .set(self.request_claim_transfer_failures.get().saturating_add(1));
             pending.failures = pending.failures.saturating_add(1);
@@ -605,7 +605,7 @@ impl CoreState {
             return BTreeSet::new();
         }
 
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.request_claim_transfer_commits
             .set(self.request_claim_transfer_commits.get().saturating_add(1));
 
@@ -657,14 +657,6 @@ impl CoreState {
                 || pending.sub_id != *sub_id
                 || replacement_filter == Some(pending.filter_hash)
         });
-    }
-
-    #[cfg(test)]
-    pub(in crate::core) fn reconcile_request_claim_transfers_for_wire_delta(
-        &mut self,
-        wire_delta: &WireDelta,
-    ) {
-        self.reconcile_request_claim_transfers_except(wire_delta, &BTreeSet::new());
     }
 
     fn reconcile_request_claim_transfers_except(
@@ -943,7 +935,7 @@ impl CoreState {
                 .flatten()
                 .copied(),
         );
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.evidence_candidates_examined.set(
             self.evidence_candidates_examined
                 .get()
@@ -972,11 +964,6 @@ impl CoreState {
     /// atoms are absent from this wire truth.
     pub(in crate::core) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire.live_demand()
-    }
-
-    #[cfg(test)]
-    pub(in crate::core) fn retain_wire_atom_owner(&mut self, atom: &ContextualAtom) -> bool {
-        self.retain_wire_atom_owner_with_effects(atom, &mut Vec::new())
     }
 
     /// Add one owner and perform what that arrival implies elsewhere.
@@ -1028,7 +1015,7 @@ impl CoreState {
         &mut self,
         atom: &ContextualAtom,
     ) -> Option<ContextualAtom> {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.routing_evidence_owner_keys_touched.set(
             self.routing_evidence_owner_keys_touched
                 .get()
@@ -1096,7 +1083,7 @@ impl CoreState {
     pub(in crate::core) fn detach_wire_handle(&mut self, id: HandleId) -> Vec<ContextualAtom> {
         let mut closing = Vec::new();
         self.deactivate_request_targets_for_handle(id);
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.withdrawal_handle_detaches
             .set(self.withdrawal_handle_detaches.get().saturating_add(1));
         for atom in self.wire.unindex_handle(id) {
@@ -1116,7 +1103,7 @@ impl CoreState {
     /// resolver handle disappeared before core ran that detach. Reverse edges
     /// remove only owners of the reported atom; no sibling census is needed.
     pub(in crate::core) fn consume_resolver_delta(&mut self, delta: DemandDelta) {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.resolver_delta_ops_consumed.set(
             self.resolver_delta_ops_consumed
                 .get()
@@ -1136,7 +1123,7 @@ impl CoreState {
                 if !removal.removed {
                     continue;
                 }
-                #[cfg(any(test, feature = "bench-instrumentation"))]
+                #[cfg(feature = "bench-instrumentation")]
                 self.resolver_owner_keys_touched.set(
                     self.resolver_owner_keys_touched
                         .get()
@@ -1211,7 +1198,7 @@ impl CoreState {
             .filter(|(key, _)| self.router.admission_incomplete(key.clone()))
             .map(|(key, atom)| (key, atom.clone()))
             .collect();
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.pending_atoms_rebuilt.set(
             self.pending_atoms_rebuilt
                 .get()
@@ -1221,7 +1208,7 @@ impl CoreState {
     }
 
     fn reconcile_pending_wire_cohort(&mut self, cohort: &BTreeSet<ContextualAtom>) {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.pending_cohort_atoms_reconciled.set(
             self.pending_cohort_atoms_reconciled
                 .get()
@@ -1256,7 +1243,7 @@ impl CoreState {
         let preview =
             self.router
                 .preview_admission(&demand, &self.routing_facts, self.compile_budget());
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         {
             self.freshness_candidate_atoms.set(
                 self.freshness_candidate_atoms
@@ -1709,7 +1696,7 @@ impl CoreState {
     /// The production committed-mutation path reaches the same observations
     /// through [`Self::apply_committed_row_changes`], which prefers the exact
     /// incremental algebra; this is the forced-full-refresh comparison lane.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(in crate::core) fn refresh_observations_of_branches(
         &mut self,
         branches: impl IntoIterator<Item = HandleId>,
@@ -2509,7 +2496,7 @@ impl CoreState {
         let row_limit = effective_row_limit(&root_atoms);
         let mut by_id: BTreeMap<EventId, Row> = BTreeMap::new();
         for atom in &root_atoms {
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             self.projection_store_queries
                 .set(self.projection_store_queries.get().saturating_add(1));
             let filter = atom.to_nostr();

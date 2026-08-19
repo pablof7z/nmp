@@ -8,21 +8,6 @@ publish.workspace = true
 [features]
 default = []
 
-# #52 Q3 (Fable checkpoint): the ONLY sanctioned way to inject a pre-built
-# store plus a static neutral fact snapshot, needed by `nmp-bdd` (spawns the
-# real `EngineThread` against scripted in-process relays). Off by default; enabling
-# it in a consumer's `Cargo.toml` is a greppable, reviewable line -- a
-# stability exception, not a security one (the acceptance-boundary verify in
-# `crate::core` covers every path regardless, Unit A0/#56).
-# `nmp-router-testkit` (#1667) is the fixture-facts crate every constructor
-# this feature unlocks takes -- optional and pulled in ONLY by this feature,
-# so a default-features consumer never links a test-fixture crate.
-unstable-mechanism = [
-    "dep:nmp-router-testkit",
-    "nmp-engine/unstable-mechanism",
-    "nmp-runtime/unstable-mechanism",
-]
-
 # #1707's NIP-65 reversal is FINISHED. The last exception was this crate's
 # `nip65` feature, which turned on `nmp-runtime`'s hard-wired outbox
 # discovery glue -- "how the engine performs ITS OWN job of discovering an
@@ -59,18 +44,6 @@ test-instrumentation = [
     "nmp-nip11/test-instrumentation",
 ]
 
-[[example]]
-name = "incremental_delta_bench"
-required-features = ["bench-instrumentation"]
-
-[[example]]
-name = "local_mutation_delta_bench"
-required-features = ["bench-instrumentation"]
-
-[[test]]
-name = "acceptance"
-path = "tests/acceptance/main.rs"
-
 [dependencies]
 nostr.workspace = true
 nmp-grammar.workspace = true
@@ -89,7 +62,6 @@ nmp-engine.workspace = true
 nmp-runtime.workspace = true
 nmp-store.workspace = true
 nmp-router.workspace = true
-nmp-router-testkit = { workspace = true, optional = true }
 nmp-transport.workspace = true
 # NIP-11 relay information: the values an app reads and the one-shot HTTP
 # acquisition service the runtime drives. It is a crate, not a module here,
@@ -112,65 +84,15 @@ hex = "0.4"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "net", "sync"] }
 
 [dev-dependencies]
-# `unstable-mechanism`: every headless/`_headless.rs` and `core_headless/`
-# integration test seeds its `EngineCore`/`EngineThread` through the gated
-# fixture constructors (#1665, #1667) -- this crate's own test targets are
-# their only in-workspace callers.
-nmp = { path = ".", features = ["test-instrumentation", "unstable-mechanism"] }
-# Dev-only: several tests need a REAL author-route provider to install --
-# `acceptance/` observes a cold engine discovering Alice's relays, and
-# `semantic_delivery_witnesses.rs` needs a discovered outbox to prove a write
-# never reaches it. The NIP-65 outbox algorithm is the one this workspace
-# ships; nothing in `nmp` itself names it, which is the whole point.
-nmp-outbox.workspace = true
-# The headless reducer corpus (`tests/core_headless/`) and the runtime
-# integration tests drive `EngineCore`/`EngineThread` directly. They reached
-# them through the deleted `mechanism` basement; they name the packages now.
-nmp-engine = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
-nmp-runtime = { workspace = true, features = ["test-instrumentation", "unstable-mechanism"] }
-# #1707: `optimistic_publish.rs` uses NIP-29's write door as one of two
-# vehicles for a claim that is otherwise general (#1182) -- it is not a
-# NIP-29-door proof itself (that moved to `nmp-nip29/tests/` with the door),
-# so it stays here and reaches the capability the ordinary way, through this
-# crate's own dev-dependencies.
-nmp-nip29.workspace = true
-nmp-test-support.workspace = true
-nmp-resolver-testkit.workspace = true
-# #1731: these were declared as production dependencies with zero uses in
-# `crates/nmp/src`. They are real, and test-only: the relay-ingest probe under
-# `examples/support/` names `nmp-resolver`, `serde_json` and `libc`.
-# A manifest that claims a production edge it does not have is
-# corrosive precisely because manifest-as-proof is what the crate split rests
-# on.
-nmp-resolver.workspace = true
-serde_json.workspace = true
-nmp-router-testkit.workspace = true
-nmp-store = { workspace = true, features = ["test-instrumentation"] }
-cucumber = "0.21"
-# In-process test relay for the runtime (C) integration tests: reconnection
-# replay (test 6) and the end-to-end subscribe/publish/reconnect drive.
-# Async under the hood (nostr-sdk); confined to dev-dependencies and
-# `#[tokio::test]` -- the production `EngineThread`/`Pool` stay free of any
-# imposed runtime (D8). Mirrors `nmp-transport`'s own dev-dependency set
-# (see that crate's `tests/mock_relay.rs` for the same version-shadowing
-# gotcha noted below).
-nostr-relay-builder = "0.45.0-alpha.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-# `watermark_cold_start_offline` (integration_capstone.rs) needs a real
-# on-disk `RedbStore` file it can close and reopen across a simulated
-# restart -- a throwaway temp dir per test run, same crate `nmp-store`
-# already uses for its own `RedbStore` tests.
-tempfile = "3"
-# The relay-ingest probe under `examples/support/` reads
-# `CLOCK_MONOTONIC_RAW` and calls `malloc_trim` directly. Already resolved
-# transitively (mio/tokio/etc.) at the SAME pinned version -- this just names
-# it directly for the code that calls it.
-libc = "0.2"
-# `integration_capstone.rs` and the `examples/` probes speak the WebSocket
-# wire directly. Same version `nmp-transport`'s own production `Pool` speaks
-# (already resolved workspace-wide); this just names it directly for the
-# tests that need to speak it from the SERVER side.
+# The only remaining `dev` consumers in this crate are `examples/`. The
+# WebSocket wire is spoken directly by `reserve_cost_live` and the
+# relay-ingest probe; the probe also serialises its own report and reads
+# `CLOCK_MONOTONIC_RAW`/`malloc_trim` through `libc`.
 tungstenite = "0.29"
 serde = { version = "1", features = ["derive"] }
-url = "2"
+serde_json.workspace = true
+# `relay_ingest_probe` reads the resolver's ingest-attribution census.
+nmp-resolver.workspace = true
+libc = "0.2"
+# The probe writes its corpus into a throwaway store file.
+tempfile.workspace = true

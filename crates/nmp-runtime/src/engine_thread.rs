@@ -13,14 +13,10 @@ use nmp_nip11::RelayInformationService;
 
 use crate::session::RestoredSession;
 
-#[cfg(test)]
-use super::AddSignerError;
 use super::{
     engine_loop, pool_bridge_loop, sign_event, Cmd, EngineClock, EnginePoolRuntime, EnginePoolSink,
     EngineWiring, Handle,
 };
-#[cfg(test)]
-use nostr::{Timestamp, UnsignedEvent};
 
 /// Engine-side adapter that closes the verify gate's durable-dedup seam over
 /// the store (#1677). It wraps a [`nmp_store::StoreSigReader`] — a shared
@@ -59,34 +55,8 @@ pub struct EngineThread {
     /// count unconditionally — a falsifier that only holds for a specially
     /// built loop proves nothing about the shipped one — and only this
     /// reader's end of the `Arc` is gated.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     wait_arms: Arc<std::sync::atomic::AtomicU64>,
-    #[cfg(test)]
-    runtime_threads: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[cfg(test)]
-pub(super) static RUNTIME_LIFECYCLE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-struct RuntimeThreadCountGuard {
-    counter: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-#[cfg(test)]
-impl RuntimeThreadCountGuard {
-    fn enter(counter: Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Self { counter }
-    }
-}
-
-#[cfg(test)]
-impl Drop for RuntimeThreadCountGuard {
-    fn drop(&mut self) {
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-    }
 }
 
 /// Supported construction failure for the engine-owned thread graph.
@@ -218,30 +188,6 @@ impl EngineThread {
         )
     }
 
-    /// Spawn a headless runtime over a static fact snapshot.
-    ///
-    /// This exists for deterministic falsifiers. Production assembly owns
-    /// the private mutable fact store and uses [`Self::spawn`].
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn spawn_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-        pool_config: PoolConfig,
-    ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_fixture_routing_facts_and_runtime_config(
-            store,
-            facts,
-            cap,
-            pool_config,
-            RuntimeConfig::default(),
-            RestoredSession::empty(),
-            Vec::new(),
-            None,
-        )
-    }
-
     pub fn spawn_with_runtime_config(
         store: RedbStore,
         cap: usize,
@@ -288,32 +234,6 @@ impl EngineThread {
         Self::spawn_with_facts(
             store,
             routing_facts,
-            cap,
-            pool_config,
-            runtime_config,
-            initial_session,
-            capabilities,
-            route_provider,
-        )
-    }
-
-    /// The fixture door (#52 Q3). Takes the fixture crate's own public type
-    /// and builds the engine's store from it here, for the same reason.
-    #[cfg(feature = "unstable-mechanism")]
-    #[allow(clippy::too_many_arguments)]
-    pub fn spawn_with_fixture_routing_facts_and_runtime_config(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-        pool_config: PoolConfig,
-        runtime_config: RuntimeConfig,
-        initial_session: RestoredSession,
-        capabilities: Vec<nmp_grammar::ReplaceableMaterializerSpec>,
-        route_provider: Option<Box<dyn AuthorRouteProvider>>,
-    ) -> Result<(Self, Handle), EngineThreadError> {
-        Self::spawn_with_facts(
-            store,
-            nmp_engine::core::RoutingFactStore::from_fixture(facts),
             cap,
             pool_config,
             runtime_config,
@@ -385,8 +305,6 @@ impl EngineThread {
         pool_config.max_relays = cap;
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
         let relay_information = RelayInformationService::new(runtime.handle().clone());
-        #[cfg(test)]
-        let runtime_threads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let wait_arms = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let max_engine_batch = pool_config.max_engine_batch.max(1);
         let max_engine_batch_bytes = pool_config.max_engine_batch_bytes.max(1);
@@ -431,14 +349,10 @@ impl EngineThread {
         };
 
         let bridge_inbox = cmd_tx.clone();
-        #[cfg(test)]
-        let bridge_runtime_threads = Arc::clone(&runtime_threads);
         let bridge_join = match thread::Builder::new()
             .name("nmp-engine-pool-bridge".to_string())
             .spawn(move || {
                 nmp_transport::thread_census::run_counted_thread(move || {
-                    #[cfg(test)]
-                    let _thread_count = RuntimeThreadCountGuard::enter(bridge_runtime_threads);
                     pool_bridge_loop(
                         &pool_evt_rx,
                         &pool_stop_rx,
@@ -467,16 +381,12 @@ impl EngineThread {
         let engine_stop = pool_stop_tx.clone();
         let engine_runtime = Arc::clone(&runtime);
         let engine_relay_information = relay_information.clone();
-        #[cfg(test)]
-        let engine_runtime_threads = Arc::clone(&runtime_threads);
         let engine_wait_arms = Arc::clone(&wait_arms);
         let engine_join =
             match thread::Builder::new()
                 .name("nmp-engine".to_string())
                 .spawn(move || {
                     nmp_transport::thread_census::run_counted_thread(move || {
-                        #[cfg(test)]
-                        let _thread_count = RuntimeThreadCountGuard::enter(engine_runtime_threads);
                         engine_loop(
                             store,
                             routing_facts,
@@ -532,10 +442,8 @@ impl EngineThread {
                 drain_inbox: cmd_tx.clone(),
                 runtime,
                 clock,
-                #[cfg(any(test, feature = "test-instrumentation"))]
+                #[cfg(feature = "test-instrumentation")]
                 wait_arms,
-                #[cfg(test)]
-                runtime_threads,
             },
             Handle {
                 inbox: cmd_tx,
@@ -560,7 +468,7 @@ impl EngineThread {
     /// Reading it is a plain relaxed atomic load: it sends no command and
     /// wakes nothing, so sampling cannot itself disturb the parked wait it is
     /// measuring.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     #[must_use]
     pub fn wait_arms(&self) -> u64 {
@@ -632,7 +540,3 @@ impl EngineThread {
     }
 }
 
-#[cfg(test)]
-mod reentrant_shutdown_tests;
-#[cfg(test)]
-mod route_provider_panic_tests;

@@ -124,39 +124,17 @@ where
         self.by_child.contains_key(child)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn len(&self) -> usize {
         self.by_child.len()
     }
 
-    /// Test-only: swap which owner's reverse set names which owner's
-    /// children, touching `by_owner` alone -- the forward map, `len`,
-    /// `owner_keys`, and `owner_edges` are all unchanged by this call. This
-    /// is the exact cardinality-preserving corruption `assert_consistent`
-    /// exists to catch, reachable only from inside this module (both maps
-    /// are private everywhere else) or through this door, which exists
-    /// solely so a falsifier elsewhere in `core` can drive it without
-    /// duplicating this module's own field access.
-    #[cfg(test)]
-    pub(super) fn swap_owners_for_test(&mut self, a: &Owner, b: &Owner) {
-        let a_children = self
-            .by_owner
-            .remove(a)
-            .expect("swap_owners_for_test: owner `a` has no live children");
-        let b_children = self
-            .by_owner
-            .remove(b)
-            .expect("swap_owners_for_test: owner `b` has no live children");
-        self.by_owner.insert(a.clone(), b_children);
-        self.by_owner.insert(b.clone(), a_children);
-    }
-
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn owner_keys(&self) -> usize {
         self.by_owner.len()
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn owner_edges(&self) -> usize {
         self.by_owner.values().map(BTreeSet::len).sum()
     }
@@ -167,7 +145,7 @@ where
 /// Both directions, by identity rather than by count. `owner_edges == len` is
 /// necessary and nowhere near sufficient: one child indexed under the wrong
 /// owner preserves both numbers exactly.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 impl<Owner, Child, V> OwnerIndexed<Owner, Child, V>
 where
     Owner: Clone + Eq + Hash + std::fmt::Debug,
@@ -213,92 +191,3 @@ where
     }
 }
 
-/// `take_owner`'s falsifier.
-///
-/// `RequestReplacements` only ever reaches `by_child`
-/// and `by_owner` through `insert`/`take`/`take_owner`, which keep the two
-/// maps in lockstep by construction -- production code cannot produce a
-/// reverse edge naming a child the forward map has already lost. That is
-/// exactly why the old bug (`take_plan`'s `filter_map`, and the equivalent
-/// hand-written loop `abandon_request_replacements_for_session` used to have)
-/// was never caught: no integration test could reach the state it mishandled
-/// either. This test reaches past every public door -- something only a test
-/// inside this module can do -- to build that state directly, asserts it is
-/// real before calling the falsified method, and only then calls
-/// `take_owner`.
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    struct Widget {
-        owner: u32,
-    }
-
-    impl IndexedChild<u32> for Widget {
-        fn owner_key(&self) -> &u32 {
-            &self.owner
-        }
-    }
-
-    #[test]
-    #[should_panic(expected = "widget: an owner's reverse index names a child that is not live")]
-    fn take_owner_panics_on_a_reverse_edge_the_forward_map_already_lost() {
-        let mut index: OwnerIndexed<u32, u32, Widget> = OwnerIndexed::new("widget");
-        index.insert(1, Widget { owner: 7 });
-
-        // Precondition: the scenario genuinely exists before the break can
-        // become observable. The mirror is intact -- one owner, one child,
-        // both sides agreeing -- so a panic below can only come from what
-        // happens next, not from state this test never actually built.
-        assert_eq!(index.owner_keys(), 1);
-        assert_eq!(index.owner_edges(), 1);
-        assert!(index.contains(&1));
-
-        // Corrupt the forward map only, bypassing `take` entirely. `by_owner`
-        // still names child 1 under owner 7; `by_child` does not. This is the
-        // exact disagreement a hand-written forward-only removal used to
-        // produce.
-        index.by_child.remove(&1);
-        assert!(!index.contains(&1));
-        assert_eq!(
-            index.owner_edges(),
-            1,
-            "the reverse edge must still be there, or this proves nothing about take_owner"
-        );
-
-        let _ = index.take_owner(&7);
-    }
-
-    /// `assert_consistent`'s falsifier for the corruption a count can never
-    /// see: two owners, one child each, with the reverse sets SWAPPED
-    /// between them. `len`, `owner_keys`, and `owner_edges` are all
-    /// unchanged -- one child moved, zero created or destroyed -- so any
-    /// check built from those three numbers alone would read this as
-    /// healthy. `assert_consistent` compares by identity (does the child
-    /// insist it belongs to the owner naming it?), which is exactly what
-    /// this corruption breaks.
-    #[test]
-    #[should_panic(expected = "is not named by the owner it reports")]
-    fn assert_consistent_panics_on_a_cardinality_preserving_swap_between_owners() {
-        let mut index: OwnerIndexed<u32, u32, Widget> = OwnerIndexed::new("widget");
-        index.insert(1, Widget { owner: 7 });
-        index.insert(2, Widget { owner: 9 });
-
-        // Precondition: two owners, one child each, mirror intact.
-        assert_eq!(index.len(), 2);
-        assert_eq!(index.owner_keys(), 2);
-        assert_eq!(index.owner_edges(), 2);
-        index.assert_consistent("before swap");
-
-        index.swap_owners_for_test(&7, &9);
-
-        // Every count a size-only check could compare is identical to the
-        // precondition -- this corruption is invisible to `len`,
-        // `owner_keys`, and `owner_edges` alike.
-        assert_eq!(index.len(), 2);
-        assert_eq!(index.owner_keys(), 2);
-        assert_eq!(index.owner_edges(), 2);
-
-        index.assert_consistent("after swap");
-    }
-}

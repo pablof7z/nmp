@@ -20,10 +20,8 @@ use super::schema::{
     PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_META, PUBLISH_QUEUE_RECEIPTS, PUBLISH_QUEUE_RELAYS,
     PUBLISH_QUEUE_RELAY_IDS, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
-#[cfg(test)]
-use super::store::RedbCrashPoint;
 use super::store::RedbStore;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use super::Ordering;
 use super::{
     AuthDenial, BTreeMap, BTreeSet, CloseIntentOutcome, Event, EventId, IntentId, IntentSigState,
@@ -208,10 +206,6 @@ pub(super) fn record_route_revision(
             .range::<&[u8; 16]>(&lower..=&upper)
             .map_err(persist_err)?
         {
-            #[cfg(test)]
-            store
-                .route_revision_range_rows
-                .fetch_add(1, Ordering::Relaxed);
             let (key, value) = entry.map_err(persist_err)?;
             let (key_intent, ordinal) = parse_route_revision_key(key.value())
                 .map_err(|error| codec_error("route revision key", error))?;
@@ -256,12 +250,10 @@ pub(super) fn record_route_revision(
             relays,
         }
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store.fail_route_revision_writes {
         return Err(PersistenceError::new("injected route revision failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::RouteRevisionBeforeCommit);
     commit_prepared(write_txn, revision)
 }
 
@@ -279,10 +271,6 @@ pub(super) fn recover_route_revisions(
         .range::<&[u8; 16]>(&lower..=&upper)
         .map_err(persist_err)?
     {
-        #[cfg(test)]
-        store
-            .route_revision_range_rows
-            .fetch_add(1, Ordering::Relaxed);
         let (key, value) = entry.map_err(persist_err)?;
         let (key_intent, ordinal) = parse_route_revision_key(key.value())
             .map_err(|error| codec_error("route revision key", error))?;
@@ -324,8 +312,6 @@ pub(super) fn recover_attempts(
         .range::<&[u8; 20]>(&lower..=&upper)
         .map_err(persist_err)?
     {
-        #[cfg(test)]
-        store.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
         let (key, value) = entry.map_err(persist_err)?;
         let (key_intent, relay_id, ordinal) =
             parse_attempt_key(key.value()).map_err(|error| codec_error("attempt key", error))?;
@@ -431,8 +417,6 @@ pub(super) fn bootstrap_publish_queue_lanes(
             .range::<&[u8; 20]>(&attempt_lower..=&attempt_upper)
             .map_err(persist_err)?
         {
-            #[cfg(test)]
-            store.attempt_range_rows.fetch_add(1, Ordering::Relaxed);
             let (key, value) = row.map_err(persist_err)?;
             let (key_intent, relay_id, ordinal) = parse_attempt_key(key.value())
                 .map_err(|error| codec_error("attempt key", error))?;
@@ -470,10 +454,6 @@ pub(super) fn bootstrap_publish_queue_lanes(
             .range::<&[u8; 16]>(&route_lower..=&route_upper)
             .map_err(persist_err)?
         {
-            #[cfg(test)]
-            store
-                .route_revision_range_rows
-                .fetch_add(1, Ordering::Relaxed);
             let (key, value) = row.map_err(persist_err)?;
             let (key_intent, _) = parse_route_revision_key(key.value())
                 .map_err(|error| codec_error("route revision key", error))?;
@@ -601,18 +581,12 @@ pub(super) fn bootstrap_publish_queue_lanes(
     };
     if !staged {
         write_txn.abort().map_err(persist_err)?;
-        #[cfg(test)]
-        store
-            .unstaged_lane_bootstraps
-            .fetch_add(1, Ordering::Relaxed);
         return Ok(prepared);
     }
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_bootstrap) {
         return Err(PersistenceError::new("injected lane bootstrap failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
     commit_prepared(write_txn, prepared)
 }
 
@@ -620,7 +594,7 @@ pub(super) fn recover_publish_queue_lanes(
     store: &RedbStore,
     intent_id: IntentId,
 ) -> Result<Vec<PublishQueueLane>, PersistenceError> {
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     store
         .publish_queue_lane_recovery_reads
         .fetch_add(1, Ordering::Relaxed);
@@ -882,8 +856,6 @@ pub(super) fn set_lane_transient(
             },
         )?
     };
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 
@@ -965,8 +937,6 @@ pub(super) fn suspend_lane_attempt(
             },
         )?
     };
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 
@@ -1098,12 +1068,10 @@ pub(super) fn start_lane_attempt(
         )?;
         (attempt, advanced)
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store.failed_lane_start_relays.contains(&key.relay) {
         return Err(PersistenceError::new("injected attempt start failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneStartBeforeCommit);
     commit_prepared(write_txn, (attempt, lane))
 }
 
@@ -1228,12 +1196,10 @@ pub(super) fn record_lane_handoff(
             .map_err(persist_err)?;
         lane
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_handoff) {
         return Err(PersistenceError::new("injected lane handoff failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneHandoffBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 
@@ -1328,12 +1294,10 @@ pub(super) fn finish_lane_attempt(
             )?
         }
     };
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_lane_attempt_finish) {
         return Err(PersistenceError::new("injected attempt finish failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 
@@ -1403,8 +1367,6 @@ pub(super) fn deny_lane_auth(
             )?
         }
     };
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::DenyLaneAuthBeforeCommit);
     commit_prepared(write_txn, lane)
 }
 
@@ -1635,8 +1597,6 @@ fn close_intent(
             CloseIntentOutcome::Closed
         }
     };
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::LaneCloseBeforeCommit);
     commit_prepared(write_txn, result)
 }
 
@@ -1747,8 +1707,6 @@ pub(crate) fn maintain_terminal_receipts_at(
     }
     let write_txn = store.database()?.begin_write().map_err(persist_err)?;
     let candidates = maintain_terminal_receipts_in_txn(&write_txn, now, limits)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::TerminalRetentionBeforeCommit);
     commit_prepared(write_txn, candidates)
 }
 

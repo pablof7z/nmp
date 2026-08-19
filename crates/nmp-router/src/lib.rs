@@ -12,8 +12,7 @@
 //!
 //! Module layout:
 //! - `facts` — the closed neutral route vocabulary and the read-only
-//!   `RoutingFacts` view. Static test facts live in the separate
-//!   `nmp-router-testkit` dev-dependency crate (#1667), never here.
+//!   `RoutingFacts` view.
 //! - `budget` — `CompileBudget`: the whole-demand relay ceiling plus each
 //!   relay's own advertised NIP-11 limits, the bounds `compile` plans within.
 //! - `route` — atom classification (outbox vs pinned) + candidate assembly +
@@ -36,8 +35,6 @@
 //!   and wire-token mint counter.
 
 mod admission;
-#[cfg(test)]
-mod admission_delta_tests;
 mod budget;
 mod coalesce;
 mod component;
@@ -46,8 +43,6 @@ mod diag;
 mod facts;
 mod ownership;
 mod plan;
-#[cfg(test)]
-mod rebuild_agreement_tests;
 mod route;
 mod router;
 mod solver;

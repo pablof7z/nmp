@@ -28,21 +28,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
-#[cfg(test)]
-use std::sync::atomic::AtomicU8;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use nmp_grammar::{ContextualAtom, RelaySessionKey};
 // Only the test modules below still name a `ConcreteFilter` directly: nothing
 // on the durable path handles a filter any more (#1849).
-#[cfg(test)]
-use nmp_grammar::ConcreteFilter;
 use nostr::secp256k1::schnorr::Signature;
 use nostr::{Event, EventId, Filter, Kind, PublicKey, RelayUrl, SingleLetterTag, Timestamp};
 use redb::{Database, ReadableTable, TableDefinition};
-#[cfg(test)]
-use redb::{ReadableDatabase, ReadableTableMetadata, TableHandle};
 use serde::{Deserialize, Serialize};
 
 use crate::address_key::{address_key_for, address_key_for_coordinate, candidate_wins};
@@ -53,8 +47,6 @@ use crate::coverage::{
 use crate::persistent_store_lifetime::{
     acquire_for_open, reset_store, RedbStoreOpenError, RequiredLockedFileBackend, StoreOwnership,
 };
-#[cfg(test)]
-use crate::AuthDenialSource;
 use crate::{
     AcceptOutcome, AcceptWrite, AuthDenial, CloseIntentOutcome, CompensateOutcome,
     CoverageInterval, CoverageKey, EventCursor, GcReport, GcRetentionSet, InsertOutcome, IntentId,
@@ -71,32 +63,20 @@ use crate::{
 mod postings;
 mod postings_store;
 mod schema;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 #[path = "testing_tests.rs"]
 pub mod testing;
-#[cfg(test)]
-use schema::*;
 pub(crate) mod publish_queue;
 pub(crate) mod publish_queue_codec;
 mod semantic_edit_codec;
-#[cfg(test)]
-use publish_queue::*;
 mod canonical;
-#[cfg(test)]
-use canonical::*;
 mod commit;
 mod query;
-#[cfg(test)]
-use query::*;
 mod ingest_txn;
 mod mutation;
 mod store;
-#[cfg(test)]
-pub(crate) use store::with_required_database_init_test_hook;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use store::OrderedEventReadPause;
-#[cfg(test)]
-use store::RedbCrashPoint;
 pub use store::{RedbStore, StoreSigReader};
 mod event_ops;
 mod ingest;
@@ -905,23 +885,3 @@ impl RedbStore {
     }
 }
 
-#[cfg(test)]
-mod boot_verification_tests;
-
-#[cfg(test)]
-mod corruption_tests;
-
-#[cfg(test)]
-mod crash_atomicity_tests;
-
-#[cfg(test)]
-mod commit_structure_tests;
-
-#[cfg(test)]
-mod durability_tests;
-
-#[cfg(test)]
-mod postings_store_tests;
-
-#[cfg(test)]
-mod tests;

@@ -20,11 +20,9 @@
 //!   mints.
 //! - [`mod@ingest_attribution`] — bench-only ingest counters.
 //!
-//! Callers are `nmp-runtime`, the `nmp` facade's own re-export list, and the
-//! in-workspace harnesses (`nmp-bdd`, `nmp/tests`) that drive a real reducer
-//! headlessly. Those harnesses used to reach it through `nmp`'s
-//! `#[doc(hidden)] pub mod mechanism` basement; they name this crate now, and
-//! the basement is gone.
+//! Callers are `nmp-runtime` and the `nmp` facade's own re-export list. They
+//! name this crate directly; `nmp`'s `#[doc(hidden)] pub mod mechanism`
+//! basement is gone.
 
 pub mod core;
 #[cfg(feature = "bench-instrumentation")]

@@ -20,15 +20,3 @@ publish.workspace = true
 nostr.workspace = true
 nmp.workspace = true
 nmp-grammar.workspace = true
-
-[dev-dependencies]
-nmp-store.workspace = true
-# `first_value_custody_acceptance.rs` drives a real engine against a real
-# scripted relay across a genuine close/reopen: it needs the in-process relay,
-# a real author-route provider to install (the NIP-65 outbox algorithm, named
-# here as any application names it), a multi-thread runtime for the
-# `#[tokio::test]`s, and an on-disk store file that survives the restart.
-nmp-test-support.workspace = true
-nmp-outbox.workspace = true
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
-tempfile = "3"

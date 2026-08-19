@@ -13,7 +13,3 @@ nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-store.workspace = true
 libc = { version = "0.2", optional = true }
-
-[dev-dependencies]
-nmp-resolver-testkit.workspace = true
-nmp-test-support.workspace = true

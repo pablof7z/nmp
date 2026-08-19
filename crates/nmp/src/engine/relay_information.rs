@@ -53,17 +53,4 @@ impl Engine {
             .map_err(RelayInformationRequestError::Acquisition)
     }
 
-    #[cfg(test)]
-    pub(super) fn relay_information_retention_census(
-        &self,
-    ) -> nmp_nip11::RelayInformationRetentionCensus {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        guard
-            .as_ref()
-            .map(|inner| nmp_runtime::relay_information_retention_census(&inner.handle))
-            .expect("test census requires an open engine")
-    }
 }

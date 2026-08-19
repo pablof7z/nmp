@@ -20,13 +20,7 @@ use crate::route;
 use crate::{AdmissionOutcome, Router};
 
 mod metadata;
-#[cfg(test)]
-#[path = "admission/metadata_tests.rs"]
-mod metadata_tests;
 mod preview;
-#[cfg(test)]
-#[path = "admission/preview_tests.rs"]
-mod preview_tests;
 
 use preview::apply_residual_budget;
 

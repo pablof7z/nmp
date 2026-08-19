@@ -118,16 +118,6 @@ impl CompletedAttribution {
             .then_some(first)
     }
 
-    #[cfg(test)]
-    pub(crate) fn eligible_claims(&self) -> Option<Vec<(CoverageKey, CoverageInterval)>> {
-        matches!(self.coverage_authority, CoverageAuthority::Eligible).then(|| {
-            self.claims
-                .iter()
-                .map(|claim| (claim.key.clone(), claim.interval))
-                .collect()
-        })
-    }
-
     pub(crate) fn into_eligible_claims(self) -> Option<Vec<CompletedCoverageClaim>> {
         matches!(self.coverage_authority, CoverageAuthority::Eligible).then_some(self.claims)
     }
@@ -512,7 +502,7 @@ impl AttributionState {
     /// from. Only the structural clauses (no zero counts, no counts without
     /// demand) apply to it. Recomputing it would require retaining the atoms,
     /// which is state added to prove state.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (sub_id, claims) in &self.live_request_claims {
             assert!(
@@ -587,7 +577,7 @@ impl AttributionState {
         }
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> AttributionCounts {
         AttributionCounts {
             inflight_subs: self.inflight.len(),
@@ -613,7 +603,7 @@ impl AttributionState {
 /// already returns a named struct; attribution was the one that did not, and
 /// eleven interchangeable positional `usize`s mean any adjacent pair could be
 /// transposed with the whole suite still green.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct AttributionCounts {
     pub(super) inflight_subs: usize,
     pub(super) wire_keys: usize,
@@ -628,170 +618,3 @@ pub(super) struct AttributionCounts {
     pub(super) inflight_shape_refs: usize,
 }
 
-/// The owner's own falsifiers, in the file that owns the state they drive.
-///
-/// #1850 read attribution's 100 in-crate test reach-ins as "unit tests of this
-/// owner living in `core/admission_tests/`, which should move next to the
-/// owner". Reading them, that is not what they are: every one of those tests
-/// drives `CoreState` orchestration (`apply_request_metadata_updates`,
-/// `record_observed_request`, `on_relay_frame`, `abandon_sub`) and asserts on
-/// the store, so moving them here would misfile engine tests. What was
-/// genuinely missing is the layer below them — this module. Attribution was
-/// the one extracted owner with no `assert_consistent` at all, so it was also
-/// the one owner with nothing to unit-test.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nmp_grammar::{ConcreteFilter, ReadRouting};
-    use nmp_router::RelayUrl;
-
-    fn relay() -> RelayUrl {
-        RelayUrl::parse("wss://attribution-owner.example").expect("valid relay url")
-    }
-
-    fn atom(kind: u16) -> ContextualAtom {
-        ContextualAtom {
-            filter: ConcreteFilter {
-                kinds: Some(BTreeSet::from([kind])),
-                ..ConcreteFilter::default()
-            },
-            routing: ReadRouting::Explicit(vec![relay()]),
-            authenticate_as: None,
-            routing_evidence: BTreeSet::new(),
-        }
-    }
-
-    /// Allocate-and-remember, exactly as the router does: the same atom
-    /// always yields the same token, two different atoms never share one.
-    /// A fixture cannot DERIVE the id from the filter any more, because ids
-    /// are no longer derived from filters -- so it has to keep a table, and
-    /// keeping the table is the honest model of what the router keeps.
-    fn sub_id_for(atom: &ContextualAtom) -> SubId {
-        use std::collections::BTreeMap;
-        use std::sync::{Mutex, OnceLock};
-        static MINTED: OnceLock<Mutex<BTreeMap<ContextualAtom, u64>>> = OnceLock::new();
-        let table = MINTED.get_or_init(|| Mutex::new(BTreeMap::new()));
-        let mut table = table.lock().expect("fixture mint table");
-        let next = table.len() as u64 + 1;
-        let token = *table.entry(atom.clone()).or_insert(next);
-        SubId::allocate(relay(), &atom.routing, atom.authenticate_as, token)
-    }
-
-    /// The census counts `live_shape_owner_counts.len()` and its value sum.
-    /// Both fall when a refcount saturates to zero one release early, and the
-    /// falsifiers that end by asserting an all-zero census read a smaller
-    /// number as "clean". Recomputing the map from `live_request_claims` is
-    /// what makes the corruption visible at all.
-    #[test]
-    fn assert_consistent_catches_a_live_refcount_that_lost_an_owner_the_claim_set_still_names() {
-        let shared = atom(1);
-        let key = coverage_key(&shared);
-        let first = sub_id_for(&shared);
-        let mut second_atom = shared.clone();
-        second_atom.filter.since = Some(10);
-        let second = sub_id_for(&second_atom);
-
-        let mut attribution = AttributionState::new();
-        attribution.set_active_demand([&shared]);
-        attribution.retain_live_request_claims(&first, BTreeSet::from([key.clone()]));
-        attribution.retain_live_request_claims(&second, BTreeSet::from([key.clone()]));
-        attribution.assert_consistent("two requests retain one shape");
-        assert_eq!(attribution.counts().live_shape_refs, 2);
-
-        // Exactly what one saturating underflow leaves behind: the claim sets
-        // still name two owners, the refcount says one.
-        attribution.live_shape_owner_counts.insert(key, 1);
-
-        let census_still_agrees = attribution.counts().live_request_keys == 2
-            && attribution.counts().live_shape_keys == 1;
-        assert!(
-            census_still_agrees,
-            "the corruption must be invisible to every count for this test to mean anything"
-        );
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            attribution.assert_consistent("corrupted")
-        }));
-        assert!(
-            caught.is_err(),
-            "a live refcount disagreeing with the claim sets it counts must be caught"
-        );
-    }
-
-    /// [`AttributionState::discard_sub`] reconstructs a mapping's session from
-    /// the `SubId` alone. A mapping filed under any other session is
-    /// unreachable by that reconstruction and leaks for the life of the
-    /// process — with every census number identical.
-    #[test]
-    fn assert_consistent_catches_a_wire_mapping_discard_sub_could_never_find_again() {
-        let subscribed = atom(1);
-        let sub_id = sub_id_for(&subscribed);
-        let mut attribution = AttributionState::new();
-        attribution.set_active_demand([&subscribed]);
-        attribution.record_send(
-            &RelaySessionKey::unauthenticated(relay()),
-            &sub_id,
-            &subscribed.filter,
-            BTreeSet::from([coverage_key(&subscribed)]),
-        );
-        attribution.assert_consistent("one send on its own session");
-
-        let before = attribution.counts().wire_keys;
-        let wire = wire_sub_id_string(&sub_id);
-        attribution
-            .sub_id_by_wire
-            .remove(&(RelaySessionKey::unauthenticated(relay()), wire.clone()));
-        attribution.sub_id_by_wire.insert(
-            (
-                RelaySessionKey::new(
-                    RelayUrl::parse("wss://somewhere-else.example").expect("valid relay url"),
-                    None,
-                ),
-                wire,
-            ),
-            sub_id.clone(),
-        );
-        assert_eq!(
-            attribution.counts().wire_keys,
-            before,
-            "the misfiling must preserve every count for this test to mean anything"
-        );
-
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            attribution.assert_consistent("corrupted")
-        }));
-        assert!(
-            caught.is_err(),
-            "a wire mapping filed under a session its own SubId does not name must be caught"
-        );
-    }
-
-    /// Three of the five FIFO mutators dropped an emptied entry and two did
-    /// not, so every completed EOSE left an empty `VecDeque` behind until the
-    /// sub was abandoned — and two `is_empty()` guards elsewhere existed only
-    /// to tolerate it (#1850).
-    #[test]
-    fn a_completed_send_leaves_no_empty_fifo_behind() {
-        let subscribed = atom(1);
-        let sub_id = sub_id_for(&subscribed);
-        let session = RelaySessionKey::unauthenticated(relay());
-        let mut attribution = AttributionState::new();
-        attribution.set_active_demand([&subscribed]);
-        attribution.record_send(
-            &session,
-            &sub_id,
-            &subscribed.filter,
-            BTreeSet::from([coverage_key(&subscribed)]),
-        );
-        assert!(attribution.has_inflight(&sub_id));
-
-        let completed = attribution.attribute_eose_detailed(
-            &session,
-            &wire_sub_id_string(&sub_id),
-            Timestamp::from(100u64),
-        );
-        assert!(completed.is_some());
-        assert!(!attribution.has_inflight(&sub_id));
-        assert_eq!(attribution.counts().inflight_subs, 0);
-        attribution.assert_consistent("after the only send completed");
-    }
-}

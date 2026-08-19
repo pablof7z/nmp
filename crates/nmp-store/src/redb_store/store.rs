@@ -21,11 +21,9 @@ use super::schema::{
     SCHEMA_VERSION_KEY, SEMANTIC_MATERIALIZATION_HIGH_WATER, SEMANTIC_OPERATIONS,
     SEMANTIC_RESOURCES, STORE_META, TOMBSTONES,
 };
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use super::AtomicU64;
-#[cfg(test)]
-use super::AtomicU8;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use super::Ordering;
 use super::{
     acquire_for_open, binary_event, reset_store, BTreeMap, BTreeSet, CoverageKey, Database,
@@ -36,38 +34,6 @@ use super::{
 use nostr::secp256k1::schnorr::Signature;
 use redb::{ReadableDatabase, ReadableTable, TableHandle};
 use std::sync::{Arc, Mutex};
-
-/// NMP's complete durable-store implementation. One Redb database, MVCC, ACID.
-/// Persistent stores open a caller-selected path; isolated engines and tests
-/// use [`Self::temporary`] and keep the same transactions and indexes.
-#[cfg(test)]
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum RedbCrashPoint {
-    AcceptAfterEventBeforeJournal = 1,
-    AcceptBeforeCommit,
-    PromoteBeforeCommit,
-    CompensateBeforeCommit,
-    RouteRevisionBeforeCommit,
-    FinishAttemptBeforeCommit,
-    LaneBootstrapBeforeCommit,
-    LaneTransitionBeforeCommit,
-    LaneStartBeforeCommit,
-    LaneHandoffBeforeCommit,
-    DenyLaneAuthBeforeCommit,
-    LaneCloseBeforeCommit,
-    TerminalRetentionBeforeCommit,
-    ObservationBeforeCommit,
-    ObservationAfterCommit,
-    SemanticAcceptBeforeCommit,
-    SemanticSourceInstallBeforeCommit,
-    SemanticCohortCloseBeforeCommit,
-    SemanticPromoteBeforeCommit,
-    CoverageBeforeCommit,
-    CoverageAfterCommit,
-    GcBeforeCommit,
-    GcAfterCommit,
-}
 
 /// A shared durable reader cut from a [`RedbStore`] for the verify gate's
 /// durable dedup-by-id (#1677). Holds a clone of the store's shared
@@ -128,100 +94,81 @@ pub struct RedbStore {
     publish_queue_relays: Mutex<PublishQueueRelayCache>,
     /// Fixed construction-time failures for lane-start rollback tests. No
     /// production build carries or can mutate this set.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) failed_lane_start_relays: BTreeSet<RelayUrl>,
     /// One construction-armed lane-bootstrap refusal consumed at the existing
     /// pre-commit boundary. No production build carries this setting.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_lane_bootstrap: bool,
     /// Fixed construction-time refusal for route-revision rollback tests. No
     /// production build carries or can mutate this setting.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_route_revision_writes: bool,
     /// One construction-armed compensation refusal consumed at the existing
     /// pre-commit boundary. No production build carries this setting.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_compensation_with_state: bool,
     /// One construction-armed attempt-finish refusal consumed at the existing
     /// pre-commit boundary. No production build carries this setting.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_lane_attempt_finish: bool,
     /// One construction-armed handoff refusal consumed at the existing
     /// pre-commit boundary. No production build carries this setting.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_lane_handoff: bool,
     /// One construction-armed event acceptance refusal consumed immediately
     /// before commit. The real prepared Redb transaction is dropped before
     /// the typed I/O error is returned, so nothing this write staged reaches
     /// disk. The database handle stays open.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_accept_write_before_commit: bool,
     /// One construction-armed event acceptance refusal consumed immediately
     /// after the real Redb commit, so the durable rows exist and only the
     /// caller's answer fails. The database handle stays open.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_accept_write_after_commit: bool,
     /// One construction-armed relay-observation I/O failure consumed at the
     /// staged pre-commit boundary. The prepared Redb transaction and actual
     /// database handle are closed before the typed error is returned.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_observation_before_commit: bool,
     /// One construction-armed refusal consumed by the next bounded read
     /// behind an exact history cursor. No production build carries this
     /// setting, and no caller can re-arm it after construction.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     fail_next_query_newest_before: std::sync::atomic::AtomicBool,
     /// One construction-armed coverage-write refusal consumed only when the
     /// staged batch contains this exact durable row. No production build
     /// carries this setting, and no caller can re-arm it after construction.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fail_next_coverage_write: Option<(CoverageKey, RelayUrl)>,
     /// One construction-armed pause consumed before the shared ordered event
     /// read. The pause controls scheduling only; Redb still supplies every
     /// row and every error.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     ordered_event_read_pause: Mutex<Option<OrderedEventReadPauseGate>>,
     /// Armed only by the exact materializer-entry transaction falsifier.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) materializer_entry_probe: Option<Arc<AtomicU64>>,
-    /// Application-level write transactions performed by `open`; the
-    /// healthy v6 reopen falsifier asserts this stays zero.
-    #[cfg(test)]
-    pub(super) open_write_transactions: u64,
-    #[cfg(test)]
-    pub(super) crash_point: AtomicU8,
     /// Owned rows materialized after borrowed filtering.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) examined_rows: AtomicU64,
     /// Ordered index entries consumed, including one prefetched head per OR
     /// range needed to establish global ordering.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) query_index_rows: AtomicU64,
     /// Canonical binary event values dereferenced for borrowed post-filtering.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) query_event_values: AtomicU64,
     /// Coverage-table point reads, kept separate from event projection work
     /// so lifecycle benchmarks can attribute diagnostics cost exactly.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) coverage_reads: AtomicU64,
     /// Calls through the concrete publish-queue lane-recovery door. This is
     /// test-only work attribution for reducer scheduling falsifiers, not a
     /// runtime diagnostic.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) publish_queue_lane_recovery_reads: AtomicU64,
-    /// Number of rows yielded by bounded attempt-table ranges. Tests reset
-    /// this to prove work follows the target lane count, not total history.
-    #[cfg(test)]
-    pub(super) attempt_range_rows: AtomicU64,
-    /// Equivalent instrumentation for resolved-route revision ranges.
-    #[cfg(test)]
-    pub(super) route_revision_range_rows: AtomicU64,
-    /// Lane bootstraps that staged no row and therefore committed nothing
-    /// (#889). Boot calls bootstrap once per open intent, so this is the
-    /// counter that proves recovery over an unchanged lane set spends no
-    /// durability barriers at all.
-    #[cfg(test)]
-    pub(super) unstaged_lane_bootstraps: AtomicU64,
 }
 
 #[derive(Default)]
@@ -230,7 +177,7 @@ struct PublishQueueRelayCache {
     by_url: HashMap<RelayUrl, PublishQueueRelayId>,
 }
 
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 struct OrderedEventReadPauseGate {
     entered: std::sync::mpsc::SyncSender<()>,
     release: std::sync::mpsc::Receiver<()>,
@@ -240,13 +187,13 @@ struct OrderedEventReadPauseGate {
 ///
 /// This can wait for and release the real Redb read. It cannot choose or
 /// manufacture the read's result.
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub struct OrderedEventReadPause {
     entered: std::sync::mpsc::Receiver<()>,
     release: std::sync::mpsc::SyncSender<()>,
 }
 
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 impl OrderedEventReadPause {
     pub fn wait_until_entered(&self) {
         self.entered
@@ -259,52 +206,6 @@ impl OrderedEventReadPause {
             .send(())
             .expect("ordered event read remains paused");
     }
-}
-
-#[cfg(test)]
-type RequiredDatabaseInitTestHook = Box<dyn FnMut()>;
-
-#[cfg(test)]
-std::thread_local! {
-    static REQUIRED_DATABASE_INIT_TEST_HOOK:
-        std::cell::RefCell<Option<RequiredDatabaseInitTestHook>> =
-            const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-struct ClearRequiredDatabaseInitTestHook;
-
-#[cfg(test)]
-impl Drop for ClearRequiredDatabaseInitTestHook {
-    fn drop(&mut self) {
-        REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
-            slot.borrow_mut().take();
-        });
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn with_required_database_init_test_hook<T>(
-    hook: impl FnMut() + 'static,
-    operation: impl FnOnce() -> T,
-) -> T {
-    REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
-        assert!(
-            slot.borrow_mut().replace(Box::new(hook)).is_none(),
-            "one open cannot install two database-init hooks"
-        );
-    });
-    let _clear = ClearRequiredDatabaseInitTestHook;
-    operation()
-}
-
-#[cfg(test)]
-fn call_required_database_init_test_hook() {
-    REQUIRED_DATABASE_INIT_TEST_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
-            hook();
-        }
-    });
 }
 
 impl RedbStore {
@@ -325,7 +226,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose named lane starts fail at the
     /// existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_lane_starts(
         failed_relays: impl IntoIterator<Item = RelayUrl>,
     ) -> Result<Self, RedbStoreOpenError> {
@@ -336,7 +237,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next staged lane bootstrap
     /// refuses at the existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_lane_bootstrap() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_lane_bootstrap = true;
@@ -345,7 +246,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next compensation refuses at
     /// the existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_compensation_with_state() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_compensation_with_state = true;
@@ -354,7 +255,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next lane-attempt finish refuses
     /// at the existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_lane_attempt_finish() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_lane_attempt_finish = true;
@@ -363,7 +264,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next lane handoff refuses at
     /// the existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_lane_handoff() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_lane_handoff = true;
@@ -372,7 +273,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next nonempty observation
     /// transaction closes the database handle and returns I/O before commit.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_observation_precommit_io() -> Result<Self, RedbStoreOpenError> {
         let mut store = Self::temporary()?;
         store.fail_next_observation_before_commit = true;
@@ -381,7 +282,7 @@ impl RedbStore {
 
     /// Open a real temporary Redb store whose next bounded read behind an
     /// exact history cursor refuses once.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn temporary_with_failed_query_newest_before() -> Result<Self, RedbStoreOpenError> {
         let store = Self::temporary()?;
         store
@@ -390,7 +291,7 @@ impl RedbStore {
         Ok(store)
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(super) fn take_query_newest_before_failure(&self) -> bool {
         self.fail_next_query_newest_before
             .swap(false, Ordering::Relaxed)
@@ -398,7 +299,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose named lane starts fail at the
     /// existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_failed_lane_starts(
         path: impl AsRef<Path>,
         failed_relays: impl IntoIterator<Item = RelayUrl>,
@@ -410,7 +311,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose route-revision writes refuse at the
     /// existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_route_revision_write_failure(
         path: impl AsRef<Path>,
     ) -> Result<Self, RedbStoreOpenError> {
@@ -421,7 +322,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose next coverage write containing the
     /// exact durable row refuses at the existing pre-commit boundary.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_failed_coverage_write(
         path: impl AsRef<Path>,
         key: CoverageKey,
@@ -434,7 +335,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose next event acceptance drops its
     /// prepared transaction and returns I/O immediately before commit.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_accept_write_precommit_io(
         path: impl AsRef<Path>,
     ) -> Result<Self, RedbStoreOpenError> {
@@ -445,7 +346,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose next event acceptance commits and
     /// then returns I/O to the caller.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_accept_write_commit_then_io(
         path: impl AsRef<Path>,
     ) -> Result<Self, RedbStoreOpenError> {
@@ -456,7 +357,7 @@ impl RedbStore {
 
     /// Open a persistent Redb store whose first ordered event read pauses
     /// until the returned witness releases it.
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn open_with_ordered_event_read_pause(
         path: impl AsRef<Path>,
     ) -> Result<(Self, OrderedEventReadPause), RedbStoreOpenError> {
@@ -487,13 +388,6 @@ impl RedbStore {
         Ok(StoreSigReader {
             shared: Arc::clone(&self.shared_db),
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn raw_database(&self) -> &Database {
-        self.db
-            .as_deref()
-            .expect("test inspected a store while its database handle was closed")
     }
 
     pub(super) fn publish_queue_relay_id(
@@ -654,8 +548,6 @@ impl RedbStore {
                 state,
             )?
         };
-        #[cfg(test)]
-        self.crash_if(RedbCrashPoint::LaneTransitionBeforeCommit);
         commit_prepared(write_txn, lane)
     }
 
@@ -683,45 +575,10 @@ impl RedbStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RedbStoreOpenError> {
         Self::open_inner(path, |path| {
             let backend = RequiredLockedFileBackend::open(path)?;
-            #[cfg(test)]
-            call_required_database_init_test_hook();
             Database::builder()
                 .set_cache_size(REDB_CACHE_BYTES)
                 .create_with_backend(backend)
                 .map_err(|error| RedbStoreOpenError::database(error.into(), path))
-        })
-    }
-
-    /// Open over a caller-supplied `redb` storage backend (#895 falsifiers).
-    ///
-    /// Unit-test build only. The durability classification is only worth
-    /// having if it is proven against redb's real failure machinery — its
-    /// `CheckedBackend` latch, its commit ordering, its post-flush resize —
-    /// rather than against hand-constructed `StorageError` values. The only
-    /// way to make that machinery fail on demand is to give redb a backend
-    /// that fails on demand, so this seam exists purely to let the
-    /// durability tests drive a genuine `RedbStore` through a genuine
-    /// disk-full sequence.
-    ///
-    /// The supplied backend belongs only to the first database generation.
-    /// Production reconstruction reopens the exact canonical file through
-    /// `RequiredLockedFileBackend`; a test-only backend cannot be replayed or
-    /// silently substituted after it reports a failure.
-    #[cfg(test)]
-    pub(super) fn open_with_backend(
-        path: impl AsRef<Path>,
-        backend: impl redb::StorageBackend,
-    ) -> Result<Self, RedbStoreOpenError> {
-        let mut backend = Some(backend);
-        Self::open_inner(path, move |_| {
-            Database::builder()
-                .set_cache_size(REDB_CACHE_BYTES)
-                .create_with_backend(
-                    backend
-                        .take()
-                        .expect("open_inner calls the database factory exactly once"),
-                )
-                .map_err(|error| RedbStoreOpenError::Database(error.into()))
         })
     }
 
@@ -844,52 +701,42 @@ impl RedbStore {
             _ownership: ownership,
             temporary_directory: None,
             publish_queue_relays: Mutex::new(PublishQueueRelayCache::default()),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             failed_lane_start_relays: BTreeSet::new(),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_lane_bootstrap: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_route_revision_writes: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_compensation_with_state: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_lane_attempt_finish: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_lane_handoff: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_accept_write_before_commit: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_accept_write_after_commit: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_observation_before_commit: false,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_query_newest_before: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             fail_next_coverage_write: None,
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             ordered_event_read_pause: Mutex::new(None),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             materializer_entry_probe: None,
-            #[cfg(test)]
-            open_write_transactions: _open_write_transactions,
-            #[cfg(test)]
-            crash_point: AtomicU8::new(0),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             examined_rows: AtomicU64::new(0),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             query_index_rows: AtomicU64::new(0),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             query_event_values: AtomicU64::new(0),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             coverage_reads: AtomicU64::new(0),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             publish_queue_lane_recovery_reads: AtomicU64::new(0),
-            #[cfg(test)]
-            attempt_range_rows: AtomicU64::new(0),
-            #[cfg(test)]
-            route_revision_range_rows: AtomicU64::new(0),
-            #[cfg(test)]
-            unstaged_lane_bootstraps: AtomicU64::new(0),
         };
         super::publish_queue_ops::maintain_terminal_receipts_at(
             &mut store,
@@ -916,69 +763,14 @@ impl RedbStore {
         reset_store(path.as_ref())
     }
 
-    #[cfg(test)]
-    pub(super) fn open_with_crash_point(
-        path: impl AsRef<Path>,
-        crash_point: RedbCrashPoint,
-    ) -> Result<Self, RedbStoreOpenError> {
-        let store = Self::open(path)?;
-        store
-            .crash_point
-            .store(crash_point as u8, Ordering::Relaxed);
-        Ok(store)
-    }
-
-    #[cfg(test)]
-    pub(super) fn crash_if(&self, point: RedbCrashPoint) {
-        if self
-            .crash_point
-            .compare_exchange(point as u8, 0, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            std::process::abort();
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn reset_publish_queue_range_rows(&self) {
-        self.attempt_range_rows.store(0, Ordering::Relaxed);
-        self.route_revision_range_rows.store(0, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub(super) fn publish_queue_range_rows(&self) -> (u64, u64) {
-        (
-            self.attempt_range_rows.load(Ordering::Relaxed),
-            self.route_revision_range_rows.load(Ordering::Relaxed),
-        )
-    }
-
-    #[cfg(test)]
-    pub(super) fn open_write_transactions(&self) -> u64 {
-        self.open_write_transactions
-    }
-
-    /// Lane bootstraps that staged nothing and therefore committed nothing.
-    #[cfg(test)]
-    pub(super) fn unstaged_lane_bootstraps(&self) -> u64 {
-        self.unstaged_lane_bootstraps.load(Ordering::Relaxed)
-    }
-
-    /// Current value of [`Self::examined_rows`] — the `query`-indexing
-    /// falsifier's read side.
-    #[cfg(test)]
-    pub(super) fn examined_rows(&self) -> u64 {
-        self.examined_rows.load(Ordering::Relaxed)
-    }
-
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn reset_query_work(&self) {
         self.examined_rows.store(0, Ordering::Relaxed);
         self.query_index_rows.store(0, Ordering::Relaxed);
         self.query_event_values.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn query_work(&self) -> (u64, u64, u64) {
         (
             self.query_index_rows.load(Ordering::Relaxed),
@@ -987,23 +779,23 @@ impl RedbStore {
         )
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn reset_coverage_reads(&self) {
         self.coverage_reads.store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn coverage_reads(&self) -> u64 {
         self.coverage_reads.load(Ordering::Relaxed)
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn reset_publish_queue_lane_recovery_reads(&self) {
         self.publish_queue_lane_recovery_reads
             .store(0, Ordering::Relaxed);
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
         self.publish_queue_lane_recovery_reads
             .load(Ordering::Relaxed)
@@ -1147,7 +939,7 @@ impl RedbStore {
         relays: &redb::ReadOnlyTable<RelayKey, &'static [u8]>,
         relay_cache: &mut HashMap<RelayKey, RelayUrl>,
     ) -> Result<StoredEvent, PersistenceError> {
-        #[cfg(any(test, feature = "test-instrumentation"))]
+        #[cfg(feature = "test-instrumentation")]
         self.examined_rows.fetch_add(1, Ordering::Relaxed);
         Ok(StoredEvent {
             event: view.materialize_event().map_err(|error| {
@@ -1174,7 +966,7 @@ impl RedbStore {
         limit: Option<usize>,
         pinned: Option<&BTreeSet<RelayUrl>>,
     ) -> Result<Vec<StoredEvent>, PersistenceError> {
-        #[cfg(any(test, feature = "test-instrumentation"))]
+        #[cfg(feature = "test-instrumentation")]
         if let Some(pause) = self
             .ordered_event_read_pause
             .lock()
@@ -1241,7 +1033,7 @@ impl RedbStore {
                     }
                 }
             }
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             self.query_event_values.fetch_add(1, Ordering::Relaxed);
             let Some(value) = events
                 .get(event_row_key(event_key).as_slice())
@@ -1297,7 +1089,7 @@ impl RedbStore {
                 limit,
             },
             || {
-                #[cfg(any(test, feature = "test-instrumentation"))]
+                #[cfg(feature = "test-instrumentation")]
                 self.query_index_rows.fetch_add(1, Ordering::Relaxed);
             },
             &mut materialize_if_visible,

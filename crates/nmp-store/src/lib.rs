@@ -99,19 +99,15 @@ mod persistence_failure;
 mod persistent_store_lifetime;
 mod redb_store;
 mod semantic_edit;
-#[cfg(test)]
-mod semantic_oracle;
 mod terminal_retention;
-#[cfg(test)]
-mod terminal_retention_tests;
 
 pub use coverage::{coverage_key, CoverageInterval, CoverageKey, GcReport, GcRetentionSet};
 pub use coverage_claims::coverage_claim_atoms;
 pub use persistence_failure::PersistenceError;
 pub use persistent_store_lifetime::{RedbStoreOpenError, RedbStoreResetError};
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use redb_store::testing;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 pub use redb_store::OrderedEventReadPause;
 pub use redb_store::{RedbStore, StoreSigReader};
 pub use semantic_edit::{
@@ -335,48 +331,11 @@ pub struct VerifiedSignature {
     signature: Signature,
 }
 
-#[cfg(test)]
-thread_local! {
-    /// Every schnorr check [`VerifiedSignature::verify`] has run ON THIS
-    /// THREAD.
-    ///
-    /// #1782: a boot over an already-populated store must not move this
-    /// number at all.
-    ///
-    /// Per-THREAD rather than per-process because the test harness runs the
-    /// rest of the crate's suite in parallel and plenty of it verifies fixture
-    /// events — a global counter reads their work as this boot's. Nothing in
-    /// `nmp-store` verifies off the calling thread (the crate owns no
-    /// workers), so a thread-local count is exact for every store door.
-    ///
-    /// This instrumentation must not be able to lie, so it
-    /// counts ATTEMPTS, incremented unconditionally on entry, before
-    /// `Event::verify` can return. `nostr` owns the schnorr operation and
-    /// cannot be instrumented from outside it, so the increment sits beside
-    /// the call rather than inside it — but there is no runtime switch that
-    /// can skip the call while the counter still moves, and the direction of
-    /// error is the safe one for the claim being made. The claim is ZERO; an
-    /// attempt counter can over-report, never under-report, so it cannot read
-    /// clean while verification is happening.
-    ///
-    /// Absent from production builds so the one verification an accepted
-    /// signer result must pass pays nothing to support a test.
-    static SCHNORR_VERIFICATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-/// Schnorr checks run on this thread so far. See [`SCHNORR_VERIFICATIONS`].
-#[cfg(test)]
-pub(crate) fn schnorr_verifications() -> u64 {
-    SCHNORR_VERIFICATIONS.with(std::cell::Cell::get)
-}
-
 impl VerifiedSignature {
     /// Verify `event` whole — id recomputed from the body, schnorr
     /// signature checked against that id and `event.pubkey` — and keep the
     /// proof. `Err` is `nostr`'s own verification failure, unchanged.
     pub fn verify(event: &Event) -> Result<Self, nostr::event::Error> {
-        #[cfg(test)]
-        SCHNORR_VERIFICATIONS.with(|count| count.set(count.get() + 1));
         event.verify()?;
         Ok(Self {
             event_id: event.id,

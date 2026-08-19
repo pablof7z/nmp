@@ -734,8 +734,6 @@ pub(super) fn accept(
     if matches!(outcome, AcceptOutcome::ReplaceableOperationRefused(_)) {
         return Ok(outcome);
     }
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticAcceptBeforeCommit);
     write.commit_prepared(outcome)
 }
 
@@ -983,8 +981,6 @@ pub(super) fn close_cohort(
     if !matches!(outcome, SemanticCohortCloseOutcome::Closed { .. }) {
         return Ok(outcome);
     }
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticCohortCloseBeforeCommit);
     write.commit_prepared(outcome)
 }
 
@@ -1044,8 +1040,6 @@ pub(super) fn install_source(
     ) {
         return Ok(outcome);
     }
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticSourceInstallBeforeCommit);
     write.commit_prepared(outcome)
 }
 
@@ -1234,7 +1228,5 @@ pub(super) fn promote(
     if matches!(outcome, PromoteOutcome::Stale | PromoteOutcome::NotFound) {
         return Ok(outcome);
     }
-    #[cfg(test)]
-    store.crash_if(super::store::RedbCrashPoint::SemanticPromoteBeforeCommit);
     write.commit_prepared(outcome)
 }

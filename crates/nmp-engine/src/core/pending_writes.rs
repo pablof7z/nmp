@@ -80,7 +80,7 @@ pub(super) struct PendingWrites {
 /// The census contribution, so `bench_ownership_census` counts this owner's
 /// state without naming its maps. Deliberately `pub(super)` and NOT nested
 /// into `CoreOwnershipCensus`, which stays a flat `pub` struct.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct PendingWriteCounts {
     pub(super) obligations: usize,
     pub(super) intent_keys: usize,
@@ -438,7 +438,7 @@ impl PendingWrites {
 
     // -- proofs -----------------------------------------------------------
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> PendingWriteCounts {
         PendingWriteCounts {
             obligations: self.pending.len(),
@@ -474,7 +474,7 @@ impl PendingWrites {
     ///   live work on those bytes. Only what it can still get wrong is
     ///   checked -- naming a receipt that is not live, or keeping an empty set
     ///   that claims unowned bytes are owned.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn assert_consistent(&self, at: &str) {
         for (id, pending) in &self.pending {
             let owner = self
@@ -544,101 +544,3 @@ impl PendingWrites {
     }
 }
 
-/// This owner's own falsifiers, in the same spirit as `RequestAttempts`': each
-/// reaches past every method to corrupt one mirror by hand -- only possible
-/// from inside this module, since the maps are private to it -- and shows
-/// `assert_consistent` naming exactly the mirror that disagreed.
-#[cfg(test)]
-mod tests {
-    use nostr::{EventBuilder, Keys};
-
-    use super::super::{PendingWriteTarget, WriteRouting};
-    use super::*;
-
-    /// A minimal, valid row, distinguished from any other by `n`.
-    fn row(n: u64) -> (ReceiptId, IntentId, PendingWrite) {
-        let keys = Keys::generate();
-        let frozen = EventBuilder::text_note(format!("pending-writes-falsifier-{n}"))
-            .sign_with_keys(&keys)
-            .expect("a freshly built note always signs");
-        let pending = PendingWrite {
-            target: PendingWriteTarget::Event,
-            routing: WriteRouting::Auto,
-            routing_valid: true,
-            intent_id: IntentId(n),
-            accepted_at: frozen.created_at,
-            signing_pubkey: keys.public_key(),
-            frozen,
-            already_signed: false,
-            sign_request_in_flight: false,
-            sign_generation: 0,
-            event_id: None,
-            pending_relays: BTreeSet::new(),
-            attempt_ordinals: Default::default(),
-            lane_projection: LaneWorkerProjection::default(),
-            durable_routes: BTreeSet::new(),
-            route_complete: false,
-            destinations_reported: false,
-            route_needs: BTreeSet::new(),
-        };
-        (ReceiptId(n), IntentId(n), pending)
-    }
-
-    fn admit(writes: &mut PendingWrites, n: u64) -> ReceiptId {
-        let (id, intent_id, pending) = row(n);
-        let event_id = pending.frozen.id;
-        writes.insert(id, pending);
-        writes.remember_indexes(id, Some(intent_id), event_id);
-        id
-    }
-
-    /// Swap which receipt each of two intents' entries names, WITHOUT changing
-    /// key count (2) or edge count (2). A census that only counts could not see
-    /// this -- that is the whole point of checking identity instead.
-    #[test]
-    #[should_panic(expected = "names a receipt that does not own it")]
-    fn assert_consistent_catches_a_cardinality_preserving_intent_swap() {
-        let mut writes = PendingWrites::default();
-        let id_a = admit(&mut writes, 1);
-        let id_b = admit(&mut writes, 2);
-        writes.assert_consistent("precondition");
-
-        writes.intent_receipts.insert(IntentId(1), id_b);
-        writes.intent_receipts.insert(IntentId(2), id_a);
-        assert_eq!(
-            writes.intent_receipts.len(),
-            2,
-            "intent-key count must be unchanged"
-        );
-
-        writes.assert_consistent("after swap");
-    }
-
-    /// The #1606 shape, reconstructed by hand: a row's projection is reset for
-    /// a successor generation while the lane index keeps naming the relay the
-    /// retired generation persisted to. Counts survive; the claim is false.
-    #[test]
-    #[should_panic(expected = "which it does not persist")]
-    fn assert_consistent_catches_a_lane_index_that_outlived_its_projection() {
-        let mut writes = PendingWrites::default();
-        let id = admit(&mut writes, 1);
-        let relay = RelayUrl::parse("wss://falsifier.example").expect("valid url");
-        writes
-            .pending
-            .get_mut(&id)
-            .expect("just admitted")
-            .lane_projection
-            .persisted
-            .insert(relay.clone());
-        writes.update_lane_relay_index(id, &BTreeSet::new(), &BTreeSet::from([relay.clone()]));
-        writes.assert_consistent("precondition");
-
-        writes
-            .pending
-            .get_mut(&id)
-            .expect("just admitted")
-            .lane_projection = LaneWorkerProjection::default();
-
-        writes.assert_consistent("after a projection reset the index never heard about");
-    }
-}

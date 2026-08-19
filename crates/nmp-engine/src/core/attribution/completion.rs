@@ -1,8 +1,6 @@
 //! Send-generation recording, retirement, and completion attribution.
 
 use std::collections::BTreeSet;
-#[cfg(test)]
-use std::collections::VecDeque;
 
 use nmp_grammar::{ConcreteFilter, RelaySessionKey};
 use nmp_router::SubId;
@@ -151,44 +149,6 @@ impl AttributionState {
         let session = RelaySessionKey::new(sub_id.0.clone(), sub_id.2);
         self.sub_id_by_wire
             .remove(&(session, wire_sub_id_string(sub_id)));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_claims(&self, sub_id: &SubId) -> BTreeSet<CoverageKey> {
-        self.inflight
-            .get(sub_id)
-            .and_then(VecDeque::back)
-            .map(|snapshot| snapshot.coverage_claims.clone())
-            .unwrap_or_default()
-    }
-
-    /// Attribute an EOSE arriving on `session` for wire subscription id
-    /// `wire_sub_id` at engine clock `eose_time`. Returns one
-    /// `(CoverageKey, CoverageInterval)` pair per attributed atom — empty
-    /// if the sub is unknown, its FIFO is empty (fail-safe: never
-    /// reconstruct from the current plan), or every outstanding snapshot on
-    /// it is `limited` (poisoned: record nothing for ANY key this EOSE
-    /// might otherwise have proven).
-    ///
-    /// THE load-bearing rule (ruling §2): attribution is the INTERSECTION
-    /// of every accepted snapshot currently outstanding on this exact wire
-    /// id/filter generation — never just the newest. Replay or repeated
-    /// accepted delivery can leave more than one outstanding attempt for the
-    /// same immutable request, and a relay may EOSE the older attempt after a
-    /// newer one was sent. Crediting only the current snapshot would attribute
-    /// atoms the actual terminating REQ never asked for. The oldest snapshot
-    /// is popped unconditionally afterward (one REQ, one EOSE, FIFO order) —
-    /// whether or not this call recorded anything.
-    #[cfg(test)]
-    pub(crate) fn attribute_eose(
-        &mut self,
-        session: &RelaySessionKey,
-        wire_sub_id: &str,
-        eose_time: Timestamp,
-    ) -> Vec<(CoverageKey, CoverageInterval)> {
-        self.attribute_eose_detailed(session, wire_sub_id, eose_time)
-            .and_then(|completed| completed.eligible_claims())
-            .unwrap_or_default()
     }
 
     pub(crate) fn attribute_eose_detailed(

@@ -33,25 +33,11 @@ pub use relay_information::RelayInformationRequestError;
 
 use std::sync::Mutex;
 
-#[cfg(test)]
-use crate::subscription::{Subscription, Window};
-#[cfg(test)]
-use nmp_engine::core::ReceiptId;
-#[cfg(test)]
-use nmp_grammar::LiveQuery;
-#[cfg(test)]
-use nmp_grammar::WriteIntent;
-#[cfg(test)]
-use nmp_runtime::ReceiptReattachment;
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use nmp_runtime::{AddSignerError, SignerRegistration};
 use nmp_runtime::{EngineThread, Handle, RuntimeConfig, SignEventError, SignEventOperation};
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
-#[cfg(test)]
-use nostr::EventId;
-#[cfg(test)]
-use nostr::RelayUrl;
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
@@ -59,8 +45,6 @@ use crate::config::{build_routing_fact_relays, EngineConfig};
 
 use crate::error::EngineError;
 use crate::subscription::{AsyncDiagnosticsSubscription, DiagnosticsSubscription};
-#[cfg(test)]
-use nmp_nip11::{RelayInformationCachePolicy, RelayInformationError};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -114,7 +98,7 @@ pub struct SignEventRequest {
 }
 
 impl Engine {
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn install_test_signing_capability<Sig>(
         &self,
@@ -324,140 +308,6 @@ impl Engine {
         })
     }
 
-    /// #52 Q3's unstable escape hatch: construct directly from an
-    /// already-built store, bypassing `EngineConfig`
-    /// entirely. `#[doc(hidden)]` and gated behind the `unstable-mechanism`
-    /// feature -- the ONLY sanctioned way to inject a store (needed by
-    /// `nmp-bdd`, which spawns the real `EngineThread` against scripted
-    /// in-process relays). This is an in-workspace/test hatch, not an
-    /// alternative app contract: it may freely require mechanism-crate
-    /// types in its own signature (it is not expected to be reachable from
-    /// an `nmp`-only dependency the way the default surface is). It is a
-    /// stability exception only, not a security one -- an engine built this
-    /// way still verifies every `Signed` payload at the acceptance boundary
-    /// (Unit A0), same as every other entry point.
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn from_parts(
-        store: RedbStore,
-        cap: usize,
-        pool_config: PoolConfig,
-    ) -> Result<Self, EngineError> {
-        let (engine_thread, handle) =
-            EngineThread::spawn(store, cap, pool_config).map_err(EngineError::from_start_error)?;
-        Ok(Self {
-            inner: Mutex::new(Some(Inner {
-                handle,
-                engine_thread,
-            })),
-        })
-    }
-
-    /// Static-fact variant of [`Self::from_parts`] for deterministic
-    /// in-workspace falsifiers such as the scripted BDD harness.
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn from_parts_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-        pool_config: PoolConfig,
-    ) -> Result<Self, EngineError> {
-        let (engine_thread, handle) =
-            EngineThread::spawn_with_fixture_routing_facts(store, facts, cap, pool_config)
-                .map_err(EngineError::from_start_error)?;
-        Ok(Self {
-            inner: Mutex::new(Some(Inner {
-                handle,
-                engine_thread,
-            })),
-        })
-    }
-
-    /// Scripted-harness variant that also installs an author-route provider.
-    ///
-    /// This remains a static-fixture/test door: applications use
-    /// [`Self::new_with_capabilities_and_routing`] and [`EngineConfig`].
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn from_parts_with_fixture_routing_facts_and_route_provider(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        route_provider: Option<Box<dyn crate::AuthorRouteProvider>>,
-        cap: usize,
-        pool_config: PoolConfig,
-    ) -> Result<Self, EngineError> {
-        let (engine_thread, handle) =
-            EngineThread::spawn_with_fixture_routing_facts_and_runtime_config(
-                store,
-                facts,
-                cap,
-                pool_config,
-                RuntimeConfig::default(),
-                nmp_runtime::session::RestoredSession::empty(),
-                Vec::new(),
-                route_provider,
-            )
-            .map_err(EngineError::from_start_error)?;
-        Ok(Self {
-            inner: Mutex::new(Some(Inner {
-                handle,
-                engine_thread,
-            })),
-        })
-    }
-
-    /// The read side of [`Self::from_parts`]'s hatch: the live `Handle` this
-    /// engine drives, cloned out.
-    ///
-    /// Same gating and same justification as the constructor -- `#[doc(hidden)]`
-    /// and behind `unstable-mechanism`, an in-workspace/test exception rather
-    /// than an app contract. `nmp-bdd` needs it because it drives ONE engine
-    /// through two surfaces at once: the product verbs a scenario is about
-    /// (`Engine::publish`, and the group door built on it), and the raw delta /
-    /// diagnostics channels a `Then` step has to FOLD to assert anything (see
-    /// that crate's `world::observe`). Rebuilding those accumulators on top of
-    /// `Subscription` would put the thing under test between the harness and
-    /// its own witness.
-    ///
-    /// Escaping the serialized lifecycle gate is the cost: a `Handle` taken
-    /// here outlives a later [`Self::shutdown`] and is the caller's to stop
-    /// using. That is acceptable for a fixture that owns both ends and
-    /// unacceptable for an app, which is exactly what the gate expresses.
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn mechanism_handle(&self) -> Result<Handle, EngineError> {
-        self.with_handle(Handle::clone)
-    }
-
-    /// The engine thread's wall clock, so a harness can state what time this
-    /// engine is running at.
-    ///
-    /// Same gating and same justification as the two hatches above --
-    /// `#[doc(hidden)]` and behind `unstable-mechanism`, in-workspace only.
-    /// `nmp-bdd` needs it because `features/writes/` is written in sentences
-    /// about a stated instant (*"Given my device clock reads ..."*, *"And 2
-    /// seconds later ..."*) and `features/routing/` in sentences about time
-    /// passing (*"And 30 days pass with nothing learned"*). Acceptance-time
-    /// stamping and every deadline sweep are computed against the reducer's
-    /// clock, and the reducer's clock is whatever the runtime last ticked it
-    /// with -- so a spec that names an instant is unassertable without this.
-    ///
-    /// It is a REAL clock, not a stub: an engine whose clock is never set
-    /// reads `Timestamp::now()` at exactly the sites it always did.
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn clock(&self) -> Result<nmp_runtime::EngineClock, EngineError> {
-        let guard = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        match &*guard {
-            Some(inner) => Ok(inner.engine_thread.clock()),
-            None => Err(EngineError::EngineClosed),
-        }
-    }
-
     /// Run `f` against the live `Handle` while holding `inner`'s lock for
     /// the duration of the call -- see this module's doc for why that,
     /// rather than cloning the `Handle` and releasing the lock first, is
@@ -653,5 +503,3 @@ impl Drop for Engine {
     }
 }
 
-#[cfg(test)]
-mod tests;

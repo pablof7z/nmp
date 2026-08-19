@@ -10,8 +10,6 @@ use super::schema::{
     event_local_key, event_row_key, persist_err, EventKey, COVERAGE, EVENTS, EVENT_COL_LOCAL,
     EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, RELAYS,
 };
-#[cfg(test)]
-use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, binary_event, compute_coverage_key, merge_interval, shrink_after_eviction,
@@ -23,7 +21,7 @@ use super::{
 use nostr::secp256k1::schnorr::Signature;
 use redb::{Database, ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 use std::sync::atomic::Ordering;
 
 /// The `coverage` table's JSON value: the proven interval and nothing else,
@@ -67,18 +65,14 @@ pub(super) fn insert(
 ) -> Result<InsertOutcome, PersistenceError> {
     let mut write = GovernedWrite::begin(store)?;
     let outcome = write.apply(|tables, _write_txn| insert_with_tables(tables, event, from))?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_observation_before_commit) {
         drop(write);
         return Err(PersistenceError::new(
             "injected observation failed before commit",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcome = write.commit_prepared(outcome)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
     Ok(outcome)
 }
 
@@ -97,18 +91,14 @@ pub(super) fn insert_batch(
         }
         Ok(())
     })?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_observation_before_commit) {
         drop(write);
         return Err(PersistenceError::new(
             "injected observation failed before commit",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcomes = write.commit_prepared(outcomes)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
     Ok(outcomes)
 }
 
@@ -331,7 +321,7 @@ pub(super) fn query_newest_before(
     {
         return Ok(Vec::new());
     }
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store.take_query_newest_before_failure() {
         return Err(PersistenceError::new(
             "injected query-newest-before failure",
@@ -562,7 +552,7 @@ pub(super) fn record_coverage(
                 .map_err(persist_err)?;
         }
     }
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if store
         .fail_next_coverage_write
         .as_ref()
@@ -577,11 +567,7 @@ pub(super) fn record_coverage(
             "injected coverage write failure",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::CoverageBeforeCommit);
     commit_prepared(write_txn, ())?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::CoverageAfterCommit);
     Ok(())
 }
 
@@ -599,7 +585,7 @@ pub(super) fn get_coverage(
     key: CoverageKey,
     session: &RelaySessionKey,
 ) -> Result<Option<CoverageInterval>, PersistenceError> {
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     store.coverage_reads.fetch_add(1, Ordering::Relaxed);
     let row_key = RedbStore::coverage_row_key(&key, session);
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;
@@ -789,11 +775,7 @@ pub(super) fn gc(
 
         Ok(())
     })?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::GcBeforeCommit);
     let report = write.commit_prepared(report)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::GcAfterCommit);
 
     Ok(report)
 }

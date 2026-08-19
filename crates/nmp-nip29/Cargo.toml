@@ -31,34 +31,3 @@ tokio = { version = "1", features = ["time"] }
 # bytes (moved from `nmp` alongside the rest of the write door).
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
-
-[dev-dependencies]
-# `test-instrumentation`: `group_publication_door.rs` (moved from `nmp`
-# alongside the door it proves) installs a scripted signing capability
-# through `Engine::install_test_signing_capability`.
-nmp = { workspace = true, features = ["test-instrumentation"] }
-# The same file's `engine_reading_lists_from` fixture exercises
-# `WriteRouting::Auto`, which needs a real author-route provider installed --
-# the NIP-65 outbox algorithm, named here as any application names it.
-nmp-outbox.workspace = true
-# `nip29_group_list_headless.rs` (moved from `nmp` alongside the demand
-# function it proves) drives `nmp-engine`'s reducer directly through its own
-# gated fixture constructor -- a direct dev-dependency edge, the same shape
-# `nmp`'s own headless reducer tests use, rather than routing through `nmp`'s
-# doc-hidden mechanism door.
-nmp-engine = { workspace = true, features = ["unstable-mechanism"] }
-nmp-runtime = { workspace = true, features = ["unstable-mechanism"] }
-nmp-router-testkit.workspace = true
-nmp-store.workspace = true
-# `group_reads_headless.rs` scripts relay frames and reads wire ops straight
-# into `EngineCore`, so it names the two value-type crates that vocabulary
-# belongs to. Test-only: this crate ships neither.
-nmp-router.workspace = true
-nmp-transport.workspace = true
-nmp-test-support.workspace = true
-# `first_group_list_action_survives_restart.rs` closes and reopens a real
-# engine over one on-disk store file, and its `#[tokio::test]`s need a
-# multi-thread runtime (the production `tokio` edge above carries `time`
-# only).
-tempfile = "3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

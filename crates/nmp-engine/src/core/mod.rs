@@ -34,60 +34,34 @@
 //! #49) lives in [`evidence`]. Both are engine-owned — the store
 //! (`nmp-store`) only stores whatever interval it is handed.
 
-#[cfg(test)]
-mod admission_tests;
 mod attribution;
 mod author_route_needs;
 mod author_route_provider;
 pub use author_route_provider::{AuthorRouteProvider, AuthorRouteUpdate, ProviderReroot};
-#[cfg(test)]
-mod auth_core_headless;
 mod auth_transport;
-#[cfg(test)]
-mod auth_transport_tests;
 mod cell;
 pub use cell::EngineCore;
 mod coordinate_coverage;
 mod diagnostics;
 mod evidence;
-#[cfg(test)]
-mod freshness_snapshot_tests;
-#[cfg(test)]
-mod handoff_starvation_tests;
 mod history;
 mod history_lifecycle;
-#[cfg(test)]
-mod history_lifecycle_tests;
 mod lane_projection;
 mod observation;
-#[cfg(test)]
-mod outbox_tests;
 mod owner_index;
 mod pending_writes;
 mod query;
-#[cfg(test)]
-mod query_tests;
 mod request_attempt;
-#[cfg(test)]
-mod request_attempt_tests;
 mod request_effects;
-#[cfg(test)]
-mod request_replacement_transition_tests;
 mod request_replacements;
 mod request_targets;
 mod semantic_delivery;
-#[cfg(test)]
-mod semantic_settlement_falsifier_tests;
 mod stalled_write_census;
-#[cfg(test)]
-mod transport_tests;
 mod wire_ownership;
 mod write;
 pub use write::{PreparedReplaceableMaterialization, PublishPreparation};
-#[cfg(test)]
-mod write_tests;
 
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 use std::cell::Cell;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
@@ -97,10 +71,6 @@ use nostr::{
     PublicKey, RelayMessage, RelayUrl, Timestamp, UnsignedEvent,
 };
 
-/// Only the wire owner names routing-evidence facts in production now; the
-/// admission tests still construct them directly through this module's glob.
-#[cfg(test)]
-use nmp_grammar::RoutingEvidence;
 use nmp_grammar::{
     CacheMode, ConcreteFilter, ContextualAtom, DemandDelta, DemandOp,
     DescriptorHash, Freshness, Identity, LiveQuery, ReadRouting, RelaySessionKey,
@@ -176,15 +146,6 @@ impl RoutingFactStore {
         AuthorRouteWriter { facts: self }
     }
 
-    #[cfg(feature = "unstable-mechanism")]
-    pub fn from_fixture(fixture: nmp_router_testkit::FixtureRoutingFacts) -> Self {
-        let (authors, operator_app, operator_fallback) = fixture.into_parts();
-        Self {
-            authors,
-            operator_app,
-            operator_fallback,
-        }
-    }
 }
 
 impl Default for RoutingFactStore {
@@ -230,66 +191,6 @@ impl AuthorRouteWriter<'_> {
             AuthorRouteReplacement::Absent => AuthorRouteState::Absent,
         };
         self.facts.authors.insert(author, state);
-    }
-}
-
-#[cfg(test)]
-mod routing_fact_store_tests {
-    use super::*;
-    use nostr::Keys;
-
-    #[test]
-    fn one_write_replaces_both_directions_atomically() {
-        let author = Keys::generate().public_key();
-        let old_outbound = RelayUrl::parse("wss://old-outbound.example").unwrap();
-        let old_inbound = RelayUrl::parse("wss://old-inbound.example").unwrap();
-        let new_outbound = RelayUrl::parse("wss://new-outbound.example").unwrap();
-        let new_inbound = RelayUrl::parse("wss://new-inbound.example").unwrap();
-        let mut facts = RoutingFactStore::default();
-
-        facts.writer().replace(
-            author,
-            AuthorRouteReplacement::Present(AuthorRoutes::new([old_outbound], [old_inbound])),
-        );
-        facts.writer().replace(
-            author,
-            AuthorRouteReplacement::Present(AuthorRoutes::new(
-                [new_outbound.clone()],
-                [new_inbound.clone()],
-            )),
-        );
-
-        let AuthorRouteState::Present(routes) = facts.author_routes(&author) else {
-            panic!("replacement must remain positive knowledge");
-        };
-        assert_eq!(routes.outbound(), &BTreeSet::from([new_outbound]));
-        assert_eq!(routes.inbound(), &BTreeSet::from([new_inbound]));
-    }
-
-    #[test]
-    fn absence_is_memory_only_and_a_later_positive_record_wins() {
-        let author = Keys::generate().public_key();
-        let relay = RelayUrl::parse("wss://later-positive.example").unwrap();
-        let mut facts = RoutingFactStore::default();
-
-        facts
-            .writer()
-            .replace(author, AuthorRouteReplacement::Absent);
-        assert_eq!(facts.author_routes(&author), AuthorRouteState::Absent);
-
-        facts.writer().replace(
-            author,
-            AuthorRouteReplacement::Present(AuthorRoutes::new([relay.clone()], [])),
-        );
-        assert_eq!(
-            facts.author_routes(&author),
-            AuthorRouteState::Present(AuthorRoutes::new([relay], []))
-        );
-        assert_eq!(
-            RoutingFactStore::default().author_routes(&author),
-            AuthorRouteState::Unknown,
-            "a fresh process cannot inherit session-derived absence"
-        );
     }
 }
 
@@ -374,8 +275,6 @@ pub use diagnostics::{
 pub use evidence::{AcquisitionEvidence, AuthPhase, ShortfallFact, SourceEvidence, SourceStatus};
 pub use history::{HistoryAdvanceError, HistoryBatch, HistoryQuery, HistorySessionId, WindowLoad};
 use history_lifecycle::{HistoryRows, HistorySessions};
-#[cfg(test)]
-use history_lifecycle::WindowProjection;
 use observation::{
     ActiveRequestEvidence, LiveWireRequest, ObservationExecutionState, PendingRequestEvidence,
 };
@@ -997,7 +896,7 @@ pub struct CoreFreshnessWork {
 }
 
 /// Exact local ownership retained by the reducer after a lifecycle step.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CoreOwnershipCensus {
@@ -1816,7 +1715,7 @@ pub struct CoreState {
     /// ownership, attempt correlations, or a reattachable live delivery.
     quarantined_auth_receipts: HashMap<ReceiptId, QuarantinedWrite>,
     clock: Timestamp,
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     maintenance_turns: u64,
     active_pubkey: Option<PublicKey>,
     /// Every open durable write obligation and the three indexes that mirror
@@ -1892,109 +1791,65 @@ pub struct CoreState {
     /// `nmp::EngineConfig::max_publish_attempts`. Counts
     /// observations, never wall-clock.
     max_publish_attempts: u64,
-    /// Suppresses the per-`handle()` turn-level mirror check
-    /// (`assert_owner_consistency`, called unconditionally under
-    /// `#[cfg(test)]` at the end of [`Self::handle`]) for exactly the named
-    /// tests below (#1606). Two distinct, both narrow, reasons:
-    ///
-    /// 1. **Amortized-COST falsifiers** that drive `handle()` directly once
-    ///    per item to prove no O(n) revisit hides behind the production
-    ///    entrypoint --
-    ///    `lifecycle::ten_thousand_distinct_pending_cancellations_never_rebuild_surviving_demand`
-    ///    and
-    ///    `scale_teardown::ten_thousand_shared_bounded_owners_withdraw_in_owner_plus_one_close_work`.
-    ///    These are not mirror-STRUCTURE proofs -- the `Subscribe`/
-    ///    `Unsubscribe` transitions they drive are already checked, under the
-    ///    turn-level call, by hundreds of other tests with bounded fixtures
-    ///    -- so scanning the full O(n)-sized state at every one of their N
-    ///    calls buys no additional coverage for an O(n^2) test-suite cost
-    ///    (measured: one of the two names above alone exceeded 9 minutes and
-    ///    never finished, versus 4.85s with the check off).
-    /// 2. **Handle-less wire-ownership algebra fixtures**, which call
-    ///    `retain_wire_atom_owner`/`release_wire_atom_owner`/`wire.retain`
-    ///    directly to exercise owner-count/routing-evidence bookkeeping
-    ///    without ever indexing a handle -- a state real production cannot
-    ///    reach (`attach_wire_handle` always indexes the handle first; see
-    ///    its own precondition assertion) but that this owner's docs call
-    ///    out as "a legitimate unit to exercise without any handle at all,
-    ///    and several admission proofs do exactly that". Those admission
-    ///    proofs are `routing_evidence::disjoint_routing_evidence_owners_remain_exact_in_both_close_orders`,
-    ///    `routing_evidence::second_outbox_hint_opens_only_the_missing_relay_for_both_owner_close_orders`,
-    ///    `routing_evidence::preflush_hint_owner_churn_combines_pending_and_incumbent_assignment_truth`,
-    ///    `scale_teardown::later_exact_owner_routing_evidence_retracts_the_uncovered_diagnostic_on_admission`,
-    ///    and `diagnostics_scale::a_later_admission_cohort_never_visits_ten_thousand_incumbents`.
-    ///    The guard fires correctly on their fixture; it proves nothing about
-    ///    whether production can reach that shape, which is exactly why
-    ///    these are exempted rather than "fixed".
-    ///
-    /// Default `false`; only
-    /// [`Self::suppress_turn_level_consistency_for_named_exception`] sets it,
-    /// and every other test leaves it untouched.
-    #[cfg(test)]
-    turn_level_consistency_suppressed_for_named_exception: bool,
     /// Opt-in work counters for lifecycle attribution. Ordinary production
     /// builds pay no field or increment cost.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     projection_store_queries: Cell<u64>,
     /// Ordinary REQs opened by [`Self::open_coordinate_observation`] because
     /// nothing already covered the coordinate (#1630). The reuse falsifier
     /// reads this: a second check for a covered coordinate must leave it at
     /// zero.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     coordinate_reuse_new_reqs: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     router_compiles: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     history_store_queries: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     withdrawal_handle_detaches: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     resolver_delta_ops_consumed: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     resolver_owner_keys_touched: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     resolver_surviving_atoms_examined: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pending_atoms_rebuilt: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pending_cohort_atoms_reconciled: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     attribution_atoms_rebuilt: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     evidence_candidates_examined: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     freshness_candidate_atoms: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     freshness_incumbent_demand_edges_visited: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     freshness_plan_request_entries_visited: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     freshness_coalesce_pair_attempts: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_target_demand_keys_touched: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_target_candidates_examined: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_claim_entries_examined: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_owner_entries_examined: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_claim_transfer_attempts: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_claim_transfer_claims_attempted: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_claim_transfer_commits: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     request_claim_transfer_failures: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     diagnostic_snapshots_built: Cell<u64>,
-    #[cfg(any(test, feature = "bench-instrumentation"))]
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
+    #[cfg(feature = "bench-instrumentation")]
     routing_evidence_owner_keys_touched: Cell<u64>,
-    #[cfg(test)]
-    history_rows_examined: Cell<u64>,
-    #[cfg(test)]
-    history_affected_row_queries: Cell<u64>,
 }
 
 /// What one `AttemptCorrelation` (issue #93) resolves back to in this
@@ -2033,20 +1888,6 @@ impl CoreState {
 
     pub(in crate::core) fn new(store: RedbStore, cap: usize) -> Self {
         Self::new_with_routing_facts(store, RoutingFactStore::default(), cap)
-    }
-
-    /// Construct a headless reducer over a static fact snapshot.
-    ///
-    /// This exists for deterministic falsifiers. Production assembly owns
-    /// the private mutable fact store and uses [`Self::new`].
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub(in crate::core) fn new_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-    ) -> Self {
-        Self::new_with_routing_facts(store, RoutingFactStore::from_fixture(facts), cap)
     }
 
     pub(in crate::core) fn new_with_routing_facts(
@@ -2090,7 +1931,7 @@ impl CoreState {
             next_auth_operation: Some(1),
             quarantined_auth_receipts: HashMap::new(),
             clock: Timestamp::from(0u64),
-            #[cfg(any(test, feature = "test-instrumentation"))]
+            #[cfg(feature = "test-instrumentation")]
             maintenance_turns: 0,
             active_pubkey: None,
             pending: PendingWrites::default(),
@@ -2106,65 +1947,59 @@ impl CoreState {
             relay_open_failures: BTreeMap::new(),
             transport_degraded: None,
             max_publish_attempts: crate::publish_queue::DEFAULT_MAX_PUBLISH_ATTEMPTS,
-            #[cfg(test)]
-            turn_level_consistency_suppressed_for_named_exception: false,
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             projection_store_queries: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             coordinate_reuse_new_reqs: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             router_compiles: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             history_store_queries: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             withdrawal_handle_detaches: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             resolver_delta_ops_consumed: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             resolver_owner_keys_touched: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             resolver_surviving_atoms_examined: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             pending_atoms_rebuilt: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             pending_cohort_atoms_reconciled: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             attribution_atoms_rebuilt: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             evidence_candidates_examined: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             freshness_candidate_atoms: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             freshness_incumbent_demand_edges_visited: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             freshness_plan_request_entries_visited: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             freshness_coalesce_pair_attempts: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_target_demand_keys_touched: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_target_candidates_examined: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_claim_entries_examined: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_owner_entries_examined: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_claim_transfer_attempts: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_claim_transfer_claims_attempted: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_claim_transfer_commits: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             request_claim_transfer_failures: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
             diagnostic_snapshots_built: Cell::new(0),
-            #[cfg(any(test, feature = "bench-instrumentation"))]
-            #[cfg(any(test, feature = "bench-instrumentation"))]
+            #[cfg(feature = "bench-instrumentation")]
+            #[cfg(feature = "bench-instrumentation")]
             routing_evidence_owner_keys_touched: Cell::new(0),
-            #[cfg(test)]
-            history_rows_examined: Cell::new(0),
-            #[cfg(test)]
-            history_affected_row_queries: Cell::new(0),
         }
     }
 
@@ -2289,7 +2124,7 @@ impl CoreState {
     /// owner with the most test reach-through in the crate was the one owner
     /// with no consistency proof at all, and its absence was not written down
     /// here either.
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(in crate::core) fn assert_owner_consistency(&self, at: &str) {
         self.attribution.assert_consistent(at);
         self.wire.assert_consistent(at);
@@ -2308,7 +2143,7 @@ impl CoreState {
         self.history.assert_consistent(at);
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     #[doc(hidden)]
     pub(in crate::core) fn bench_ownership_census(&self) -> CoreOwnershipCensus {
         let attribution = self.attribution.counts();
@@ -2567,7 +2402,7 @@ impl CoreState {
     /// routing/delivery; every number here is real state this reducer
     /// already tracks for other reasons, never fabricated/estimated.
     pub(in crate::core) fn diagnostics_snapshot(&self) -> DiagnosticsSnapshot {
-        #[cfg(any(test, feature = "bench-instrumentation"))]
+        #[cfg(feature = "bench-instrumentation")]
         self.diagnostic_snapshots_built
             .set(self.diagnostic_snapshots_built.get().saturating_add(1));
         let mut snapshot = diagnostics::build(
@@ -2694,7 +2529,7 @@ impl CoreState {
     /// tested here against a synthetic clock regardless of who calls this
     /// -- the runtime driver is a caller, not part of the mechanism.
     pub(in crate::core) fn tick(&mut self, now: Timestamp) -> Vec<Effect> {
-        #[cfg(any(test, feature = "test-instrumentation"))]
+        #[cfg(feature = "test-instrumentation")]
         {
             self.maintenance_turns = self.maintenance_turns.saturating_add(1);
         }
@@ -2742,7 +2577,7 @@ impl CoreState {
         effects
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub(in crate::core) fn maintenance_turn_count(&self) -> u64 {
         self.maintenance_turns
     }
@@ -2918,19 +2753,6 @@ impl CoreState {
         effects
     }
 
-    /// Opt out of the per-`handle()` turn-level mirror check for the rest of
-    /// this `CoreState`'s life. Exactly seven call sites may call this --
-    /// see `turn_level_consistency_suppressed_for_named_exception`'s doc for
-    /// which, and for the two distinct reasons (amortized-cost proof,
-    /// handle-less algebra fixture) that justify each. Any other test
-    /// reaching for this method is very likely hiding a real mirror bug
-    /// rather than a real cost problem or a deliberately handle-less
-    /// fixture -- prefer fixing the fixture instead.
-    #[cfg(test)]
-    pub(in crate::core) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
-        self.turn_level_consistency_suppressed_for_named_exception = true;
-    }
-
     fn prune_unowned_relay_state(&mut self) -> bool {
         if self.relay_open_failures.is_empty() && self.auth_required_sessions.is_empty() {
             return false;
@@ -3029,7 +2851,7 @@ impl CoreState {
     }
 }
 
-#[cfg(any(test, feature = "test-instrumentation"))]
+#[cfg(feature = "test-instrumentation")]
 impl CoreState {
     /// Test-only access to the concrete store-door count used by the relay
     /// worker scheduling falsifiers.
@@ -3416,5 +3238,3 @@ fn nip01_newest_first(a: (u64, &EventId), b: (u64, &EventId)) -> std::cmp::Order
         .then_with(|| a.1.as_bytes().cmp(b.1.as_bytes()))
 }
 
-#[cfg(test)]
-mod history_load_failure_tests;

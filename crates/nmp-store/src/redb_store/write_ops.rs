@@ -24,8 +24,6 @@ use super::schema::{
     persist_err, EventKey, PUBLISH_QUEUE_ATTEMPTS, PUBLISH_QUEUE_ATTEMPT_DETAILS,
     PUBLISH_QUEUE_DEADLINES, PUBLISH_QUEUE_LANES, PUBLISH_QUEUE_ROUTE_REVISIONS,
 };
-#[cfg(test)]
-use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, candidate_wins, AcceptOutcome, AcceptWrite, BTreeMap, BTreeSet,
@@ -584,9 +582,6 @@ pub(super) fn accept_write(
             }
         };
 
-        #[cfg(test)]
-        store.crash_if(RedbCrashPoint::AcceptAfterEventBeforeJournal);
-
         // R7: the intent's full journal payload AND the retained
         // receipt record commit in this SAME transaction as the
         // event-table mutation (and the `IntentId`/receipt-id
@@ -655,16 +650,14 @@ pub(super) fn accept_write(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_accept_write_before_commit) {
         drop(write);
         return Err(PersistenceError::new(
             "injected acceptance failed before commit",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::AcceptBeforeCommit);
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_accept_write_after_commit) {
         return super::testing::commit_acceptance_then_return_io(store, write, outcome);
     }
@@ -917,8 +910,6 @@ pub(super) fn promote_signed(
     if matches!(outcome, PromoteOutcome::NotFound) {
         return Ok(outcome);
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::PromoteBeforeCommit);
     write.commit_prepared(outcome)
 }
 
@@ -1206,11 +1197,9 @@ pub(super) fn compensate_write_with_state(
         wall_clock_now(),
         TerminalRetentionLimits::PRODUCTION,
     )?;
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     if std::mem::take(&mut store.fail_next_compensation_with_state) {
         return Err(PersistenceError::new("injected compensation failure"));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::CompensateBeforeCommit);
     write.commit_prepared(outcome)
 }

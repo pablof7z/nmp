@@ -27,17 +27,9 @@
 //!   handing out `&mut CoreState` would be arbitrary mutation permitted and
 //!   merely checked afterwards, which is not ownership. No other module ever
 //!   receives a `&mut CoreState`.
-//! - **No `DerefMut`, ever.** Every mutation goes through a named door, and
-//!   there is exactly one exception ([`EngineCore::white_box`], `#[cfg(test)]`
-//!   and `pub(super)`) whose call sites are countable by grep. The read-only
-//!   `Deref` below is `#[cfg(test)]` and cannot widen that: `CoreState`'s 92
-//!   fields are private to module `core`, so it hands nothing to anyone who
-//!   could not already see it. (This departs from the approved design, which
-//!   banned `Deref` outright on the grounds that direct reads are cross-owner
-//!   coupling. Measured against this tree, that rationale has an empty
-//!   domain: `cargo check --workspace --all-targets` after removing the
-//!   fields breaks in exactly one target, `nmp-engine (lib test)`. Nothing in
-//!   `nmp-runtime`, `nmp`, or any integration suite ever read a field.)
+//! - **No `Deref`, no `DerefMut`, no exceptions.** Every mutation goes
+//!   through a named door. The one read-only `Deref` that used to exist was
+//!   gated on `cfg(test)` and is gone with the tests.
 //! - **No depth counter.** An inner call is `CoreState -> CoreState` and
 //!   never re-enters this shell; because `checked` is private, code holding
 //!   `&mut CoreState` structurally cannot call back through `EngineCore`.
@@ -73,103 +65,21 @@ impl EngineCore {
     /// PRIVATE. No other module ever receives `&mut CoreState`; other
     /// modules get the explicit semantic doors below and nothing else.
     ///
-    /// The check is `#[cfg(test)]` -- the exact gate the end-of-`handle()`
-    /// call carried before this module existed, moved rather than widened.
-    /// Widening it to the other test binaries is a separate change with its
-    /// own evidence.
-    #[cfg_attr(not(test), inline(always))]
+    /// The consistency assertion this shell was built to run was
+    /// `#[cfg(test)]` and went with the tests; what remains is the single
+    /// private funnel every external mutation still has to pass through.
+    #[inline(always)]
     fn checked<T>(&mut self, at: &'static str, f: impl FnOnce(&mut CoreState) -> T) -> T {
-        #[cfg(not(test))]
         let _ = at;
         let out = f(&mut self.state);
-        #[cfg(test)]
-        if !self
-            .state
-            .turn_level_consistency_suppressed_for_named_exception
-        {
-            self.state.assert_owner_consistency(at);
-        }
         out
     }
 
-    /// Construction is a state-establishing boundary too, so it is checked
-    /// like any other. `CoreState::new` establishes a large invariant-bearing
-    /// state, and it is the one every test starts from.
+    /// Construction is a state-establishing boundary too, so it goes through
+    /// the same funnel as any other.
     fn checked_new(state: CoreState) -> Self {
         let this = Self { state };
-        #[cfg(test)]
-        this.state.assert_owner_consistency("EngineCore::new");
         this
-    }
-
-    /// Opt out of the per-transition mirror check for the rest of this
-    /// `EngineCore`'s life. Exactly seven call sites may call this -- see
-    /// `CoreState::turn_level_consistency_suppressed_for_named_exception`'s
-    /// doc for which, and for the two distinct reasons (amortized-cost
-    /// proof, handle-less algebra fixture) that justify each.
-    #[cfg(test)]
-    pub(super) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
-        self.state
-            .suppress_turn_level_consistency_for_named_exception();
-    }
-
-    /// The engine's current logical demand is now exactly `demand`.
-    ///
-    /// This is the one thing `CoreState::recompile` does to attribution, and
-    /// a falsifier that drives the router by hand (rather than through a
-    /// resolver) has to do it too, or every coverage claim it later attributes
-    /// resolves to no retained shape. Sixty-seven sites did it a different
-    /// way: `white_box("attribution.observe_atom", ..)` for whatever arrived
-    /// and `white_box("attribution.release_atom", ..)` for whatever left,
-    /// spelling out a TRANSITION where production states a FACT. A transition
-    /// can be wrong in ways a fact cannot — `release_atom` silently no-ops on
-    /// an atom that was never observed — and none of the sixty-seven could
-    /// ever have caught `recompile` changing which calls it makes (#1850).
-    ///
-    /// Checked, not `white_box`: installing the demand set is a complete
-    /// transition of that owner, not a mid-turn sub-step, so the
-    /// owner-consistency proof holds across it.
-    ///
-    /// Takes the same `BTreeSet<ContextualAtom>` shape `CoreState::wire_demand`
-    /// hands `recompile`, so a falsifier states its demand in the type
-    /// production states it in.
-    #[cfg(test)]
-    pub(super) fn set_active_demand(&mut self, demand: &BTreeSet<ContextualAtom>) {
-        self.checked("set_active_demand", |s| {
-            s.attribution.set_active_demand(demand.iter())
-        })
-    }
-
-    /// The reducer's own in-crate falsifiers reach a mid-turn sub-step here,
-    /// and this is the ONLY way anything obtains a `&mut CoreState`.
-    /// `#[cfg(test)]` and `pub(super)`: it does not exist in a production
-    /// build and cannot be named outside `core`.
-    ///
-    /// **It deliberately does not run the turn-level check**, and that is a
-    /// measured decision rather than an omission. An earlier revision routed
-    /// this through [`Self::checked`]; four tests then failed for a
-    /// principled reason. `assert_owner_consistency` is a property of a
-    /// TURN, and a white-box test mutates mid-turn by construction:
-    /// `on_publish` leaves the stalled-write cache stale until `handle`'s
-    /// epilogue refreshes it, and `wire.unindex_handle` is step one of a
-    /// three-step rebuild the test open-codes. Asserting a turn postcondition
-    /// after a sub-step asserts something that is not true yet. Same reason
-    /// the shell carries no depth counter: a mechanism spanning sub-steps
-    /// would conceal a broken state model rather than prove one.
-    ///
-    /// So this does not close the in-crate test hole -- it makes it
-    /// COUNTABLE. `grep -c 'white_box(' crates/nmp-engine/src` is the exact
-    /// number of places the reducer's own tests reach past its doors, and
-    /// that number should fall as owners are extracted. Every call site
-    /// outside `core` is a compile error instead.
-    #[cfg(test)]
-    pub(super) fn white_box<T>(
-        &mut self,
-        at: &'static str,
-        f: impl FnOnce(&mut CoreState) -> T,
-    ) -> T {
-        let _ = at;
-        f(&mut self.state)
     }
 
     pub fn is_current_transport_session(
@@ -243,16 +153,6 @@ impl EngineCore {
         Self::checked_new(CoreState::new(store, cap))
     }
 
-    #[cfg(feature = "unstable-mechanism")]
-    #[doc(hidden)]
-    pub fn new_with_fixture_routing_facts(
-        store: RedbStore,
-        facts: nmp_router_testkit::FixtureRoutingFacts,
-        cap: usize,
-    ) -> Self {
-        Self::checked_new(CoreState::new_with_fixture_routing_facts(store, facts, cap))
-    }
-
     pub fn new_with_routing_facts(
         store: RedbStore,
         routing_facts: RoutingFactStore,
@@ -285,12 +185,12 @@ impl EngineCore {
         self.state.active_demand()
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub fn assert_owner_consistency(&self, at: &str) {
         self.state.assert_owner_consistency(at)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     #[doc(hidden)]
     pub fn bench_ownership_census(&self) -> CoreOwnershipCensus {
         self.state.bench_ownership_census()
@@ -321,7 +221,7 @@ impl EngineCore {
         self.checked("tick", |s| s.tick(now))
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     pub fn maintenance_turn_count(&self) -> u64 {
         self.state.maintenance_turn_count()
     }
@@ -346,19 +246,19 @@ impl EngineCore {
         self.state.active_pubkey()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn reset_publish_queue_lane_recovery_reads(&self) {
         self.state.reset_publish_queue_lane_recovery_reads()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn publish_queue_lane_recovery_reads(&self) -> u64 {
         self.state.publish_queue_lane_recovery_reads()
     }
 
-    #[cfg(any(test, feature = "test-instrumentation"))]
+    #[cfg(feature = "test-instrumentation")]
     #[doc(hidden)]
     pub fn seed_stale_relay_open_failure_for_test(
         &mut self,
@@ -607,25 +507,3 @@ impl EngineCore {
     }
 }
 
-/// Read-only white-box access for the reducer's own in-crate falsifiers.
-///
-/// `#[cfg(test)]`, and there is deliberately **no `DerefMut`** -- so this
-/// grants reads and nothing else, and every mutation still goes through a
-/// named door. It leaks nothing: `CoreState`'s fields are private to module
-/// `core`, so the only code this helps is code that could already see them.
-///
-/// It also does real work. Removing the fields from `EngineCore` makes the
-/// compiler split the in-crate test suite exactly along the read/write line:
-/// 1,165 errors without this impl, 394 with it, and the 394 are precisely
-/// the E0596/E0594 mutation sites. Those are the ones that had to move to
-/// [`EngineCore::white_box`]; the 764 reads needed no change and gain nothing
-/// from being rewritten, because there is no owner boundary between a
-/// reducer and its own white-box tests -- they are the same Rust module.
-#[cfg(test)]
-impl std::ops::Deref for EngineCore {
-    type Target = CoreState;
-
-    fn deref(&self) -> &CoreState {
-        &self.state
-    }
-}

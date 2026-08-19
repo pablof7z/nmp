@@ -9,10 +9,3 @@ publish.workspace = true
 nostr.workspace = true
 nmp-grammar.workspace = true
 nmp-store.workspace = true
-
-[dev-dependencies]
-nmp-resolver.workspace = true
-nmp-resolver-testkit.workspace = true
-nmp-router-testkit.workspace = true
-nmp-test-support.workspace = true
-proptest.workspace = true

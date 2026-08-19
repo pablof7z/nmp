@@ -8,11 +8,6 @@ members = [
     "crates/nmp-store",
     "crates/nmp-resolver",
     "crates/nmp-router",
-    # Static routing-fact fixtures (`FixtureRoutingFacts`, `test_relay`) split
-    # out of `nmp-router` (#1667) so they are never part of that crate's
-    # shipped public API. Dev-dependency only, everywhere.
-    "crates/nmp-resolver-testkit",
-    "crates/nmp-router-testkit",
     "crates/nmp-transport",
     # The deterministic reducer: `EngineCore`, `handle(EngineMsg) -> Vec<Effect>`,
     # and its reducer-coupled satellites. Its manifest is the point -- no
@@ -38,11 +33,8 @@ members = [
     # folded into `crates/nmp` as private/doc-hidden modules behind the one
     # canonical product facade.
     "crates/nmp",
-    "crates/nmp-consumer-check",
-    "crates/nmp-bdd",
     "crates/nmp-nip02",
     "crates/nmp-nip65",
-    "crates/nmp-nip65-consumer-check",
     # The NIP-65 outbox algorithm as an installable `AuthorRouteProvider`.
     "crates/nmp-outbox",
     "crates/nmp-nip29",
@@ -50,7 +42,6 @@ members = [
     # `q`-tag replies, with no NIP-29 group or client notification policy.
     "crates/nmp-nipc7",
     "crates/nmp-content",
-    "crates/nmp-test-support",
     # Typed NIP-22 comments over NIP-73 external content ids (#572),
     # exclusive kind:1111 schema owner.
     "crates/nmp-nip22",
@@ -68,42 +59,6 @@ members = [
     # #1715: NIP-51 kind:10003 public bookmarks -- the capability #1707's own
     # proof of goal, exercising the reversed architecture end to end. See
     # this crate's own doc comment for the measured claim.
-    "crates/nmp-bookmarks",
-]
-
-# #1564: `members` above is every package this repository ships evidence
-# from -- product libraries beside behavioral/parity harnesses, shared test
-# support, downstream compile fixtures, and a falsifier app. A bare
-# `cargo build`/`cargo test` at the root answers "build/test everything",
-# which makes the workspace look architecturally larger than the product it
-# ships and pulls verification-only dependencies (a second major version of
-# `nostr` via `nostr-relay-builder`, through `nmp-test-support`) into a build
-# nobody asked for. `default-members` narrows the unqualified command to
-# exactly the production package graph; `--workspace` still reaches every
-# member listed above, so no harness or fixture stops being built or tested
-# -- it only stops being what you get by asking for nothing in particular.
-default-members = [
-    "crates/nmp-grammar",
-    "crates/nmp-store",
-    "crates/nmp-resolver",
-    "crates/nmp-router",
-    "crates/nmp-transport",
-    "crates/nmp-engine",
-    "crates/nmp-runtime",
-    "crates/nmp-nip11",
-    "crates/nmp-signer",
-    "crates/nmp-local-signer",
-    "crates/nmp",
-    "crates/nmp-nip02",
-    "crates/nmp-nip65",
-    "crates/nmp-outbox",
-    "crates/nmp-nip29",
-    "crates/nmp-nipc7",
-    "crates/nmp-content",
-    "crates/nmp-nip22",
-    "crates/nmp-nip73",
-    "crates/nmp-nip18",
-    "crates/nmp-nip25",
     "crates/nmp-bookmarks",
 ]
 
@@ -128,8 +83,6 @@ nmp-grammar = { path = "crates/nmp-grammar" }
 nmp-store = { path = "crates/nmp-store" }
 nmp-resolver = { path = "crates/nmp-resolver" }
 nmp-router = { path = "crates/nmp-router" }
-nmp-resolver-testkit = { path = "crates/nmp-resolver-testkit" }
-nmp-router-testkit = { path = "crates/nmp-router-testkit" }
 nmp-transport = { path = "crates/nmp-transport" }
 nmp-engine = { path = "crates/nmp-engine" }
 nmp-runtime = { path = "crates/nmp-runtime" }
@@ -137,21 +90,17 @@ nmp-nip11 = { path = "crates/nmp-nip11" }
 nmp-signer = { path = "crates/nmp-signer" }
 nmp-local-signer = { path = "crates/nmp-local-signer" }
 nmp = { path = "crates/nmp" }
-nmp-bdd = { path = "crates/nmp-bdd" }
 nmp-nip02 = { path = "crates/nmp-nip02" }
 nmp-nip65 = { path = "crates/nmp-nip65" }
 nmp-outbox = { path = "crates/nmp-outbox" }
 nmp-nip29 = { path = "crates/nmp-nip29" }
 nmp-nipc7 = { path = "crates/nmp-nipc7" }
 nmp-content = { path = "crates/nmp-content" }
-nmp-test-support = { path = "crates/nmp-test-support" }
 nmp-nip22 = { path = "crates/nmp-nip22" }
 nmp-nip73 = { path = "crates/nmp-nip73" }
 nmp-nip18 = { path = "crates/nmp-nip18" }
 nmp-nip25 = { path = "crates/nmp-nip25" }
 nmp-bookmarks = { path = "crates/nmp-bookmarks" }
-proptest = "1"
-uniffi = "0.29"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-webpki-roots"] }
@@ -159,12 +108,8 @@ reqwest = { version = "0.12.28", default-features = false, features = ["rustls-t
 # zeroizing local-key path (#765), which cannot route through `nostr`'s own
 # hashing. Already at 0.10.9 in Cargo.lock via transitive resolution.
 sha2 = "0.10"
-clap = { version = "4", features = ["derive", "env"] }
 regex = "1"
 tempfile = "3"
-thiserror = "2"
-toml = "0.8"
-walkdir = "2"
 
 # Measured, not guessed (#1808). On a live 21 GB `target/debug` built with Rust
 # dev defaults, **over 80% was incremental-compilation byproduct rather than

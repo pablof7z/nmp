@@ -66,7 +66,7 @@ pub(super) struct DemandWalk {
 
 /// The census contribution, so the root counts this owner's state without
 /// naming its maps.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 pub(super) struct RequestTargetCounts {
     pub(super) handles: usize,
     pub(super) demand_keys: usize,
@@ -255,7 +255,7 @@ impl RequestTargets {
         (targets.into_iter().collect(), walk)
     }
 
-    #[cfg(any(test, feature = "bench-instrumentation"))]
+    #[cfg(feature = "bench-instrumentation")]
     pub(super) fn counts(&self) -> RequestTargetCounts {
         RequestTargetCounts {
             handles: self.by_handle.len(),
@@ -291,7 +291,7 @@ impl RequestTargets {
 /// is a freshness answer supplied from outside — so the check verifies that
 /// every live target traces back to a declaration, and that the reverse index
 /// is exactly the merge, rather than merely the same size as it.
-#[cfg(any(test, feature = "bench-instrumentation"))]
+#[cfg(feature = "bench-instrumentation")]
 impl RequestTargets {
     pub(super) fn assert_consistent(&self, at: &str) {
         let mut expected_by_demand: BTreeMap<DemandKey, BTreeMap<RequestTarget, usize>> =
@@ -346,62 +346,3 @@ impl RequestTargets {
     }
 }
 
-/// The reads the execution-target proofs need, as questions rather than maps.
-#[cfg(test)]
-impl RequestTargets {
-    pub(super) fn declared_for_handle(&self, id: HandleId) -> BTreeMap<ActiveRequestTarget, usize> {
-        self.by_handle.get(&id).cloned().unwrap_or_default()
-    }
-
-    /// Add one declared target to a handle, through the same replacement door
-    /// production uses.
-    ///
-    /// Deliberately not a raw write into `by_handle`: the previous spelling
-    /// let a fixture install a declaration without retiring the activation
-    /// derived from the old one, which is the class of unreachable-state
-    /// fixture the wire owner's tests had to be rewritten to stop building.
-    pub(super) fn declare_for_handle(
-        &mut self,
-        id: HandleId,
-        target: ActiveRequestTarget,
-        count: usize,
-        active_scopes: Option<&BTreeSet<usize>>,
-    ) {
-        let mut declared = self.declared_for_handle(id);
-        declared.insert(target, count);
-        self.replace_for_handle(id, declared, active_scopes);
-    }
-
-    /// Every live target across every demand.
-    pub(super) fn live_targets(&self) -> Vec<RequestTarget> {
-        self.by_demand
-            .values()
-            .flat_map(BTreeMap::keys)
-            .cloned()
-            .collect()
-    }
-
-    /// Every branch with at least one live target.
-    pub(super) fn live_handles(&self) -> BTreeSet<HandleId> {
-        self.by_demand
-            .values()
-            .flat_map(BTreeMap::keys)
-            .map(|target| target.handle)
-            .collect()
-    }
-
-    pub(super) fn declared_live_for_demand(
-        &self,
-        demand: &DemandKey,
-    ) -> BTreeMap<RequestTarget, usize> {
-        self.by_demand.get(demand).cloned().unwrap_or_default()
-    }
-
-    pub(super) fn live_target_count(&self, demand: &DemandKey) -> usize {
-        self.by_demand.get(demand).map_or(0, BTreeMap::len)
-    }
-
-    pub(super) fn has_live_demand(&self, demand: &DemandKey) -> bool {
-        self.by_demand.contains_key(demand)
-    }
-}
