@@ -1,6 +1,6 @@
 //! `nmp` -- THE supported Rust product API (#52,
 //! #52). Every direct-Rust app and
-//! `nmp-ffi` both depend on this crate alone; the mechanism crates
+//! direct-Rust consumers depend on this crate alone; the mechanism crates
 //! (`nmp-store`, `nmp-router`, `nmp-transport`, `nmp-resolver`, `nmp-signer`,
 //! `nmp-local-signer`) are internal implementation detail behind it, present
 //! only transitively.
@@ -83,7 +83,7 @@ mod subscription;
 // the same way the others did: deleted, not relocated. `nmp` must not
 // contain a single line of any EVENT-KIND CAPABILITY's meaning, re-export
 // door or not; a direct-Rust app now names the mechanism crate directly, the
-// same way `nmp-ffi`/Swift/Kotlin already do.
+// same way any consumer above the facade does.
 //
 // Read that word exactly: an event-kind capability is one that owns the
 // meaning of some kinds, and the facade names none of them. A protocol
@@ -161,10 +161,10 @@ pub fn nmp_threads_live() -> u64 {
     nmp_transport::thread_census::nmp_threads_live()
 }
 // The pull-based async observation API (#680) is the FFI/SDK delivery
-// mechanism — its app contract is documented in `nmp-ffi` and the Swift/Kotlin
+// mechanism — its app contract is documented on the types themselves
 // SDKs. The documented direct-Rust public API stays the blocking
 // `Subscription`/`recv()` nouns below; these async twins remain fully usable
-// (nmp-ffi and any direct-Rust app await them) but are doc-hidden so they do
+// (any direct-Rust app awaits them) but are doc-hidden so they do
 // not double the facade with generic auto-trait expansions.
 #[doc(hidden)]
 pub use nmp_runtime::ConcurrentNext;
@@ -203,7 +203,7 @@ pub use nmp_grammar::{
 // Bech32 nostr-entity DECODE (#116) -- npub/nprofile/note/nevent/naddr ->
 // hex id/pubkey + relay hints. A pure codec, unrelated to the two nouns
 // above, but "shared, protocol-level" per #116's own framing: a direct-Rust
-// app gets it here for the identical reason `nmp-ffi` gets it at the FFI
+// app gets it here for the identical reason a projection layer would get it at its
 // boundary, rather than each hand-rolling its own bech32 decode.
 pub use nmp_grammar::{decode_nostr_entity, NostrEntity, NostrEntityError};
 

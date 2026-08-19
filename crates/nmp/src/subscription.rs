@@ -1,8 +1,7 @@
 //! [`Subscription`] / [`DiagnosticsSubscription`] -- the app-facing handles
 //! [`Engine::observe`](crate::Engine::observe)/
 //! [`Engine::observe_diagnostics`](crate::Engine::observe_diagnostics)
-//! return. Both fold `nmp-ffi`'s `NmpQueryHandle`/`NmpDiagnosticsHandle`
-//! `Drop` discipline into the direct-Rust surface (#52
+//! return. Both put `Drop` discipline in the direct-Rust surface (#52
 //! §1): withdrawing a subscription is never a step an app must remember to
 //! take, only one it may take early via [`Subscription::cancel`]/
 //! [`DiagnosticsSubscription::cancel`].
@@ -64,7 +63,7 @@ pub enum Window {
 /// `Handle`/`QueryHandle`/`DiagnosticsHandle` (the raw mechanism-capability
 /// types `nmp-ffi` used to hold directly) ever appears in a stable facade
 /// signature; only this opaque, `Clone + Send + Sync` token does. `recv()`
-/// blocks, so a dedicated drain loop (e.g. `nmp-ffi`'s `NmpQueryHandle`)
+/// blocks, so a dedicated drain loop
 /// must own the whole `Subscription`/`DiagnosticsSubscription` outright;
 /// this token is what lets a SEPARATE handle still trigger withdrawal
 /// immediately from elsewhere, rather than waiting for the drain loop's

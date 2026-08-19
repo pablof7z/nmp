@@ -5,7 +5,7 @@
 //! No `Signed`-payload verify lives here: that guarantee moved to
 //! `nmp_engine::core::EngineCore::on_publish`'s acceptance boundary (Unit
 //! A0, #56) precisely so it holds for every entry point -- this facade,
-//! `nmp-ffi`, and any `from_parts`/raw-`EngineThread` caller alike -- not
+//! and any `from_parts`/raw-`EngineThread` caller alike -- not
 //! only the one that happens to verify locally. See [`crate::error`]'s doc.
 //!
 //! ## The serialized lifecycle gate

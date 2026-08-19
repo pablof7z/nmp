@@ -2793,7 +2793,7 @@ fn dispatch_effect(
 /// [`Handle::observe_diagnostics`]). Withdraw it via [`Self::cancel`] when
 /// the caller is done; unlike [`QueryHandle`] there is no `Drop` teardown
 /// HERE (this value carries no resource of its own beyond the registry
-/// entry it names) — `nmp-ffi`'s `NmpDiagnosticsHandle` is what ties
+/// entry it names) — a diagnostics handle above the facade is what ties
 /// teardown to `Drop`, mirroring `NmpQueryHandle`'s own wrapper.
 #[derive(Clone)]
 pub struct DiagnosticsHandle {
