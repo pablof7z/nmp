@@ -32,7 +32,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use nmp::{
-    Binding, Demand, Engine, EngineConfig, Filter, IndexedTagName, LiveQuery,
+    Binding, Demand, Engine, EngineClock, EngineConfig, Filter, IndexedTagName, LiveQuery,
     ReadRouting, RelayUrl, Subscription,
 };
 
@@ -90,6 +90,8 @@ fn main() {
         max_relays: 4,
         max_auth_capabilities: 4,
         max_publish_attempts: nmp::DEFAULT_MAX_PUBLISH_ATTEMPTS,
+        // These probes drive real relays on real time.
+        clock: EngineClock::new(),
     })
     .expect("engine");
 

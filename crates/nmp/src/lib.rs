@@ -132,6 +132,10 @@ pub use nmp_runtime::session::{
     SessionAccount, SessionMutationError, SessionPayload, SessionProvider, SessionRestoreError,
     SessionSnapshot, SigningAvailability,
 };
+// The clock an app installs on [`EngineConfig`]. Re-exported here so stating
+// what time it is needs no `nmp-runtime` dependency: the facade is the only
+// crate an application names.
+pub use nmp_runtime::EngineClock;
 pub use observation::ObservationEvidence;
 
 /// Monotonic count of real OS threads NMP spawned through its instrumented
