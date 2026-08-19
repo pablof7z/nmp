@@ -102,9 +102,18 @@ encoded-byte charge in the same transaction as the receipt state. The FIFO and
 its count/byte scalars live in the existing `publish_queue_meta` key space.
 Maintenance evicts oldest whole closures while any private limit is exceeded:
 24 hours, 100,000 terminal receipts, or 256 MiB of logical encoded closure
-bytes. These values cover roughly one day of the observed 27-session renewal
-load (77,760 completions/day) while bounding both cardinality and unusually
-large attempt histories. They are implementation policy, not app configuration.
+bytes (`TERMINAL_RECEIPT_MAX_AGE_SECS`, `MAX_COUNT`, `MAX_BYTES`,
+`crates/nmp-store/src/terminal_retention.rs`). They are implementation policy,
+not app configuration.
+
+The constants' stated justification — that they cover about a day of an
+"observed 27-session renewal load (77,760 completions/day)" at an observed mean
+closure size — is **not sourced anywhere.** That rate appears in exactly two
+places in the repository, this sentence and the same claim mirrored in
+`terminal_retention.rs`, neither naming a dashboard, a log, a command, a date
+or a host. The three constants are real and shipped; the load figure that
+picked them is not checkable, so the numbers should be treated as chosen, not
+as derived.
 
 Retained receipts are not compacted. Receipt, route revisions, lanes,
 attempts, and attempt details remain available for normal reattachment
@@ -184,11 +193,9 @@ monotonically and are never reused. Reads validate the forward/reverse
 bijection. A process-local cache parses a dictionary value once per distinct
 relay and returns clones thereafter; the cache is not authority.
 
-The release fixture below uses only four distinct relays across 1,000 lanes.
-Against canonical length-prefixed bytes repeated in the legacy string/JSON
-shape, the surrogate candidate reduced median allocated database bytes from
-4,276,224 to 1,564,672 (63.4%). That result justifies the dictionary for this
-workload; it is not a universal claim that a surrogate wins every cardinality
+The release fixture below uses only four distinct relays across 1,000 lanes,
+which is the shape the dictionary exists for: a small relay set repeated across
+many lanes. It is not a claim that a surrogate wins every cardinality
 distribution.
 
 ## Authority and transaction boundaries
@@ -240,51 +247,41 @@ No `route_complete` field or table exists.
 
 `crates/nmp-store/examples/publish_queue_recovery_bench.rs` runs population and
 recovery in separate release processes with a counting allocator and Linux
-process-I/O accounting. The comparison used exact base
-`625e976d670fe035efa57e42debb332943902c98` and the candidate implementation.
-The baseline source differs only by the mechanical old/new Rust identifiers
-needed to compile the same benchmark against each API.
+process-I/O accounting. It still exists and still runs.
 
 The representative fixture is 250 open signed intents, four shared relays per
 intent, one route revision and one transient attempt per lane: 1,000 lanes and
-exactly 4,000 commits in both builds. Population ran in three alternating
-base/candidate pairs. Recovery ran six alternating fresh-process pairs over
-settled databases. Every run recovered 572,124 normalized semantic bytes and
-the same scheduler-effect digest:
-`9d9aefb66fe1d2efea6fdc85d8f7730fca92f0a7501c6f4af810b654155e9127`.
+exactly 4,000 commits. Population ran in three alternating base/candidate
+pairs; recovery ran six alternating fresh-process pairs over settled databases.
+Every run recovered 572,124 normalized semantic bytes and the same
+scheduler-effect digest,
+`9d9aefb66fe1d2efea6fdc85d8f7730fca92f0a7501c6f4af810b654155e9127` — a
+determinism property of the current build, re-checkable by running the harness.
 
-| Median measure | legacy string/JSON | binary publish queue | change |
-|---|---:|---:|---:|
-| Logical database bytes after reopen | 5,189,632 | 1,990,656 | -61.6% |
-| Allocated database bytes after reopen | 4,276,224 | 1,564,672 | -63.4% |
-| Process write bytes during population | 192,118,784 | 162,492,416 | -15.4% |
-| Population wall time | 18.822 s | 15.805 s | -16.0% |
-| Population allocation operations | 1,173,037 | 997,645 | -14.9% |
-| Population allocated bytes | 353,920,845 | 299,677,352 | -15.3% |
-| Full reopen/recovery wall time | 54.341 ms | 43.658 ms | -19.7% |
-| Recovery allocation operations | 132,606 | 44,326 | -66.6% |
-| Recovery allocated bytes | 15,081,272 | 5,803,830 | -61.5% |
-| Recovery process write bytes | 4,096 | 4,096 | unchanged |
-| Commits represented | 4,000 | 4,000 | unchanged |
+**The before/after table is deleted.** It reported median reductions across
+database bytes, write bytes, wall time and allocation counts against exact base
+`625e976d670fe035efa57e42debb332943902c98`. That commit does not resolve in
+this history (`git cat-file -t` fails; no match in `git log --all`), so the
+baseline half can never be re-run. No result file was committed either — the
+only committed benchmark results in this repository are under
+`benchmarks/nostrdb-compare/results/`. The harness survived the migration; the
+comparison did not, and a ratio whose denominator is unreachable is not
+evidence. Sampling profiles could not be collected on the evidence host at all,
+because `perf_event_paranoid=3` denies unprivileged performance events.
 
-Sampling profiles could not be collected on the evidence host because
-`perf_event_paranoid=3` denies unprivileged performance events; no percentage
-is invented to fill that gap. Attribution is instead bounded to facts the
-fixture and source can prove:
+What remains checkable, and what actually carries the argument, is source-level:
 
-- the base publish-queue recovery path has 17 production `serde_json::from_str`
-  sites across intents, receipts, lanes, deadlines, routes, attempts, details,
-  and suppression metadata;
-- its `&str` keys make Redb validate UTF-8 during key handling, and relay URLs
-  are reconstructed from repeated JSON values;
-- active `publish_queue.rs`, `publish_queue_ops.rs`, and `publish_queue_codec.rs` have zero
-  `serde_json` use; their ordered keys are fixed byte arrays;
+- `publish_queue.rs`, `publish_queue_ops.rs` and `publish_queue_codec.rs` have
+  zero `serde_json` use, verified by grep; their ordered keys are fixed byte
+  arrays rather than `&str`, so Redb does no UTF-8 validation during key
+  handling;
 - the candidate parses four relay dictionary values once per fresh recovery
   process and caches those four canonical identities while recovering 1,000
-  lanes;
-- the measured 66.6% allocation-count and 61.5% allocated-byte reductions
-  bound the removed decode/materialization work, but do not assign all wall
-  time to a single function.
+  lanes.
+
+The corresponding claim about the old path — a count of `serde_json::from_str`
+sites at the base commit — is not repeated here, because the code it counted is
+gone and the commit is unreachable.
 
 This is physical-representation evidence for Redb, not backend qualification or
 a database winner. Binary rows lower the cost of recovery and remaining scans;

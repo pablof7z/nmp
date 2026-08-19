@@ -6,7 +6,6 @@ status: built
 date: 2026-07-28
 audience: llms
 scope: publish queue lane projection into relay-worker ownership
-investigated_revision: 057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244
 runtime_evidence_revision: 9a8ad1fd1a2999b067c19d842467a76a257f7f25
 implementation_pr: https://github.com/pablof7z/nmp/pull/988
 owns:
@@ -31,7 +30,7 @@ issues:
 # Durable write relay-worker demand
 
 This document records the repeated delivery-lane scans present at
-`investigated_revision` and the reducer-owned replacement built in
+the implementation this replaced and the reducer-owned replacement built in
 [#988](https://github.com/pablof7z/nmp/pull/988). It is deliberately not a
 backend-selection record. The performance problem was caused by asking durable
 storage to reconstruct already-known reducer state during ordinary dispatch;
@@ -50,7 +49,7 @@ Pablo first asked:
 
 > is this related to the work we were doing in this session? is nmp still storing events as json and deserializing on every scan?
 
-At `investigated_revision`, the precise answer was:
+Before the projection, the precise answer was:
 
 - canonical Nostr events are stored in a compact binary encoding;
 - delivery-lane control records were stored as JSON values under string keys;
@@ -58,7 +57,8 @@ At `investigated_revision`, the precise answer was:
 - therefore this is related to storage representation work, but it is not
   evidence that canonical events are stored as JSON.
 
-Current schema version 12 replaces that physical shape with the explicit
+The current schema version (`SCHEMA_VERSION`,
+`crates/nmp-store/src/redb_store/schema.rs`) replaces that physical shape with the explicit
 binary `publish_queue_*` namespace documented in
 [`publish-queue.md`](publish-queue.md). The reducer-owned projection
 remains the architectural fix for repeated dispatch reads; binary makes
@@ -108,7 +108,7 @@ needed now?” The runtime owns the workers themselves.
 `EngineCore::relay_worker_requirements` combines read and write demand.
 `EngineCore::write_relay_workers` computes the write half.
 
-At `investigated_revision`, `write_relay_workers`:
+Before the projection, `write_relay_workers`:
 
 1. starts with relay sessions referenced by in-flight attempt correlations;
 2. walks every `PendingWrite`;
@@ -166,35 +166,35 @@ thing as the mutex design. Removing repeated scans should shorten engine-thread
 occupation. Splitting or redesigning the facade mutex is separate work and
 needs its own evidence.
 
-## Runtime evidence and its limits
+## What started this, and why its evidence is gone
 
-A profiler report supplied from a running Mosaico daemon pinned to NMP revision
-`9a8ad1fd1a2999b067c19d842467a76a257f7f25` described the headline as:
+This work began from a profiler report supplied from a running Mosaico daemon
+pinned to NMP revision `9a8ad1fd1a2999b067c19d842467a76a257f7f25`, whose
+headline was:
 
 > The headline: one thread is pegged, and it's blocking the whole runtime
 
-During that sample, the NMP engine thread was on CPU for the full window.
-Inclusive samples attributed about 68% of that thread to
-`recover_publish_queue_lanes`, about 61% to `required_relay_workers`, about 31% to
-redb range-iterator construction, and about 17% to lane JSON decoding. String
-key comparison and UTF-8 validation were also visible.
+The report's per-frame percentages are **not reproduced here.** They came from
+a profiling run on an external daemon; this repository contains no profiling
+harness, no captured flamegraph, and no committed report. Nothing in the tree
+lets anyone check them, and quoted percentages that cannot be checked read as
+evidence while functioning as hearsay.
 
-Those percentages overlap because they are inclusive call-stack samples; they
-must not be added together. The report supports the diagnosis that repeated
-lane reconstruction dominates that captured engine window. It does not prove
-the exact end-to-end gain on current `master`.
-
-Current-source inspection at `investigated_revision` confirms that the
-repeated-scan path still exists. A before/after profile on the same workload is
-required before claiming a measured improvement. The expected result is to
-remove most scan-related engine CPU from unchanged dispatch passes, not to
-promise a specific whole-process percentage in advance.
+**This matters more than usual, because those percentages are the reason this
+projection exists.** The diagnosis they supported — that repeated lane
+reconstruction dominated the pegged engine window — is what #985 was built to
+fix. The architecture in this document therefore rests on an external
+measurement nobody here can reproduce. What DOES survive independently is the
+behavioural claim, which is proven by a test in this tree:
+`unchanged_worker_demand_reads_zero_publish_queue_lanes`
+(`crates/nmp-engine/tests/core_headless/persistence_failures.rs:908`) shows the
+lane-store reads for unchanged worker demand going to exactly zero. If the
+projection is ever questioned, that test is the argument; the profiler
+screenshot is not.
 
 The same older Mosaico process also had a large number of per-observation OS
-threads. That is not owned by #985: current NMP `master` already contains the
-observation-thread removal from #680. The old runtime sample remains valid for
-the scan diagnosis because the path still exists, but its thread-count finding
-must not be presented as current-master evidence.
+threads. That was never owned by #985 — the observation-thread removal came
+from #680.
 
 ## Built behavior: a rebuildable projection
 
@@ -362,7 +362,7 @@ The implementation carries these permanent falsifiers:
   session.
 - `close_reopen_rebuilds_the_same_exact_worker_projection` compares exact
   worker sets before close and after redb reopen/boot recovery.
-- `durability_absent_leaves_the_exact_projection_unchanged` proves a rejected
+- `a_failed_lane_transition_leaves_the_exact_projection_unchanged` proves a rejected
   transition cannot fabricate projected state.
 - `every_lane_mutation_constructor_goes_through_the_projection_door`
   recursively scans the production core source and rejects a raw lane-writing
@@ -376,28 +376,33 @@ own positive falsifiers when those states exist. The projection boundary is
 already the bootstrap/lane-minting boundary they must use, but this PR does not
 claim unimplemented states were tested.
 
-### Measured magnitude
+### Magnitude: the harness survives, the comparison does not
 
-`relay_worker_projection_redb_benchmark` exercises the real redb lane
-representation and the same `RelayOpenFailed` ownership path used by the
-zero-read regression. Its fixed workload has 64 pending intents and 200
-unchanged ownership passes.
+`relay_worker_projection_redb_benchmark`
+(`crates/nmp-engine/tests/core_headless/persistence_failures.rs`, `#[ignore]`)
+exercises the real redb lane representation and the same `RelayOpenFailed`
+ownership path used by the zero-read regression, over a fixed workload of 64
+pending intents and 200 unchanged ownership passes. It still exists and still
+runs.
 
-Five release-mode samples were run from separate clean Cargo target
-directories for the base and candidate, preventing cross-worktree artifact
-reuse:
+An earlier version of this section carried a before/after table claiming a 90%
+median reduction against base `057f59e`. That table is deleted. The base
+commit does not resolve in this history — `git cat-file -t
+057f59ef9f3a5cbc1a3ce4e3c88d189d55b28244` fails, and it appears nowhere in
+`git log --all` — so the baseline half of the comparison can never be re-run,
+no matter how good the harness is. No result file was ever committed either;
+the only committed benchmark results in this repository are under
+`benchmarks/nostrdb-compare/results/`. A speedup ratio whose denominator is
+unreachable is not a measurement.
 
-```text
-base 057f59e median:       51,624 microseconds
-projection median:         5,162 microseconds
-median reduction:             90%
-median speedup:                10x
-```
-
-The behavioral count moves from reads proportional to pending durable writes
-to exactly 0 lane-store reads during worker calculation. The benchmark keeps
-relay-worker outcomes equal and measures the actual redb representation, so the
-speedup did not come from dropping work or replacing redb.
+What is checkable is the behavioural claim, and it is the one that matters: the
+lane-store read count during worker calculation moves from proportional to
+pending durable writes down to exactly zero, asserted by
+`unchanged_worker_demand_reads_zero_publish_queue_lanes`. The benchmark keeps
+relay-worker outcomes equal and measures the actual redb representation, so
+whatever the magnitude is, it does not come from dropping work or replacing
+redb. Re-establishing a number means re-running the harness against a base that
+still exists.
 
 This is strong evidence for the isolated hot path, not a claim that the whole
 Mosaico process is 90% faster. A production rollout should still compare

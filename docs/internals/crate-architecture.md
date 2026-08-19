@@ -384,8 +384,7 @@ things" below is where that is measured properly and comes out differently.
 
 `RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and
 `RequestTargets` (#1746), and `Nip77Sessions` (#1747) all came out of the
-≥85%-concentration band. `EngineCore` is **114 → 96 fields** across the last
-three. What they proved:
+≥85%-concentration band, each shrinking the reducer's field count as it left. What they proved:
 
 **`WireOwnership` — ten fields.** `rebuild_wire_ownership` opened with
 **twelve consecutive `.clear()` calls** and then open-coded the owner counting
@@ -477,13 +476,13 @@ its counts being wrong, not merely absent.
 
 ### The field census — picking the next owner by lookup, not judgement
 
-Every `EngineCore` field, with its accesses counted per production file. The
+Every reducer-state field, with its accesses counted per production file. The
 number that decides things is **concentration**: the share of a field's
-accesses landing in its top file. Regenerate it rather than trusting this
-snapshot — the point is the method, and the counts move:
+accesses landing in its top file. Regenerate it rather than trusting the
+snapshot below — the point is the method, and the counts move:
 
 ```zsh
-fields=$(awk '/^pub struct EngineCore \{/{f=1;next} f&&/^\}/{exit} f' \
+fields=$(awk '/^pub struct CoreState \{/{f=1;next} f&&/^\}/{exit} f' \
   crates/nmp-engine/src/core/mod.rs \
   | grep -oE '^[[:space:]]+[a-z_][a-z0-9_]*:' | tr -d ' :' | sort -u)
 for f in ${(f)fields}; do
@@ -493,8 +492,18 @@ for f in ${(f)fields}; do
 done
 ```
 
-**114 fields.** 55 sit at ≥70% concentration; the tail below ~50% is the
-shared context, and the split between those two groups is the whole finding.
+The script targets `CoreState`, not `EngineCore`. `EngineCore` (`core/cell.rs`)
+is now a one-field shell holding a private `CoreState` (`core/mod.rs`), so the
+earlier version of this script — which grepped for `pub struct EngineCore {` in
+`mod.rs` — returned zero fields and silently produced an empty census rather
+than failing. If you re-run it and get nothing, that is the bug, not a result.
+
+**Field count, re-derived: 82.** The tables below are a snapshot from an
+earlier tree that reported 114 and later 96; treat their exact digits as stale
+and the shape as the finding. The shape is what survives re-derivation: a group
+of fields at high concentration, which is where an owner can be cut, and a tail
+in the 35-50% band which is shared context and cannot be. The split between
+those two groups is the whole point.
 
 Read it three ways:
 

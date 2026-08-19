@@ -415,8 +415,8 @@ and never repairs. Silent demand loss is the worst failure class in this system:
 everything downstream believes the request is live.
 
 `limit` is the *trigger*, not the defect — under `dedup_only()` two ordinary
-unlimited atoms collide identically. At scale, 6 authors × 3 shapes plans 13
-WireReqs onto **3** ids.
+unlimited atoms collide identically, and the collision rate grows with the
+number of distinct shapes sharing an author set.
 
 A second consequence of the same root: `crates/nmp-engine/src/core/query.rs`
 resolves a REQ's `absorbed` coverage keys with `reqs.iter().find(...)` —
@@ -446,9 +446,19 @@ It survived for **two** reasons, and the second is the subtler one:
    asserted that the rules ever *fired* during the run. A generator can drift
    into producing only unmergeable pairs and the test still passes.
 
-The fix therefore carries **fire counters** as a hard failure: each rule must
-merge a minimum number of pairs per run (measured: AuthorUnion 17, KindUnion 23,
-IdUnion 20 per 256 cases). Vacuity is now a test failure, not a silent pass.
+The first fix carried **fire counters**: each rule had to merge a minimum
+number of pairs per random run. That mechanism is gone. Its own test file
+records why (`crates/nmp-router/tests/coalescing.rs`): with four axes competing
+for a fixed sample budget an axis occasionally never came up, so it "was
+measured failing about one run in twelve on a green tree" — reporting a defect
+where there was none. Sampling was the wrong instrument, because "can the rule
+fire on the tags axis" is a fact about the rule, not about a draw.
+
+The shipped guard is `the_merge_rule_fires_on_every_axis`: one hand-built pair
+per axis, differing in exactly that component and nothing else. Deterministic,
+and strictly stronger — it fails the moment an axis stops being mergeable
+rather than only when the generator happens to notice. Vacuity is a test
+failure, not a silent pass.
 
 `KindUnion` had the identical defect and `IdUnion` a narrower version of it
 (refusing `None` but accepting `Some(∅)`). All three now share one admission
@@ -818,9 +828,10 @@ catalog: it grows as a contiguous SUFFIX of the seeded range — `{300}`,
 strictly increasing `created_at` and the relay replays stored events
 newest-first, so a wire count taken part-way through misses a contiguous
 LOW-numbered prefix, exactly the shape #1211 reported (`group-0001..group-{N}`,
-N varying 12/47/123/197/206/220/223/233 across runs). The suite failed 2 runs
-in 4 locally on `1d2ea5fc` and 4 in 6 on the issue's `8d51d069`; it does not
-fail now. This closes the derived-set half of §8.1c. The COUNT-interleaving
+N varying across runs). The suite was reproducibly flaky before the fix and
+does not fail now. The two commit hashes the failure rates were quoted against
+no longer resolve in this history, so those rates are not restated here; the
+mechanism above is the finding, and it is checkable against the code. This closes the derived-set half of §8.1c. The COUNT-interleaving
 residue (transient second subscription from two compiles that grouped
 differently) is a different mechanism and is untouched here.
 
@@ -969,7 +980,7 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | engine-level collapse; warm cache; EOSE independence; multi-relay; 50 values; the tag/author equality | `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` |
 | fan-out and pre-batched compiling to one plan; the #899 falsifier and its control | `crates/nmp-router/tests/tag_fanout_churn.rs` |
 | 300 groups INSIDE a 20-subscription cap; strict improvement over dedup-only | `crates/nmp-router/tests/tag_kill_measurement.rs` |
-| widen-only over the full component-shape space with PER-AXIS fire counters; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
+| widen-only over the full component-shape space, with a deterministic per-axis firing guard; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
 | §3.2 the containment predicate itself, both legs per axis and the `limit` refusal on both sides | `crates/nmp-router/src/admission/metadata_tests.rs` |
 | §3.2 what containment does at admission: exact reuse, an uncovered later filter executing, and the partial-coverage over-fetch (plus its `#[ignore]`d #1341 target) | `crates/nmp-router/tests/admission/coverage_behavior.rs` |
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |

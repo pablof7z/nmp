@@ -278,19 +278,24 @@ database byte-identical:
   otherwise invents a fault. Widening this bullet back into "`Eligible` and
   `WaitingConnection` are the same answer" would restore that lie.
 
-The consequence is the incident this bound exists for. A 4,000-intent store on
-the evidence host, every lane eligible and unreached:
+The bound exists because of an incident where boot recovery on a large store,
+every lane eligible and unreached, was slow enough to block `add_account`
+behind it.
 
-| Measure | before | after |
-|---|---:|---:|
-| `recover_on_boot` | 38.915 s | 108.5 ms |
-| `Engine::add_account` behind that boot | 17.876 s | 45.0 ms |
+The before/after wall-clock pair that used to appear here is deleted. Its
+"before" side named no base commit at all, it was a single unpaired sample with
+no host recorded, and no result file was committed — so the magnitude cannot be
+re-established and should not be cited. The rule it justified does not depend
+on it: that recovery commits one durable transaction per CHANGED lane fact and
+none for an unchanged queue is proven structurally by the two falsifiers below,
+which pass today. The on-demand `nmp::measure_add_account_behind_boot_recovery`
+(`crates/nmp/tests/boot_recovery_bound.rs`, `#[ignore]`, 4,000-intent fixture)
+remains available to produce a current number for anyone who needs one.
 
 Falsifiers: `nmp::boot_recovery_rewrites_no_lane_when_no_durable_fact_changed`
 (no lane revision moves across a reopen),
 `nmp-store::a_lane_bootstrap_that_stages_no_row_commits_nothing` (the unstaged
-bootstrap count is the whole population), and the on-demand
-`nmp::measure_add_account_behind_boot_recovery` for the wall-clock pair.
+bootstrap count is the whole population).
 
 Recovery still visits every open intent, so what remains linear is bounded
 reads, not durability barriers. The other half of keeping that number small is

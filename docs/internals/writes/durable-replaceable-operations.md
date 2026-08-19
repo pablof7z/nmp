@@ -241,67 +241,58 @@ relay-, session-, identity-, and event-id-specific.
 
 ---
 
-## 6. The #1412 prototype: what it measured
+## 6. The #1412 prototype: what it settled, and what it cannot show
 
 The #1412 experiment's bodyless lifecycle and parallel persistence were
-rejected for production. Its measurements are retained because they are the
-decision evidence behind that rejection and behind the current shape.
+rejected for production, and #1624 then deleted the plugin shape the prototype
+ran on: the compiled capability set is engine construction input supplied
+before the state owner starts store recovery, capability code runs directly on
+that state thread between a closed read transaction and one short
+compare-and-commit transaction, and no executor, worker slot, detached thread,
+panic translation, completion command, timeout, or shutdown contract exists
+around it.
 
-Its first isolated registry prototype showed that two independently packaged
-capability implementations can be supplied through one NMP-owned contract; that
-the NMP mechanism depends on neither capability; that exact materializer and
-format identity survive restart; that missing implementation, mismatched
-format, typed refusal, and stale completion can be represented; and that
-capability code can run outside the store lock and commit through an exact
-source/revision/generation fence.
+Its first isolated registry prototype established, as behaviour rather than as
+timing, that two independently packaged capability implementations can be
+supplied through one NMP-owned contract; that the NMP mechanism depends on
+neither capability; that exact materializer and format identity survive
+restart; that missing implementation, mismatched format, typed refusal, and
+stale completion can each be represented; and that capability code can run
+outside the store lock and commit through an exact source/revision/generation
+fence.
 
-Nine samples of 100,000 stateless dispatch iterations (not a backlog of
-unpublished operations) measured:
+**Its measurements are gone, and are not recoverable.** An earlier version of
+this document carried a dispatch-latency table, a nine-batch acceptance and
+recovery table attributed to an Apple M3 Max, and a raw-artifact SHA-256. None
+of it can be checked:
 
-```text
-direct transform                 221 ns median
-registry lookup + dynamic call   244 ns median
-lookup/Arc portion                23 ns median
-extra transform allocations        0
-```
+- The heads it named, `566b5ef246152267a94728bd31517beceb3156a3` and
+  `283132d2617dc5dff2be538e5385385554420140`, do not resolve in this history
+  (`git cat-file -t` on each returns "could not get object info").
+- The artifact SHA-256 it named appears nowhere in the tree — searched the
+  whole repository; the only occurrence was this document quoting itself.
+- The repository has no benchmark harness for semantic operations. The one
+  committed benchmark result set is
+  `benchmarks/nostrdb-compare/results/2026-07-18/issue-650/`, which is
+  unrelated.
+- The doc itself recorded that every row naming registration or a handler job
+  measured a code path #1624 deleted.
 
-Nanosecond microbenchmarks are host- and load-sensitive; these are evidence for
-feasibility, not a performance contract.
+The numbers were therefore removed rather than preserved. A latency table
+whose harness, binary and raw output are all unreachable is not evidence about
+this system; it is a recollection with decimal points, and keeping it would
+license decisions nobody can re-check.
 
-The second layer routed a genuinely bodyless semantic payload through the real
-public Rust `Engine::publish(WriteIntent)` door. Release measurements on an
-Apple M3 Max used nine fresh-process batches. The final experiment head is
-`566b5ef246152267a94728bd31517beceb3156a3`; its raw artifact, SHA-256
-`fd350429f85a5a947639dec0174bc761cf09c05cd0f3702da2659a74e80b30b0`, retains
-every iteration.
+**One decision rests on those deleted numbers.** The conclusion that exact
+ordered sequences of 1, 10 and 100 retained operations reveal "no practical
+preparation cliff", and the consequent choice not to add paged or bounded
+preparation, was justified by measurements that can no longer be reproduced.
+Restart recovery still visits every retained semantic coordinate to
+re-establish its source owner rather than paging that work, so a large retained
+backlog lengthens store recovery — and the evidence that this does not matter
+is gone. If that becomes a question, it needs measuring again, not citing.
 
-| Workload | Median | p95 |
-|---|---:|---:|
-| Ordinary in-memory event acceptance | 66 µs | 220 µs |
-| Bodyless semantic in-memory acceptance | 28 µs | 226 µs |
-| Ordinary redb event acceptance | 5.84 ms | 11.52 ms |
-| Bodyless semantic redb acceptance | 10.37 ms | 20.05 ms |
-| Ready semantic acceptance through installed body | 78 µs | 1.11 ms |
-| Reopen until exactly 100 receipts are inspection-ready | 16.1 ms | 48.8 ms |
-| Late registration through all 100 reopened redb installs | 1.66 s | 1.99 s |
-| Reopen, register, and install one source-driven successor | 26.7 ms | 29.7 ms |
-| One hundred 5 ms handler jobs, end to end | 156.8 ms | 179.5 ms |
-
-Exact ordered sequences of 1, 10, and 100 retained operations all passed their
-materialization oracle; median reopen-to-install time was 18.8, 17.4, and 20.2
-milliseconds respectively. Those sizes revealed no preparation cliff.
-
-The ordinary and bodyless acceptance rows perform different work and end in
-different states; the difference between them is not an architecture tax
-measurement.
-
-Bodyless acceptance, missing-handler persistence, late registration, and a
-nullable initial event id appear above only so the measurements stay
-interpretable. The #1412 decision gate rejected all four, and #1624 deleted the
-plugin shape the prototype ran on. Every row naming registration or a handler
-job measures a path that no longer exists.
-
-### 6.1 What it did not prove
+### 6.1 What the prototype did not prove
 
 Using the real acceptance door proved the front half of one public lifecycle,
 not the ordinary lifecycle after a body is installed. The experiment stored
@@ -319,10 +310,6 @@ settlement, cancellation with shared materializations, removal or compaction of
 semantic receipts and operations, complete Rust/FFI/Swift/Kotlin projection, or
 capability-defined normalization and production storage bounds.
 
-Two known limits at the time of writing: relay ingest extracts the changed
-replaceable coordinate and prepares only that target, but this is
-code-inspected rather than proven by a two-target runtime falsifier. Restart
-recovery visits every retained semantic coordinate to re-establish its source
-owner rather than paging that work, so a very large retained backlog lengthens
-store recovery. The 1, 10, and 100-operation measurements above are the
-evidence that this has not mattered so far.
+One further limit, recorded honestly at the time and unchanged: relay ingest
+extracts the changed replaceable coordinate and prepares only that target, but
+this is code-inspected rather than proven by a two-target runtime falsifier.
