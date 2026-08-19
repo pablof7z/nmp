@@ -830,11 +830,7 @@ pub struct RowsSeed {
     pub evidence: Vec<AcquisitionEvidence>,
 }
 
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CoreObservationOwnershipCensus {
     pub handles: usize,
@@ -1846,11 +1842,7 @@ impl CoreState {
         self.history.assert_consistent(at);
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(in crate::core) fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         let history = self.history.counts();
         CoreObservationOwnershipCensus {

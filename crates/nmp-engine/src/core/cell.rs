@@ -90,11 +90,7 @@ impl EngineCore {
         self.state.is_current_transport_session(handle, session)
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,
@@ -190,11 +186,7 @@ impl EngineCore {
         self.state.assert_owner_consistency(at)
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub fn observation_ownership_census(&self) -> CoreObservationOwnershipCensus {
         self.state.observation_ownership_census()
     }

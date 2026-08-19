@@ -63,20 +63,6 @@ pub(super) struct DemandWalk {
     pub(super) candidates_examined: u64,
 }
 
-/// The census contribution, so the root counts this owner's state without
-/// naming its maps.
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct RequestTargetCounts {
-    pub(super) handles: usize,
-    pub(super) demand_keys: usize,
-    pub(super) edges: usize,
-    pub(super) refs: usize,
-    pub(super) active_handles: usize,
-    pub(super) active_demand_keys: usize,
-    pub(super) active_edges: usize,
-    pub(super) active_refs: usize,
-}
-
 #[derive(Default)]
 pub(super) struct RequestTargets {
     /// Complete current-snapshot request-evidence edges per ordinary handle.
@@ -246,33 +232,6 @@ impl RequestTargets {
         (targets.into_iter().collect(), walk)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> RequestTargetCounts {
-        RequestTargetCounts {
-            handles: self.by_handle.len(),
-            demand_keys: self.by_demand.len(),
-            edges: self.by_demand.values().map(BTreeMap::len).sum(),
-            refs: self.by_demand.values().flat_map(BTreeMap::values).sum(),
-            active_handles: self.active_by_handle_demand.len(),
-            active_demand_keys: self
-                .active_by_handle_demand
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            active_edges: self
-                .active_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .map(BTreeMap::len)
-                .sum(),
-            active_refs: self
-                .active_by_handle_demand
-                .values()
-                .flat_map(BTreeMap::values)
-                .flat_map(BTreeMap::values)
-                .sum(),
-        }
-    }
 }
 
 /// Exact structural consistency between the declared and live layers.

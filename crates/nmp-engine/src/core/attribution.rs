@@ -365,19 +365,4 @@ impl AttributionState {
         }
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> AttributionCounts {
-        AttributionCounts {
-            inflight_subs: self.inflight.len(),
-            wire_keys: self.sub_id_by_wire.len(),
-            live_request_keys: self.live_request_claims.len(),
-        }
-    }
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct AttributionCounts {
-    pub(super) inflight_subs: usize,
-    pub(super) wire_keys: usize,
-    pub(super) live_request_keys: usize,
 }

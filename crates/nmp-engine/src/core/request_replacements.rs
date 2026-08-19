@@ -44,13 +44,6 @@ impl IndexedChild<RelaySessionKey> for RequestReplacement {
     }
 }
 
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct RequestReplacementCounts {
-    pub(super) jobs: usize,
-    pub(super) session_keys: usize,
-    pub(super) session_edges: usize,
-}
-
 pub(super) struct RequestReplacements {
     pending: OwnerIndexed<RelaySessionKey, SubId, RequestReplacement>,
 }
@@ -102,12 +95,4 @@ impl RequestReplacements {
         self.pending.assert_consistent(at);
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> RequestReplacementCounts {
-        RequestReplacementCounts {
-            jobs: self.pending.len(),
-            session_keys: self.pending.owner_keys(),
-            session_edges: self.pending.owner_edges(),
-        }
-    }
 }

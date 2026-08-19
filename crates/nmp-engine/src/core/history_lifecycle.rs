@@ -30,11 +30,7 @@ pub(super) struct HistorySessions {
     next_id: u64,
 }
 
-#[cfg(any(
-    test,
-    feature = "bench-instrumentation",
-    feature = "test-instrumentation"
-))]
+#[cfg(any(test, feature = "test-instrumentation"))]
 pub(super) struct HistorySessionCounts {
     pub(super) sessions: usize,
     pub(super) handles: usize,
@@ -438,11 +434,7 @@ impl HistorySessions {
         })
     }
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(super) fn counts(&self) -> HistorySessionCounts {
         HistorySessionCounts {
             sessions: self.sessions.len(),
@@ -450,19 +442,6 @@ impl HistorySessions {
         }
     }
 
-    /// Opening-evidence source edges every frozen branch acquisition still
-    /// retains, for the bench census's retained-freshness total. Separate
-    /// from [`Self::counts`] because only that census reads it.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn freshness_source_edges(&self) -> usize {
-        self.sessions
-            .values()
-            .flat_map(|state| &state.acquisitions_by_branch)
-            .flat_map(|acquisition| &acquisition.scopes)
-            .filter_map(ScopeAcquisition::opening_evidence)
-            .map(|evidence| evidence.sources.len())
-            .sum()
-    }
 }
 
 impl CoreState {

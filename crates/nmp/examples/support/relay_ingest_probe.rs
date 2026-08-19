@@ -1,5 +1,3 @@
-#[cfg(feature = "bench-instrumentation")]
-use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::{BTreeSet, HashSet};
 use std::error::Error;
 use std::fs::{self, File};
@@ -37,52 +35,7 @@ const OBSERVATION_POLL: Duration = Duration::from_millis(1);
 // binaries cannot reset or reconfigure another run midway through evidence.
 static PROBE_RUN_LOCK: Mutex<()> = Mutex::new(());
 
-#[cfg(feature = "bench-instrumentation")]
-struct CountingAllocator;
 
-#[cfg(feature = "bench-instrumentation")]
-static ALLOCATION_OPS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "bench-instrumentation")]
-static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
-
-#[cfg(feature = "bench-instrumentation")]
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
-        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        System.alloc(layout)
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
-        ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        System.alloc_zeroed(layout)
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        System.dealloc(ptr, layout);
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATION_OPS.fetch_add(1, Ordering::Relaxed);
-        ALLOCATED_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
-        System.realloc(ptr, layout, new_size)
-    }
-}
-
-#[global_allocator]
-#[cfg(feature = "bench-instrumentation")]
-static GLOBAL_ALLOCATOR: CountingAllocator = CountingAllocator;
-
-#[cfg(feature = "bench-instrumentation")]
-fn allocator_snapshot() -> (u64, u64) {
-    (
-        ALLOCATION_OPS.load(Ordering::Relaxed),
-        ALLOCATED_BYTES.load(Ordering::Relaxed),
-    )
-}
-
-#[cfg(not(feature = "bench-instrumentation"))]
 fn allocator_snapshot() -> (u64, u64) {
     (0, 0)
 }
@@ -200,7 +153,6 @@ impl ProbeConfig {
                 "expect-rejection requires exactly one event, one relay, and one pass".into(),
             );
         }
-        #[cfg(not(feature = "bench-instrumentation"))]
         if self.diagnostic_skip_event_id_validation
             || self.diagnostic_skip_signature_verification
             || self.diagnostic_preparsed_ceiling
@@ -359,8 +311,6 @@ struct ServerConfig {
     passes: usize,
     frame_delay: Duration,
     expect_rejection: bool,
-    #[cfg(feature = "bench-instrumentation")]
-    diagnostic_preparsed_events: Arc<Mutex<Option<Vec<Arc<nostr::Event>>>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -517,26 +467,6 @@ struct CompletionProfileWindow {
     end_ns: u64,
 }
 
-#[cfg(feature = "bench-instrumentation")]
-fn monotonic_ns() -> Result<u64, ProbeError> {
-    let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    // SAFETY: `clock_gettime` initializes the owned timespec on success.
-    let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC_RAW, value.as_mut_ptr()) };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: the successful call above initialized the complete value.
-    let value = unsafe { value.assume_init() };
-    let seconds =
-        u64::try_from(value.tv_sec).map_err(|_| "negative CLOCK_MONOTONIC_RAW seconds")?;
-    let nanos = u64::try_from(value.tv_nsec).map_err(|_| "negative CLOCK_MONOTONIC_RAW nanos")?;
-    seconds
-        .checked_mul(1_000_000_000)
-        .and_then(|value| value.checked_add(nanos))
-        .ok_or_else(|| "CLOCK_MONOTONIC_RAW nanoseconds overflow".into())
-}
-
-#[cfg(not(feature = "bench-instrumentation"))]
 fn monotonic_ns() -> Result<u64, ProbeError> {
     Err("completion-window-output requires bench-instrumentation".into())
 }
@@ -620,14 +550,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         fs::create_dir_all(parent)?;
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    let diagnostic_preparsed_events =
-        Arc::new(Mutex::new(if config.diagnostic_preparsed_ceiling {
-            Some(load_preparsed_events(&corpus.path)?)
-        } else {
-            None
-        }));
-
     let base = Instant::now();
     let sent_at = Arc::new(
         (0..config.events)
@@ -647,8 +569,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
                 passes: config.passes,
                 frame_delay: config.frame_delay,
                 expect_rejection: config.expect_rejection,
-                #[cfg(feature = "bench-instrumentation")]
-                diagnostic_preparsed_events: Arc::clone(&diagnostic_preparsed_events),
             },
             base,
             Arc::clone(&sent_at),
@@ -664,21 +584,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         selection.clone(),
         ReadRouting::Explicit(relay_urls.iter().cloned().collect())
     )?;
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_engine::ingest_attribution::reset();
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_transport::configure_diagnostic_duplicate_ceiling(
-        config.diagnostic_duplicate_ceiling_capacity,
-        config.diagnostic_duplicate_ceiling_event_payload,
-    );
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_transport::configure_diagnostic_preparsed_ceiling(None, Vec::new());
-    #[cfg(feature = "bench-instrumentation")]
-    nmp_transport::ingest_attribution::configure_validation_ceiling(
-        config.diagnostic_skip_event_id_validation,
-        config.diagnostic_skip_signature_verification,
-    );
-    #[cfg(not(feature = "bench-instrumentation"))]
     if config.diagnostic_duplicate_ceiling_capacity > 0 {
         return Err("diagnostic duplicate ceiling requires bench-instrumentation".into());
     }
@@ -903,9 +808,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
     let process_write_bytes = process_write_bytes()
         .zip(process_write_bytes_before)
         .map(|(after, before)| after.saturating_sub(before));
-    #[cfg(feature = "bench-instrumentation")]
-    let ingest_attribution = Some(ingest_attribution_json());
-    #[cfg(not(feature = "bench-instrumentation"))]
     let ingest_attribution = None;
     while let Ok((deltas, _)) = rows.recv_timeout(Duration::ZERO) {
         observations.apply(deltas, &config, &sent_at, base, ingest_started)?;
@@ -1104,114 +1006,6 @@ pub fn run(config: ProbeConfig) -> Result<ProbeResult, ProbeError> {
         server_bytes: server_stats.iter().map(|stats| stats.bytes).collect(),
         ingest_attribution,
     })
-}
-
-#[cfg(feature = "bench-instrumentation")]
-fn ingest_attribution_json() -> serde_json::Value {
-    let transport = nmp_transport::ingest_attribution::snapshot();
-    let engine = nmp_engine::ingest_attribution::snapshot();
-    let resolver = nmp_resolver::ingest_attribution::snapshot();
-    serde_json::json!({
-        "transport": {
-            "committed_observation_lookups": transport.committed_observation_lookups,
-            "committed_observation_hits": transport.committed_observation_hits,
-            "committed_observation_publications": transport.committed_observation_publications,
-            "committed_observation_invalidations": transport.committed_observation_invalidations,
-            "diagnostic_duplicate_ceiling_lookups": transport.diagnostic_duplicate_ceiling_lookups,
-            "diagnostic_duplicate_ceiling_hits": transport.diagnostic_duplicate_ceiling_hits,
-            "diagnostic_duplicate_ceiling_inserts": transport.diagnostic_duplicate_ceiling_inserts,
-            "diagnostic_preparsed_ceiling_lookups": transport.diagnostic_preparsed_ceiling_lookups,
-            "diagnostic_preparsed_ceiling_hits": transport.diagnostic_preparsed_ceiling_hits,
-            "parse_attempts": transport.parse_attempts, "parsed_frames": transport.parsed_frames,
-            "parse_ns": transport.parse_ns, "translator_bursts": transport.translator_bursts,
-            "event_id_validation_attempts": transport.event_id_validation_attempts,
-            "event_id_validation_skips": transport.event_id_validation_skips,
-            "event_id_validation_ns": transport.event_id_validation_ns,
-            "translator_events": transport.translator_events, "max_translator_burst": transport.max_translator_burst,
-            "verify_batches": transport.verify_batches, "verify_candidates": transport.verify_candidates,
-            "verify_ns": transport.verify_ns,
-            "verify_dispatch_ns": transport.verify_dispatch_ns,
-            "verify_collect_ns": transport.verify_collect_ns,
-            "verify_worker_ns": transport.verify_worker_ns,
-            "signature_verification_attempts": transport.signature_verification_attempts,
-            "signature_verification_skips": transport.signature_verification_skips,
-            "verify_task_submissions": transport.verify_task_submissions,
-            "verify_result_messages": transport.verify_result_messages,
-            "verify_worker_candidates": transport.verify_worker_candidates,
-            "max_verify_lane_candidates": transport.max_verify_lane_candidates,
-            "delivered_events": transport.delivered_events,
-            "delivery_ns": transport.delivery_ns,
-            "event_fallback_clones": transport.event_fallback_clones
-        },
-        "engine": {
-            "bridge_batches": engine.bridge_batches, "bridge_frames": engine.bridge_frames,
-            "max_bridge_batch": engine.max_bridge_batch, "bridge_send_ns": engine.bridge_send_ns,
-            "bridge_event_bytes": engine.bridge_event_bytes,
-            "max_bridge_batch_bytes": engine.max_bridge_batch_bytes,
-            "bridge_applied_wait_ns": engine.bridge_applied_wait_ns,
-            "engine_batch_process_ns": engine.engine_batch_process_ns,
-            "relay_core_reduce_ns": engine.relay_core_reduce_ns,
-            "relay_core_reduce_cpu_ns": engine.relay_core_reduce_cpu_ns,
-            "relay_effect_dispatch_ns": engine.relay_effect_dispatch_ns,
-            "relay_ingest_prelude_ns": engine.relay_ingest_prelude_ns,
-            "relay_ingest_prelude_cpu_ns": engine.relay_ingest_prelude_cpu_ns,
-            "relay_ingest_post_store_ns": engine.relay_ingest_post_store_ns,
-            "relay_ingest_post_store_cpu_ns": engine.relay_ingest_post_store_cpu_ns,
-            "relay_ingest_apply_committed_ns": engine.relay_ingest_apply_committed_ns,
-            "relay_ingest_apply_committed_cpu_ns": engine.relay_ingest_apply_committed_cpu_ns,
-            "relay_ingest_effect_build_ns": engine.relay_ingest_effect_build_ns,
-            "relay_ingest_effect_build_cpu_ns": engine.relay_ingest_effect_build_cpu_ns,
-            "relay_ingest_observations_call_ns": engine.relay_ingest_observations_call_ns,
-            "relay_ingest_observations_call_cpu_ns": engine.relay_ingest_observations_call_cpu_ns,
-            "relay_resolver_call_ns": engine.relay_resolver_call_ns,
-            "relay_resolver_call_cpu_ns": engine.relay_resolver_call_cpu_ns,
-            "relay_frame_conversion_ns": engine.relay_frame_conversion_ns,
-            "relay_frame_session_validation_ns": engine.relay_frame_session_validation_ns,
-            "relay_frame_diagnostics_count_ns": engine.relay_frame_diagnostics_count_ns,
-            "relay_frame_candidate_build_ns": engine.relay_frame_candidate_build_ns,
-            "committed_observation_effect_ns": engine.committed_observation_effect_ns,
-            "diagnostics_effect_ns": engine.diagnostics_effect_ns,
-            "committed_projection_total_ns": engine.committed_projection_total_ns,
-            "committed_projection_prelude_ns": engine.committed_projection_prelude_ns,
-            "committed_projection_recompile_ns": engine.committed_projection_recompile_ns,
-            "committed_live_projection_ns": engine.committed_live_projection_ns,
-            "committed_history_projection_ns": engine.committed_history_projection_ns,
-            "history_projection_setup_ns": engine.history_projection_setup_ns,
-            "history_projection_apply_ns": engine.history_projection_apply_ns,
-            "history_projection_delta_ns": engine.history_projection_delta_ns,
-            "history_projection_batch_ns": engine.history_projection_batch_ns,
-            "history_channel_send_ns": engine.history_channel_send_ns,
-            "history_receiver_reconcile_ns": engine.history_receiver_reconcile_ns,
-            "history_batches": engine.history_batches,
-            "history_deltas": engine.history_deltas,
-            "history_rows": engine.history_rows,
-            "row_channel_send_ns": engine.row_channel_send_ns,
-            "row_channel_batches": engine.row_channel_batches,
-            "row_channel_deltas": engine.row_channel_deltas,
-            "committed_projection_event_clones": engine.projection_event_clones
-        },
-        "resolver": {
-            "batches": resolver.batches, "events": resolver.events, "max_batch_events": resolver.max_batch_events,
-            "total_ns": resolver.total_ns, "total_cpu_ns": resolver.total_cpu_ns,
-            "prepare_ns": resolver.prepare_ns, "prepare_cpu_ns": resolver.prepare_cpu_ns,
-            "store_ns": resolver.store_ns, "store_cpu_ns": resolver.store_cpu_ns,
-            "classify_ns": resolver.classify_ns, "classify_cpu_ns": resolver.classify_cpu_ns,
-            "react_and_affected_ns": resolver.react_and_affected_ns,
-            "react_and_affected_cpu_ns": resolver.react_and_affected_cpu_ns,
-            "event_clones": resolver.event_clones
-        }
-    })
-}
-
-#[cfg(feature = "bench-instrumentation")]
-fn load_preparsed_events(path: &Path) -> Result<Vec<Arc<nostr::Event>>, ProbeError> {
-    BufReader::new(File::open(path)?)
-        .lines()
-        .map(|line| {
-            let event = nostr::Event::from_json(line?)?;
-            Ok(Arc::new(event))
-        })
-        .collect()
 }
 
 fn generate_corpus(dir: &Path, config: &ProbeConfig) -> Result<Corpus, ProbeError> {
@@ -1627,18 +1421,6 @@ fn serve_corpus(
         }
     };
     let encoded_subscription = serde_json::to_string(&subscription).map_err(|e| e.to_string())?;
-    #[cfg(feature = "bench-instrumentation")]
-    if let Some(events) = config
-        .diagnostic_preparsed_events
-        .lock()
-        .map_err(|_| "diagnostic preparsed events lock poisoned".to_string())?
-        .take()
-    {
-        nmp_transport::configure_diagnostic_preparsed_ceiling(
-            Some(nostr::SubscriptionId::new(subscription.clone())),
-            events,
-        );
-    }
     let started = Instant::now();
     let mut frames = 0u64;
     let mut bytes = 0u64;

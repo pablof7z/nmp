@@ -1234,11 +1234,7 @@ impl CoreState {
     // ---- inbound relay frame: EVENT/EOSE parsed here (D/E own OK/CLOSED/
     // NOTICE/AUTH/COUNT/NEG-*) --------------------------------------------
 
-    #[cfg(any(
-        test,
-        feature = "bench-instrumentation",
-        feature = "test-instrumentation"
-    ))]
+    #[cfg(any(test, feature = "test-instrumentation"))]
     pub(in crate::core) fn ingest_relay_events(
         &mut self,
         events: Vec<(SignedEvent, RelayObserved)>,

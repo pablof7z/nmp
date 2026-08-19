@@ -124,20 +124,6 @@ where
         self.by_child.contains_key(child)
     }
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn len(&self) -> usize {
-        self.by_child.len()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn owner_keys(&self) -> usize {
-        self.by_owner.len()
-    }
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn owner_edges(&self) -> usize {
-        self.by_owner.values().map(BTreeSet::len).sum()
-    }
 }
 
 /// Exact structural consistency for one mirrored index.

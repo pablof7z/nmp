@@ -77,16 +77,6 @@ pub(super) struct PendingWrites {
     receipts_by_lane_relay: HashMap<RelayUrl, BTreeSet<ReceiptId>>,
 }
 
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct PendingWriteCounts {
-    pub(super) obligations: usize,
-    pub(super) intent_keys: usize,
-    pub(super) event_keys: usize,
-    pub(super) event_edges: usize,
-    pub(super) lane_relay_keys: usize,
-    pub(super) lane_relay_edges: usize,
-}
-
 /// Reading a row the caller has already proven is live, and panicking when it
 /// is not -- the same contract `HashMap` gives, kept because several write-
 /// plane steps have already established the row exists two statements earlier
@@ -434,22 +424,6 @@ impl PendingWrites {
     }
 
     // -- proofs -----------------------------------------------------------
-
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> PendingWriteCounts {
-        PendingWriteCounts {
-            obligations: self.pending.len(),
-            intent_keys: self.intent_receipts.len(),
-            event_keys: self.event_to_receipts.len(),
-            event_edges: self.event_to_receipts.values().map(BTreeSet::len).sum(),
-            lane_relay_keys: self.receipts_by_lane_relay.len(),
-            lane_relay_edges: self
-                .receipts_by_lane_relay
-                .values()
-                .map(BTreeSet::len)
-                .sum(),
-        }
-    }
 
     /// Exact structural consistency for every mirror this owner keeps, by
     /// identity rather than by count.

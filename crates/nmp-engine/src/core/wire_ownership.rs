@@ -133,32 +133,6 @@ pub(super) struct HandleAtomRemoval {
     /// This handle's last reference to the logical demand went away. The
     /// caller owns deactivating that handle's request targets for it.
     pub(super) demand_released: bool,
-    /// Coverage claim keys this removal had to examine, for the bench census.
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) claims_examined: usize,
-}
-
-#[cfg(feature = "bench-instrumentation")]
-pub(super) struct WireOwnershipCounts {
-    pub(super) pending_atoms: usize,
-    pub(super) pending_resolver_closes: usize,
-    pub(super) handles: usize,
-    pub(super) demand_ref_handles: usize,
-    pub(super) demand_ref_keys: usize,
-    pub(super) demand_refs: usize,
-    pub(super) coverage_ref_handles: usize,
-    pub(super) coverage_ref_keys: usize,
-    pub(super) coverage_refs: usize,
-    pub(super) owner_keys: usize,
-    pub(super) owner_refs: usize,
-    pub(super) reverse_owner_keys: usize,
-    pub(super) coverage_keys: usize,
-    pub(super) coverage_edges: usize,
-    pub(super) demand_keys: usize,
-    pub(super) demand_edges: usize,
-    pub(super) routing_evidence_keys: usize,
-    pub(super) routing_evidence_facts: usize,
-    pub(super) routing_evidence_refs: usize,
 }
 
 #[derive(Default)]
@@ -397,8 +371,6 @@ impl WireOwnership {
         if demand_released {
             discard_edge(&mut self.handles_by_demand, &key, handle);
         }
-        #[cfg(feature = "bench-instrumentation")]
-        let claims_examined = departing_claims.len();
         for claim_key in departing_claims {
             let released = release_ref.clone()(
                 self.coverage_refs_by_handle
@@ -418,8 +390,6 @@ impl WireOwnership {
         HandleAtomRemoval {
             removed,
             demand_released,
-            #[cfg(feature = "bench-instrumentation")]
-            claims_examined,
         }
     }
 
@@ -521,50 +491,6 @@ impl WireOwnership {
 
     // -- census -------------------------------------------------------------
 
-    #[cfg(feature = "bench-instrumentation")]
-    pub(super) fn counts(&self) -> WireOwnershipCounts {
-        WireOwnershipCounts {
-            pending_atoms: self.pending_atoms.len(),
-            pending_resolver_closes: self.pending_resolver_closes.len(),
-            handles: self.atoms_by_handle.len(),
-            demand_ref_handles: self.demand_refs_by_handle.len(),
-            demand_ref_keys: self.demand_refs_by_handle.values().map(BTreeMap::len).sum(),
-            demand_refs: self
-                .demand_refs_by_handle
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            coverage_ref_handles: self.coverage_refs_by_handle.len(),
-            coverage_ref_keys: self
-                .coverage_refs_by_handle
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            coverage_refs: self
-                .coverage_refs_by_handle
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-            owner_keys: self.owner_counts.len(),
-            owner_refs: self.owner_counts.values().map(|(_, count)| count).sum(),
-            reverse_owner_keys: self.handles_by_atom.len(),
-            coverage_keys: self.handles_by_coverage.len(),
-            coverage_edges: self.handles_by_coverage.values().map(BTreeSet::len).sum(),
-            demand_keys: self.handles_by_demand.len(),
-            demand_edges: self.handles_by_demand.values().map(BTreeSet::len).sum(),
-            routing_evidence_keys: self.routing_evidence_owner_counts.len(),
-            routing_evidence_facts: self
-                .routing_evidence_owner_counts
-                .values()
-                .map(BTreeMap::len)
-                .sum(),
-            routing_evidence_refs: self
-                .routing_evidence_owner_counts
-                .values()
-                .flat_map(BTreeMap::values)
-                .sum(),
-        }
-    }
 }
 
 /// Exact structural consistency, rebuilt from the one canonical relation.
