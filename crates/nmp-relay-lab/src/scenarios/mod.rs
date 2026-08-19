@@ -49,7 +49,7 @@ pub fn all() -> Vec<Scenario> {
         scenario_entry!("silent-subscription-cap", "a ceiling the relay never advertised", &["cap-of-nine"], socket::silent_subscription_cap),
         scenario_entry!("advertised-subscription-cap", "a ceiling NMP can read before it asks", &[], socket::advertised_subscription_cap),
         scenario_entry!("two-engines", "two engines, one relay, two connections", &[], socket::two_engines),
-        scenario_entry!("read-gate-unanswered", "NMP does not answer a read-path challenge, and does not say why", &[], auth::read_gate_unanswered),
+        scenario_entry!("read-gate-unanswered", "NMP answers a read-path challenge and the session reaches Ready", &[], auth::read_gate_unanswered),
         scenario_entry!("identity-scoping", "served only what involves your own key", &["drop-scoping"], auth::identity_scoping),
         scenario_entry!("ungated-kind", "only the gated kinds are gated", &[], auth::ungated_kind),
         scenario_entry!("auth-binding", "the challenge and relay tags are actually checked", &[], auth::auth_binding),

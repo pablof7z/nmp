@@ -104,13 +104,14 @@ pub async fn read_gate_unanswered(_mutation: Option<&'static str>) -> Report {
         &phases,
     );
     report.that(
-        "and the session was then denied",
-        phases.iter().any(|p| p.contains("AuthDenied")),
+        "and the read proceeded rather than being denied",
+        phases.iter().any(|p| p.contains("FinishedStoredEvents"))
+            && !phases.iter().any(|p| p.contains("AuthDenied")),
         &phases,
     );
     report.that(
-        "with no AUTH event ever reaching the socket",
-        record.auth_responses().is_empty(),
+        "because the signed AUTH event reached the socket",
+        !record.auth_responses().is_empty(),
         record.auth_responses().len(),
     );
 
@@ -121,9 +122,9 @@ pub async fn read_gate_unanswered(_mutation: Option<&'static str>) -> Report {
         .first()
         .expect("the auth session is visible at all");
     report.that(
-        "the phase is Denied and says nothing further about why",
-        matches!(session.phase, nmp::AuthDiagnosticsPhase::Denied)
-            && session.auth_event_id.is_none(),
+        "the phase is Ready: the CLOSED auth-required was read as a demand, not a refusal",
+        matches!(session.phase, nmp::AuthDiagnosticsPhase::Ready)
+            && session.auth_event_id.is_some(),
         format!("{:?}", session.phase),
     );
     report
@@ -132,9 +133,10 @@ pub async fn read_gate_unanswered(_mutation: Option<&'static str>) -> Report {
 /// Per-subscriber scoping: events `p`-tagged to one key, two authenticated
 /// sessions, and only the involved one is served.
 ///
-/// Driven on raw sockets rather than through NMP, because the finding above
-/// means no `nmp::Engine` can currently authenticate a read session. The
-/// capability has to be proven regardless: without it an AUTH suite is
+/// Driven on raw sockets rather than through NMP: two simultaneous identities
+/// against one relay is a property of the RELAY, and proving it through one
+/// engine's session would conflate the two. The capability has to be proven
+/// regardless: without it an AUTH suite is
 /// vacuously green, since a relay that challenges everybody and then serves
 /// everybody the same rows proves the handshake completed and nothing else.
 pub async fn identity_scoping(mutation: Option<&'static str>) -> Report {
