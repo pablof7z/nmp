@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/nmp-canary",
     # Protocol-neutral, closed structural edit plans over raw tag cells and
     # JSON-object byte spans (#1381). Capability crates compile their own
     # vocabulary into these values; replay needs no module registry.
@@ -69,6 +70,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+nmp-canary = { path = "crates/nmp-canary" }
 nostr = "0.44.4"
 # Collision-resistant 256-bit digest for `nmp-grammar::DescriptorHash`
 # (network-controlled filter contents feed this via `Binding::Derived`; a

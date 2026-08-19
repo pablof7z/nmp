@@ -1,0 +1,318 @@
+//! The findings, as data, so the exerciser can print them and nobody has to
+//! trust a prose summary that drifted from the code.
+//!
+//! Every entry names the file in this crate where the workaround lives. If the
+//! entry says the surface fights you, the code is there; if the entry says a
+//! suspicion was false, the code that proves it is there too.
+
+/// How much application code the fix deletes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Weight {
+    /// Deletes a whole app-side subsystem.
+    Subsystem,
+    /// Deletes a file or a recurring pattern.
+    Pattern,
+    /// Deletes a call site's worth of ceremony.
+    Ceremony,
+    /// Nothing to delete: the suspicion was wrong and this records why.
+    Refuted,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Finding {
+    pub rank: u8,
+    pub weight: Weight,
+    pub title: &'static str,
+    /// The call site we wanted.
+    pub wanted: &'static str,
+    /// The call site we wrote.
+    pub wrote: &'static str,
+    /// One line on what the engine would need.
+    pub needs: &'static str,
+    pub site: &'static str,
+}
+
+pub const FINDINGS: &[Finding] = &[
+    Finding {
+        rank: 1,
+        weight: Weight::Subsystem,
+        title: "An unbounded observation has no current row set, so every screen keeps a parallel table",
+        wanted: "for row in subscription.rows() { render(row) }",
+        wrote: "rows::RowTable -- a BTreeMap<EventId, Row>, a four-arm RowDelta fold, and a full re-sort per frame",
+        needs: "either a readable accumulated set on the unbounded Subscription, or a stated delivery order on RowDelta so the fold is append-only",
+        site: "crates/nmp-canary/src/rows.rs",
+    },
+    Finding {
+        rank: 2,
+        weight: Weight::Subsystem,
+        title: "No author-keyed projection: kind:0 is owned by nobody and reduced by nobody",
+        wanted: "people.get(row.pubkey()) -- latest kind:0, already reduced",
+        wrote: "profiles::ProfileBook, a second query, a latest-wins fold by created_at, a serde_json struct, and a serde_json dependency line",
+        needs: "a metadata capability crate (kind:0 owner + a replaceable materializer), and a re-exported metadata value; the row-set-to-author-keyed-map projection is the general half",
+        site: "crates/nmp-canary/src/profiles.rs",
+    },
+    Finding {
+        rank: 3,
+        weight: Weight::Subsystem,
+        title: "There is no mute capability, in the engine built for 'follows minus mutes'",
+        wanted: "mutes.mute(target) -- a semantic edit, like follow",
+        wrote: "people::Mutes -- read the current kind:10000, rebuild the p rows, publish the whole list. Read-modify-write with no CAS, one file from nmp-nip02's materializer that abolishes exactly this",
+        needs: "a NIP-51 crate owning kind:10000 with a ReplaceableMaterializerSpec, the same shape as nmp_nip02::follow_capability",
+        site: "crates/nmp-canary/src/people.rs",
+    },
+    Finding {
+        rank: 4,
+        weight: Weight::Pattern,
+        title: "Live per-relay delivery state requires re-implementing collect_receipt_result",
+        wanted: "for state in sending.progress() { paint(state) }",
+        wrote: "composer::Sending::drain -- recv_timeout on a #[doc(hidden)] FifoReceiver, plus a Lagged arm that rebuilds from publish_queue because ReceiptReplayCursor is doc-hidden",
+        needs: "a receipt view that folds facts into a current DeliveryState and survives lag itself, beside the terminal-only ReceiptStream::result",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 5,
+        weight: Weight::Pattern,
+        title: "PublishQueueEntry drops the reason a write is still routing, so the per-row and post-restart views cannot say who it is waiting on",
+        wanted: "the same delivery vocabulary live and after a restart",
+        wrote: "composer::Sending::drain reads WriteFact::Destinations { awaiting_author_routes } -- measured: one author named for a parked post. composer::Composer::delivery_of reads PublishQueueEntry, which carries route_complete and NOT awaiting_author_routes, so it can only say 'still routing'",
+        needs: "awaiting_author_routes on PublishQueueEntry; the fact is already computed and already durable enough to re-emit on replay",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 6,
+        weight: Weight::Pattern,
+        title: "Thread position is implemented, correct, and #[doc(hidden)] -- and takes &Event, which a pending row cannot produce",
+        wanted: "row.thread_position()",
+        wrote: "thread::parent_of -- import the doc-hidden ThreadPosition, call row.signed_event(), get None for the message the user just wrote, guess the depth",
+        needs: "ThreadPosition::read on Row (it already works there: Row: RootScope reads the same position through event_for_store), and un-hide it",
+        site: "crates/nmp-canary/src/thread.rs",
+    },
+    Finding {
+        rank: 7,
+        weight: Weight::Pattern,
+        title: "The three tagging doors disagree about what a target is",
+        wanted: "one target type for reply, react, repost",
+        wrote: "composer::react and composer::repost take &Event via row.signed_event() and fail on pending rows; composer::reply takes &impl RootScope and works on them",
+        needs: "nmp_nip25::react and nmp_nip18::repost to take &impl RootScope, exactly as nmp::reply_to does",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 8,
+        weight: Weight::Pattern,
+        title: "The read grammar is stringly typed at every identity position",
+        wanted: "Filter { authors: Binding::keys([alice, bob]) }",
+        wrote: "Binding::Literal(BTreeSet<String>) built by calling PublicKey::to_hex on values the app already holds decoded -- authors, ids, and every tag position",
+        needs: "typed Binding constructors (keys/ids) beside the raw string set; the convention is 'internals take the decoded type' and this is the one place they do not",
+        site: "crates/nmp-canary/src/profiles.rs, thread.rs, notifications.rs",
+    },
+    Finding {
+        rank: 9,
+        weight: Weight::Pattern,
+        title: "Two accounts live at once, one reactive identity",
+        wanted: "Binding::Reactive(IdentityField::Account(key))",
+        wrote: "notifications::mentions_of_current and notifications::mentions_of -- structurally different queries for one question, so the two accounts share no atom, no coverage, and no code path",
+        needs: "an IdentityField variant naming a session account; the type's own doc already says it is meant to grow",
+        site: "crates/nmp-canary/src/notifications.rs",
+    },
+    Finding {
+        rank: 10,
+        weight: Weight::Pattern,
+        title: "Rooms are async-only, feeds are blocking-only, and the executor is doc-hidden",
+        wanted: "one delivery shape, or an executor the app can legitimately obtain",
+        wrote: "room::Room drives GroupObservation::next().await while feed::FollowsFeed blocks on Subscription::recv; the crate depends on tokio because Engine::adapter_runtime is #[doc(hidden)] and documented as 'not an app scheduling API'",
+        needs: "either un-hide AsyncSubscription/observe_async as the documented direct-Rust surface, or give GroupObservation a blocking recv; today the app must pick both. Related: the four delivery types spell one act four ways -- Subscription::recv, AsyncSubscription::next, GroupObservation::next/next_within/latest, FollowObservation::recv/recv_timeout",
+        site: "crates/nmp-canary/src/room.rs, feed.rs",
+    },
+    Finding {
+        rank: 11,
+        weight: Weight::Pattern,
+        title: "Reading tags means re-implementing every NIP in the view layer",
+        wanted: "row.tag_values('h')",
+        wrote: "rows::first_tag_value and rows::tag_values -- Row::tags() returns nostr::Tags, a type nmp does not re-export, so the app iterates an un-nameable value down to &[String] and matches cell 0 by string",
+        needs: "tag accessors on Row, or a re-exported Tags; every kind:0/h/e/p read in this app goes through the hand-rolled pair",
+        site: "crates/nmp-canary/src/rows.rs",
+    },
+    Finding {
+        rank: 12,
+        weight: Weight::Pattern,
+        title: "A live query is a value, so a growing author set means cancel-and-reopen",
+        wanted: "profiles.add_authors(new_authors)",
+        wrote: "profiles::profiles_of_authors rebuilt with a bigger literal set, discarding the engine's accumulated coverage for the authors that did not change -- or profiles_of_query, which declares the feed's whole Demand a second time inside the profile query",
+        needs: "a way to point a Derived binding at an observation the app already holds, or a mutable literal binding on an open observation",
+        site: "crates/nmp-canary/src/profiles.rs",
+    },
+    Finding {
+        rank: 13,
+        weight: Weight::Ceremony,
+        title: "The follow predicate is a stream with no readable latest value",
+        wanted: "if follows.contains(target) { ... } at paint time",
+        wrote: "people::FollowButton -- an OS thread per open person sheet, pumping FollowObservation::recv into an Arc<Mutex<Option<FollowSnapshot>>>",
+        needs: "FollowObservation::latest(), which nmp_nip29::GroupObservation already has; two capability crates, two observation shapes, one of them answerable",
+        site: "crates/nmp-canary/src/people.rs",
+    },
+    Finding {
+        rank: 14,
+        weight: Weight::Ceremony,
+        title: "'follows minus mutes' is 40 lines of struct literal and half of it restates NIP-02",
+        wanted: "following().minus(muted())",
+        wrote: "feed::follows_minus_mutes -- Binding::SetOp(Box::new(SetOp { op: SetAlgebra::Diff, operands: vec![Derived{..}, Derived{..}] })), with the Selector::Tag(\"p\") projection written by the app because nmp_nip02 exports the kind:3 Demand and not the Binding that projects it",
+        needs: "combinator methods on Binding, and a follows_binding() beside current_account_demand() in nmp-nip02",
+        site: "crates/nmp-canary/src/feed.rs",
+    },
+    Finding {
+        rank: 15,
+        weight: Weight::Ceremony,
+        title: "A shortfall names no binding, so an empty screen cannot say which set was empty",
+        wanted: "ShortfallFact::EmptyDerivedSet { which: <the binding> }",
+        wrote: "feed::EmptyState -- match the variant, render a generic sentence. NoPlannedSource and LocalLimit carry a ConcreteFilter that nmp does not re-export, so the app can see the variant and not the atom",
+        needs: "either re-export ConcreteFilter or put a branch/binding identifier on ShortfallFact; 'you follow nobody' and 'your mute list is unreachable' are the same word today",
+        site: "crates/nmp-canary/src/feed.rs",
+    },
+    Finding {
+        rank: 16,
+        weight: Weight::Ceremony,
+        title: "The send indicator on a row is a paged store read per row",
+        wanted: "one delivery lookup for a visible page",
+        wrote: "composer::Composer::delivery_of -- publish_queue_for_event(id, None, 4), take the first entry, hide the rest",
+        needs: "a batched event-id -> delivery-state read; the paging exists because several receipts can own identical bytes, which is right, but the per-row cost is not",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 17,
+        weight: Weight::Ceremony,
+        title: "Two kind vocabularies: Filter::kinds is u16, everything else is Kind",
+        wanted: "one kind type",
+        wrote: "feed::TEXT_NOTE = 1 as a u16 constant beside nmp::TEXT_NOTE_KIND (a Kind) and nmp_nip18::REPOST_KIND (a u16)",
+        needs: "Filter::kinds over Kind, or a stated rule for which side of the read/write line uses which",
+        site: "crates/nmp-canary/src/feed.rs",
+    },
+    Finding {
+        rank: 18,
+        weight: Weight::Ceremony,
+        title: "IndexedTagName::new is fallible for constants every app writes",
+        wanted: "IndexedTagName::E",
+        wrote: ".expect(\"'e' is an ASCII letter\") at every tag-filter call site",
+        needs: "associated constants for the single-letter names, or a const constructor",
+        site: "crates/nmp-canary/src/thread.rs, notifications.rs",
+    },
+    Finding {
+        rank: 19,
+        weight: Weight::Ceremony,
+        title: "Six constructors over three non-independent axes",
+        wanted: "Engine::new(config).with_capabilities(..).with_routing(..)",
+        wrote: "Engine::new_with_capabilities_and_routing(config, caps, route) -- reaching the route provider requires passing the capability vec, and there is no new_with_routing",
+        needs: "one constructor plus builder methods, or three optional config-adjacent fields; every axis already has a natural 'nothing' value",
+        site: "crates/nmp-canary/src/app.rs",
+    },
+    Finding {
+        rank: 20,
+        weight: Weight::Ceremony,
+        title: "A forgotten capability is a cold-start failure caused by a write made months earlier",
+        wanted: "the write door registers what it needs",
+        wrote: "app::Canary::capabilities() -- name every capability the app could ever write, always, because a retained operation whose program is absent refuses store open and there is no way to ask the store what it retains",
+        needs: "at minimum a documented link at the write site; better, a store-open error that names the missing capability and a door to enumerate retained programs without opening",
+        site: "crates/nmp-canary/src/app.rs",
+    },
+    Finding {
+        rank: 21,
+        weight: Weight::Ceremony,
+        title: "Diagnostics are engine-global and join to a query only by rendered filter JSON",
+        wanted: "subscription.diagnostics()",
+        wrote: "app::Canary::diagnostics() -- Engine::observe_diagnostics, then match RelayDiagnosticsSnapshot.coverage[i].filter (the exact wire JSON, as a String) against a rendering of the app's own Demand that the app cannot produce",
+        needs: "per-observation diagnostics off the Subscription handle, or a stable non-string key shared by FilterCoverageEntry and SourceEvidence",
+        site: "crates/nmp-canary/src/app.rs",
+    },
+    Finding {
+        rank: 22,
+        weight: Weight::Ceremony,
+        title: "Reaction::Emoji is publicly constructible, bypassing Reaction::emoji's refusals",
+        wanted: "one way in",
+        wrote: "Reaction::emoji(symbol)? -- correct, and Reaction::Emoji(s) compiles just as well and skips the empty-string and :shortcode: checks the constructor exists to enforce",
+        needs: "a private field or a non_exhaustive variant, so the validating constructor is the only door",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 23,
+        weight: Weight::Ceremony,
+        title: "A window and a Filter::limit are mutually exclusive, and a view-layer predicate needs both",
+        wanted: "'newest 50 that are not mine', paged",
+        wrote: "notifications over-fetches and filters in the view layer, so no page size is correct; feed takes the window and lets each relay pick its own bound",
+        needs: "nothing on the window side -- the exclusion is right. The gap is negation in the grammar: SetAlgebra::Diff needs a first operand and 'everyone' is not a Binding",
+        site: "crates/nmp-canary/src/notifications.rs",
+    },
+    Finding {
+        rank: 24,
+        weight: Weight::Ceremony,
+        title: "The bech32 encode direction exists only inside the content-composition trait",
+        wanted: "npub_of(pubkey) at the user boundary, symmetrical with decode_nostr_entity",
+        wrote: "profiles::npub -- call nmp::Mention::render(&key), whose documented job is 'what the reader sees, including NIP-21's nostr: scheme', then strip the scheme off the front to get the npub a profile header wants",
+        needs: "an encode function beside decode_nostr_entity; showing a key to a human is as much a user boundary as accepting one, and today the only door prepends a scheme for a different purpose",
+        site: "crates/nmp-canary/src/profiles.rs",
+    },
+    Finding {
+        rank: 25,
+        weight: Weight::Refuted,
+        title: "REFUTED: publish does not return the event id",
+        wanted: "-",
+        wrote: "composer::Composer::send reads stream.event_id directly. ReceiptStream carries { id: ReceiptId, event_id: EventId, statuses }, decided in the acceptance transaction, post-restamp in every case",
+        needs: "nothing",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 26,
+        weight: Weight::Refuted,
+        title: "REFUTED: the app must insert an optimistic row",
+        wanted: "-",
+        wrote: "composer inserts nothing. RowSignature::Pending rows are query-visible from acceptance. The real trap is adjacent: CacheMode::Strict -- which a host-pinned room timeline wants -- would hide the user's own unsent message, and nothing near either type says so",
+        needs: "a documented note on CacheMode about pending rows",
+        site: "crates/nmp-canary/src/composer.rs",
+    },
+    Finding {
+        rank: 27,
+        weight: Weight::Refuted,
+        title: "REFUTED: evidence sits beside the rows rather than on the absence",
+        wanted: "-",
+        wrote: "feed::FollowsFeed::empty_state reads ShortfallFact::NoResolvedDemand, which is precisely 'this derived set is currently empty' attached to the emptiness. The evidence IS on the absence. What is missing is which absence -- see finding 15",
+        needs: "see finding 15",
+        site: "crates/nmp-canary/src/feed.rs",
+    },
+    Finding {
+        rank: 28,
+        weight: Weight::Refuted,
+        title: "REFUTED: derived set algebra is declarative but not live",
+        wanted: "-",
+        wrote: "measured in the exerciser: alice's feed holds bob's post, alice publishes a kind:10000 naming bob, and the SAME open observation drops to zero rows with no re-query and no cancel. SetAlgebra::Diff re-resolves through a Derived binding on a locally accepted row. This is the single best thing on the surface and it is what makes the 40 lines in feed.rs worth writing",
+        needs: "nothing; give it combinators (finding 14) and it is the feature",
+        site: "crates/nmp-canary/src/feed.rs",
+    },
+    Finding {
+        rank: 29,
+        weight: Weight::Refuted,
+        title: "REFUTED: NIP-29 rooms are underserved",
+        wanted: "-",
+        wrote: "room::Room is the thinnest surface in the app. Group::publish puts the h row inside the signed bytes and mints WriteRouting::Explicit(hosts) in one call, and a kind:7 reaction into a room composes from nmp_nip25::react with no special case. GroupSnapshot carries per_host and disagreements",
+        needs: "nothing; the gaps around it are the generic ones above",
+        site: "crates/nmp-canary/src/room.rs",
+    },
+];
+
+/// Print the catalogue.
+pub fn report() -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "nmp-canary findings ({} entries)\n", FINDINGS.len());
+    for finding in FINDINGS {
+        let _ = writeln!(
+            out,
+            "{:>2}. [{:?}] {}\n    wanted: {}\n    wrote:  {}\n    needs:  {}\n    site:   {}\n",
+            finding.rank,
+            finding.weight,
+            finding.title,
+            finding.wanted,
+            finding.wrote,
+            finding.needs,
+            finding.site,
+        );
+    }
+    out
+}
