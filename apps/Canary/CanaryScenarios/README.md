@@ -68,28 +68,25 @@ clean machine it also needs several Homebrew packages installed first
 zstd libuv perl`), which is real, sometimes multi-minute cost that
 `swift test` should not silently pay as a side effect of running.
 
-## Three scenarios are red on purpose
+## Two scenarios are red on purpose
 
 A full `swift test` is **not** all-green, and that is the honest state
-rather than a broken checkout. Three scenarios fail because the defect they
-protect against is currently present, and none has been weakened to make
+rather than a broken checkout. Two scenarios fail because the defect they
+protect against is currently present, and neither has been weakened to make
 it pass (`docs/internals/canary.md`: a threshold is not raised, a scenario is
 not reshaped):
 
 - `C6DeepWindowingTests` -- an `.expandable` window's first advance can
   rewrite rows already delivered instead of only extending the page, and
   `WindowLoad.returned(added:)` is not a usable progress signal (#1886).
-- `C15NIP42AuthTests` -- NIP-42 AUTH deadlocks against a relay that
-  challenges in response to a request, i.e. strfry (#1889). Every
-  precondition in the file passes; NMP transmits nothing on the protected
-  session. Set `CANARY_KEEP_LOGS=1` to keep the relay work directory and
-  read strfry's own frame log.
 - `C17RepeatedLifecycleChurnTests.testThreeHundredDistinctObservations...`
   -- engine-lifetime memory grows linearly in distinct filters observed
   (#1846).
 
-Everything else passes. If a scenario other than those three is red, that is
-a real regression.
+Everything else passes, `C15NIP42AuthTests` included since #1889 closed. Set
+`CANARY_KEEP_LOGS=1` to keep C15's relay work directory and read strfry's own
+frame log. If a scenario other than those two is red, that is a real
+regression.
 
 ## What this means end to end
 

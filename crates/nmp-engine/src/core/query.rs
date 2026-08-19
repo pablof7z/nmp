@@ -985,17 +985,6 @@ impl CoreState {
 
         let mut kept: Vec<(RelaySessionKey, Vec<WireOp>)> = Vec::new();
         for (session, ops) in &wire_delta.ops {
-            // A PROTECTED session's ops are dropped from the wire delta
-            // entirely until its exact current generation has completed AUTH
-            // (#8): its REQs park (the AUTH reducer's ready transition,
-            // `finish_auth_ok`, replays the full planned set on readiness,
-            // so nothing is lost), and no CLOSE is needed pre-auth — nothing
-            // was ever sent on that socket for this plan to withdraw.
-            if session.authenticate_as.is_some()
-                && !self.auth_ready_sessions.contains_key(session)
-            {
-                continue;
-            }
             let mut kept_ops: Vec<WireOp> = Vec::new();
             for op in ops {
                 match op {

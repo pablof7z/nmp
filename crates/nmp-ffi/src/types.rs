@@ -270,10 +270,11 @@ pub struct FfiDemand {
     pub routing: FfiReadRouting,
     /// The identity these reads authenticate as, a 32-byte hex public key.
     /// `None` — the default and the ordinary case — reads on the connection
-    /// bound to no identity, which today never authenticates: a relay's
-    /// NIP-42 challenge on such a connection is currently dropped rather
-    /// than routed to the installed policy (issue #1889). `Some(key)` pins
-    /// the reads to a session that authenticates as `key`.
+    /// bound to no identity, which never authenticates: it declares no key,
+    /// so there is nothing a kind:22242 proof could be signed as and a
+    /// relay's challenge on that connection is dropped rather than routed to
+    /// the installed policy. `Some(key)` pins the reads to a session that
+    /// authenticates as `key`.
     pub authenticate_as: Option<String>,
     pub cache: FfiCacheMode,
     pub freshness: FfiFreshness,

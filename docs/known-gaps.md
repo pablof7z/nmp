@@ -22,18 +22,14 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   Whatever closes it must keep NMP the owner of when/what to sign, with the app's
   adapter merely interfacing to the hardware; the deleted app-supplied signer
   mailbox (#1290) inverted that ownership and was removed rather than kept.
-- **NIP-42 deadlocks against any relay that challenges in response to a
-  request (#1889).** An app naming `authenticateAs` against strfry
-  never exchanges a byte with it: NMP withholds a protected session's REQs
-  until AUTH completes and only starts AUTH on an INBOUND `["AUTH", challenge]`
-  frame, while strfry only challenges in response to a request it wants to
-  gate. The query sits at `awaitingAuth(phase: .awaitingChallenge)` forever,
-  the installed `NMPAuthPolicy` is never consulted, and `AuthDiagnostics`
-  reports a placeholder row indistinguishable from a session that has merely
-  just connected. Every green NIP-42 test either injects a synthetic challenge
-  into the reducer or uses a relay hand-built to challenge unsolicited on
-  connect, which is why nothing caught it. Canary C15 is the committed
-  reproduction and is red until this closes.
+- **A NIP-42 challenge on a session bound to no identity is dropped, by
+  design.** `authenticate_as: None` is a connection that declares no identity,
+  so there is nothing a kind:22242 proof could be signed as and
+  `on_auth_challenge` returns without consulting any policy. Routing it to the
+  current account instead would be a different feature — an identity
+  *discovered* rather than *declared* — and would credit an unbound session's
+  coverage key to an identity it acquired mid-connection. An app that wants a
+  read authenticated says so, with `authenticateAs`.
 - **AUTH-policy callback inversion still open (#783).**
 - **Session storage is app-owned: NMP ships no plaintext checkpoint and no
   automatic Keychain/Keystore session store.** Transactional app-owned session

@@ -583,7 +583,7 @@ mod relay_worker_reconciliation_tests {
     }
 
     #[test]
-    fn fresh_protected_read_opens_one_worker_without_a_req_preamble_and_releases_on_withdrawal() {
+    fn fresh_protected_read_opens_one_worker_and_releases_it_on_withdrawal() {
         let signer = Keys::generate().public_key();
         let relay = RelayUrl::parse("ws://127.0.0.1:9").unwrap();
         let session = RelaySessionKey::new(relay.clone(), Some(signer));
@@ -639,7 +639,10 @@ mod relay_worker_reconciliation_tests {
                 .count(),
             1
         );
-        assert!(!first.iter().any(|effect| matches!(
+        // #1889: the identity-bound session's REQ is in the delta, exactly as
+        // an unbound session's would be. A relay that only challenges IN
+        // RESPONSE to a request has nothing to answer until this is sent.
+        assert!(first.iter().any(|effect| matches!(
             effect,
             Effect::Wire(delta)
                 if delta.ops.iter().any(|(candidate, ops)| candidate == &session

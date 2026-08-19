@@ -476,6 +476,14 @@ impl CoreState {
         if let Some((source, reason)) = denial {
             self.deny_write_lanes_for_auth(&session, source, reason, &mut effects);
         }
+        // A policy answer is where an AUTH session can go TERMINAL (`Denied`,
+        // `Error`) — nothing further happens on that epoch, so no later wire
+        // beat exists to carry its row into a diagnostics snapshot. Without
+        // this marker, the phase an app's OWN refusal produced is unreachable
+        // through `observe_diagnostics()` — the very surface that refusal is
+        // supposed to be visible on. It is the LAZY marker: the runtime
+        // coalesces it and builds no snapshot when no observer is attached.
+        effects.push(Effect::DiagnosticsChanged);
         self.refresh_all_observation_evidence(&mut effects);
         effects
     }
@@ -770,12 +778,17 @@ impl CoreState {
         // then dropped" fact).
         self.connected_relays.insert(session.clone());
         self.ever_connected_relays.insert(session.clone());
+        // The transport gates an identity-bound generation's ordinary
+        // outbound frames until `Effect::ReleaseInitialRead`, and THIS entry
+        // is what authorizes that release (`on_auth_probe_released`). It is
+        // per GENERATION, so a session already known to require AUTH gets one
+        // too (#1889): skipping it because an EARLIER generation was
+        // challenged left the new socket gated forever — the replayed REQ
+        // never reached the relay, so the relay never challenged, so
+        // `finish_auth_ok` never released it. That is the same deadlock, one
+        // reconnect later.
         if !same_physical_session && session.authenticate_as.is_some() {
-            if self.auth_required_sessions.contains(&session) {
-                self.auth_probe_sessions.remove(&session);
-            } else {
-                self.auth_probe_sessions.insert(session.clone(), handle);
-            }
+            self.auth_probe_sessions.insert(session.clone(), handle);
         }
         // Reconnect (new generation): clear stale attribution, then rebuild
         // every currently-planned REQ for this session. The first Connected
@@ -789,64 +802,71 @@ impl CoreState {
         // broad Public request repeats the same live-first NIP-77 handoff as
         // an ordinary recompile; it must never regress to reconcile-first or
         // silently change strategy on reconnect (#563).
-        // ONLY a session bound to no identity replays its planned REQs at connect time. A
-        // protected session's REQs park until the AUTH reducer's ready
-        // transition (`finish_auth_ok`) proves THIS generation completed
-        // AUTH (#8) — sending them earlier would leak the protected demand
-        // onto an unauthenticated socket and record attribution snapshots no
-        // honest EOSE can ever discharge.
-        if session.authenticate_as.is_none() {
-            if let Some(reqs) = planned_read_reqs.as_ref() {
-                // A new websocket generation has no live subscriptions even
-                // if the previous generation's accepted-wire owner map still
-                // names them. Fresh-generation teardown above retires that
-                // state before this replay is built.
-                if !same_wire_generation {
-                    self.nip77.drop_live_for_relay(&session.relay);
-                    self.nip77.take_handoffs_probed_on_relay(&session.relay);
-                }
+        // EVERY read session replays its planned REQs at connect time, whether
+        // or not it names an identity. A relay that only challenges in
+        // response to a request (strfry) never speaks first, so withholding
+        // the REQ until AUTH completes and starting AUTH only on an inbound
+        // challenge deadlocks both sides (#1889). The REQ goes out; the relay
+        // answers `CLOSED auth-required` plus `["AUTH", challenge]`; the AUTH
+        // reducer's ready transition (`finish_auth_ok`) replays the full
+        // planned set once this exact generation is authenticated.
+        if let Some(reqs) = planned_read_reqs.as_ref() {
+            // A new websocket generation has no live subscriptions even
+            // if the previous generation's accepted-wire owner map still
+            // names them. Fresh-generation teardown above retires that
+            // state before this replay is built. NIP-77 state is relay-keyed
+            // and belongs to the unauthenticated socket alone (#8), so a
+            // protected generation never retires it.
+            if !same_wire_generation && session.authenticate_as.is_none() {
+                self.nip77.drop_live_for_relay(&session.relay);
+                self.nip77.take_handoffs_probed_on_relay(&session.relay);
+            }
 
-                let mut plain_reqs = Vec::new();
-                let mut handoffs = Vec::new();
-                for req in reqs {
-                    self.install_plan_execution_metadata(
-                        req.sub_id.clone(),
-                        req.filter.clone(),
-                        req.coverage_claims.clone(),
-                        req.owner_demands.clone(),
-                        req.provenance.iter().map(|fact| fact.lane).collect(),
-                    );
-                    if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
+            let mut plain_reqs = Vec::new();
+            let mut handoffs = Vec::new();
+            for req in reqs {
+                self.install_plan_execution_metadata(
+                    req.sub_id.clone(),
+                    req.filter.clone(),
+                    req.coverage_claims.clone(),
+                    req.owner_demands.clone(),
+                    req.provenance.iter().map(|fact| fact.lane).collect(),
+                );
+                if self.wire_request_is_live(&session, &req.sub_id, &req.filter, handle) {
+                    continue;
+                }
+                // The live-first NIP-77 handoff is PUBLIC-session-only (#8):
+                // the probe verdict was earned on the unauthenticated socket
+                // and proves nothing about an authenticated session's view.
+                // `query.rs`'s ordinary-recompile path carries the identical
+                // predicate.
+                if req.filter.limit.is_none() && session.authenticate_as.is_none() {
+                    if let Some(probed) = self.prober.probed(&session.relay) {
+                        handoffs.push((probed, req.sub_id.clone(), req.filter.clone()));
                         continue;
                     }
-                    if req.filter.limit.is_none() {
-                        if let Some(probed) = self.prober.probed(&session.relay) {
-                            handoffs.push((probed, req.sub_id.clone(), req.filter.clone()));
-                            continue;
-                        }
-                    }
-                    self.record_observed_request(RequestSend {
-                        session: &session,
-                        sub_id: &req.sub_id,
-                        filter: &req.filter,
-                        coverage_claims: req.coverage_claims.clone(),
-                        owner_demands: req.owner_demands.clone(),
-                        lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
-                        replay: true,
-                        event_failure_target: EventFailureTarget::ThisSend,
-                    });
-                    plain_reqs.push(req.clone());
                 }
-                // Keep the replay boundary even when every planned request is
-                // already live on this exact handle. The runtime preserves
-                // its empty NMP reconnect preamble without resending anything.
-                effects.push(Effect::Replay(
-                    session.clone(),
-                    self.attempted_replay(&session, plain_reqs),
-                ));
-                for (probed, sub_id, filter) in handoffs {
-                    self.begin_neg_handoff(probed, sub_id, None, filter, &mut effects);
-                }
+                self.record_observed_request(RequestSend {
+                    session: &session,
+                    sub_id: &req.sub_id,
+                    filter: &req.filter,
+                    coverage_claims: req.coverage_claims.clone(),
+                    owner_demands: req.owner_demands.clone(),
+                    lanes: req.provenance.iter().map(|fact| fact.lane).collect(),
+                    replay: true,
+                    event_failure_target: EventFailureTarget::ThisSend,
+                });
+                plain_reqs.push(req.clone());
+            }
+            // Keep the replay boundary even when every planned request is
+            // already live on this exact handle. The runtime preserves
+            // its empty NMP reconnect preamble without resending anything.
+            effects.push(Effect::Replay(
+                session.clone(),
+                self.attempted_replay(&session, plain_reqs),
+            ));
+            for (probed, sub_id, filter) in handoffs {
+                self.begin_neg_handoff(probed, sub_id, None, filter, &mut effects);
             }
         }
         // NIP-11 is one-shot HTTP evidence, not a stream. Resolve it off the

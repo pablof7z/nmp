@@ -112,11 +112,11 @@ value; an app callback does not decide per frame.
 
 Diagnostics is SHAPED to retain challenge, connection generation,
 identity/policy reference, response result and error without exposing secrets.
-It is populated on the write path. On a protected READ against a relay that
-challenges only in response to a request, it is not (#1889): that session gets
-a hardcoded `AwaitingChallenge` row with no challenge, no policy reference and
-no result, and `authenticated`/`rejected` are unreachable on that path alone.
-Read `docs/known-gaps.md` before building on these fields.
+It is populated on both the write path and the read path (#1889): a protected
+read transmits its request, the relay's challenge answers it, and the session's
+row carries the real epoch, challenge descriptor, policy/signer binding and
+signed AUTH event id. The hardcoded `AwaitingChallenge` row is only what a
+protected session reads as between connecting and its first challenge.
 
 AUTH never silently changes current pubkey, retargets another write, partitions
 the shared cache, or grants protocol-host authority to an arbitrary relay.
