@@ -13,7 +13,7 @@
 //! capability crate composing the engine it runs against, not an inversion:
 //! `nmp` never names `nmp-nip02` back. A direct-Rust app that wants NIP-02
 //! names two crates instead of one -- the uniform two-crate cost every
-//! capability now pays for direct-Rust reach; `nmp-ffi`/Swift/Kotlin still
+//! capability now pays for direct-Rust reach; a projection layer would still
 //! get it for free through the one staticlib.
 
 mod demand;
