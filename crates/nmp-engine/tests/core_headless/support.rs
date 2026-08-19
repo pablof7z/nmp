@@ -28,10 +28,7 @@ use nmp_grammar::{
 use nmp_grammar::{Demand, LiveQuery};
 use nmp_router::{SubId, WireOp};
 use nmp_router_testkit::FixtureRoutingFacts;
-use nmp_store::{
-    AcceptWrite, CoverageInterval, PublishQueueAttemptOutcome,
-    RedbStore, RelayObserved,
-};
+use nmp_store::{CoverageInterval, PublishQueueAttemptOutcome, RedbStore, RelayObserved};
 use nmp_transport::{DisconnectReason, HandoffResult, RelayFrame, RelayHandle};
 use nostr::{Keys, Kind, RelayMessage, RelayUrl, SubscriptionId, Timestamp, UnsignedEvent};
 

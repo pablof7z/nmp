@@ -15,13 +15,9 @@
 //! impl EngineCore {
 //!     pub fn handle(&mut self, msg: EngineMsg) -> Vec<Effect>;
 //!     pub fn tick(&mut self, now: nostr::Timestamp) -> Vec<Effect>;
-//!     pub fn next_deadline(&self) -> Result<Option<nostr::Timestamp>, PersistenceError>;
+//!     pub fn next_deadline(&self) -> Option<nostr::Timestamp>;
 //! }
 //! ```
-//!
-//! The deadline door reads two durable indexes, so it can fail; `Ok(None)`
-//! means the driver has genuinely nothing to wake up for and never that the
-//! store could not be read (#763).
 //!
 //! `CoreState` performs synchronous durable I/O through its `RedbStore`, but
 //! spawns no threads, touches no socket, and imposes no runtime. This is the
@@ -3036,28 +3032,26 @@ impl CoreState {
     /// another `.min()` term in here -- the runtime driver itself never
     /// needs to change to pick up a new deadline source.
     ///
-    /// The durable terms are fallible, and this door hands their failures
-    /// straight to its caller rather than folding
-    /// them into `None` (#763). The distinction is the whole point: `Ok(None)`
-    /// tells the driver to park on a plain `recv()` forever, which is correct
-    /// only when there is genuinely nothing to wake up for. A read that could
-    /// not answer is not that, and the delivery term reaching here as
-    /// `.ok().flatten()` is how a durable, due obligation could stop being
-    /// scheduled with nothing recording why. `runtime::engine_loop` degrades
-    /// the store on `Err`, which is the #122 fact an app already reads.
-    pub(in crate::core) fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
-        let expiry = self.store.next_expiration()?;
+    /// The two durable terms are index reads that can fail. A failed read is
+    /// folded in here as "this term names no deadline", because that is the
+    /// only thing any caller ever did with the failure: the store is a cache
+    /// of durable rows, not the engine's memory, and a read that could not
+    /// answer costs this pass only -- the next message re-reads it, and the
+    /// durable rows are untouched either way. Nothing is lost that the next
+    /// boot's recovery does not rebuild from those same rows.
+    pub(in crate::core) fn next_deadline(&self) -> Option<Timestamp> {
+        let expiry = self.store.next_expiration().ok().flatten();
         let neg_liveness = self
             .nip77
             .earliest_liveness_deadline(NEG_LIVENESS_DEADLINE_SECS);
-        let delivery = self.store.next_publish_queue_deadline()?;
+        let delivery = self.store.next_publish_queue_deadline().ok().flatten();
         let request_claim_transfer = self
             .pending_request_claim_transfers
             .values()
             .map(|pending| pending.due)
             .min();
         let request_retry = self.attempts.next_retry_due();
-        Ok([
+        [
             expiry,
             neg_liveness,
             delivery,
@@ -3066,7 +3060,7 @@ impl CoreState {
         ]
         .into_iter()
         .flatten()
-        .min())
+        .min()
     }
 
     pub(in crate::core) fn handle(&mut self, msg: EngineMsg) -> Vec<Effect> {

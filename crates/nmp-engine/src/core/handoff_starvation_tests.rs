@@ -147,7 +147,7 @@ fn a_handoff_that_can_never_arrive_must_not_starve_its_relay() {
     for step in 0..6u64 {
         let now = Timestamp::from(1_000 + step * 600);
         dispatched_b |= publish_correlation(&core.tick(now), &session).is_some();
-        if let Some(due) = core.next_deadline().expect("deadline peek") {
+        if let Some(due) = core.next_deadline() {
             dispatched_b |= publish_correlation(&core.tick(due), &session).is_some();
         }
         let reconnected = TransportRelayHandle {

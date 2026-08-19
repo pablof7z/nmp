@@ -114,13 +114,8 @@ mod outbox_resolver_tests {
         facts: FixtureRoutingFacts,
         event: &SignedEvent,
     ) -> RouteAnswer {
-        let resolution = EngineCore::new_with_fixture_routing_facts(store, facts, 10)
-            .resolve_routes(&WriteRouting::Auto, event);
-        assert!(
-            resolution.parent_provenance_error.is_none(),
-            "the ordinary temporary-store fixture has no injected failure: {resolution:?}"
-        );
-        resolution.answer
+        EngineCore::new_with_fixture_routing_facts(store, facts, 10)
+            .resolve_routes(&WriteRouting::Auto, event)
     }
 
     // ---- the four sources -------------------------------------------------

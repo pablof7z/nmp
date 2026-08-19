@@ -334,7 +334,7 @@ impl EngineCore {
         self.state.clock()
     }
 
-    pub fn next_deadline(&self) -> Result<Option<Timestamp>, PersistenceError> {
+    pub fn next_deadline(&self) -> Option<Timestamp> {
         self.state.next_deadline()
     }
 

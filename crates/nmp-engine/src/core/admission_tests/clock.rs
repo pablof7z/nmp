@@ -62,7 +62,7 @@ fn nip77_liveness_is_anchored_to_admission_time_without_maintenance() {
         .into_iter()
         .any(|op| matches!(op, WireOp::Req(_, filter) if filter.limit == Some(0))));
     assert_eq!(
-        core.next_deadline().expect("deadline read"),
+        core.next_deadline(),
         Some(admission_time + NEG_LIVENESS_DEADLINE_SECS)
     );
     assert_eq!(core.maintenance_turn_count(), 0);
@@ -108,7 +108,7 @@ fn nip77_reconnect_liveness_is_anchored_to_connect_time_without_maintenance() {
         .into_iter()
         .any(|op| matches!(op, WireOp::Req(_, filter) if filter.limit == Some(0))));
     assert_eq!(
-        core.next_deadline().expect("deadline read"),
+        core.next_deadline(),
         Some(connect_time + NEG_LIVENESS_DEADLINE_SECS)
     );
     assert_eq!(core.maintenance_turn_count(), 0);

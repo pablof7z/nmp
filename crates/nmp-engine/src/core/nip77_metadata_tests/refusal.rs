@@ -16,9 +16,9 @@ fn refused_live_candidate_never_becomes_active_and_keeps_one_owned_retry_deadlin
         candidate
     );
     assert_eq!(fixture.core.attempts.counts().retry_jobs, 1);
-    assert!(fixture.core.next_deadline().unwrap().is_some());
+    assert!(fixture.core.next_deadline().is_some());
 
-    let due = fixture.core.next_deadline().unwrap().unwrap();
+    let due = fixture.core.next_deadline().unwrap();
     let retried = fixture.core.handle(EngineMsg::Tick(due));
     assert!(retried
         .iter()
@@ -35,7 +35,7 @@ fn refused_live_candidate_retry_receives_later_zero_wire_plan_metadata() {
     fixture.refuse(&candidate);
     fixture.update();
 
-    let due = fixture.core.next_deadline().unwrap().unwrap();
+    let due = fixture.core.next_deadline().unwrap();
     fixture.core.handle(EngineMsg::Tick(due));
     fixture.assert_role_updated(&candidate);
     let attempt_id = fixture.core.pending_request_evidence
@@ -142,7 +142,7 @@ fn missing_id_retry_stays_claimless_when_plan_metadata_grows() {
     let missing_id = fixture.finish_neg_with_missing_id(&neg, EventId::from_byte_array([13; 32]));
     fixture.refuse(&missing_id);
     fixture.update();
-    let due = fixture.core.next_deadline().unwrap().unwrap();
+    let due = fixture.core.next_deadline().unwrap();
     fixture.core.handle(EngineMsg::Tick(due));
 
     let pending = fixture.core.pending_request_evidence

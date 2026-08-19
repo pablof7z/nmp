@@ -59,7 +59,7 @@ fn changed_filter_uses_fresh_id_keeps_old_on_refusal_and_retires_it_only_after_a
         .contains_key(&(session.clone(), first_sub_id.clone())));
     assert_eq!(core.bench_ownership_census().request_retry_jobs, 1);
 
-    let due = core.next_deadline().unwrap().unwrap();
+    let due = core.next_deadline().unwrap();
     let retried = core.handle(EngineMsg::Tick(due));
     let (_, retried_sub_id, retried_filter, retry_attempt) = only_request(&retried);
     assert_eq!(retried_sub_id, second_sub_id);

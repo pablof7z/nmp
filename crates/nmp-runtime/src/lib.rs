@@ -1697,17 +1697,8 @@ fn engine_loop(
             &diagnostics_delivery,
             Instant::now(),
         );
-        let (core_deadline, core_wait) = match core.next_deadline() {
-            Ok(deadline) => (
-                deadline,
-                deadline.map(|deadline| duration_until(deadline, clock.now())),
-            ),
-            // A deadline the store could not read is neither "due now" nor
-            // "nothing to wait for". The wait falls back to the plain
-            // `recv()` and the next message re-reads it, so a failing store
-            // cannot spin this loop either.
-            Err(_) => (None, None),
-        };
+        let core_deadline = core.next_deadline();
+        let core_wait = core_deadline.map(|deadline| duration_until(deadline, clock.now()));
         let nip11_wait = nip11_decisions
             .borrow()
             .next_deadline()
@@ -1775,14 +1766,9 @@ fn engine_loop(
                             dispatch_runtime,
                         );
                     }
-                    // A failed re-read fires no `Tick`: the store this tick
-                    // would drain is the store that just refused to be read,
-                    // and firing anyway would only reach the same failure one
-                    // door deeper. The `continue` below re-arms from the top
-                    // (#763).
                     let due = core
                         .next_deadline()
-                        .is_ok_and(|deadline| deadline.is_some_and(|deadline| deadline <= wall_now));
+                        .is_some_and(|deadline| deadline <= wall_now);
                     if due {
                         let effects = core.handle(EngineMsg::Tick(wall_now));
                         dispatch_core_effects(

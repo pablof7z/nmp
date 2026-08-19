@@ -1124,14 +1124,14 @@ fn relay_worker_projection_redb_benchmark() {
     );
 }
 
-/// Degraded-mode safety valve (epic #507 finding E5): when
-/// `bootstrap_publish_queue_lanes` fails for one intent, the reverse index can no
-/// longer be proven a superset of live lanes, so `wake_relay_lanes` must
-/// fall back to the full `recover_all_lanes` scan rather than trust a
-/// possibly-incomplete index. Proven two ways: an unrelated intent's lane
-/// still correctly wakes and publishes (no missed wakeup), and the wake
-/// event's `recover_publish_queue_lanes` call count matches the FULL-scan
-/// composition rather than the narrower indexed one.
+/// A failed `bootstrap_publish_queue_lanes` costs exactly the intent whose
+/// bootstrap failed, and nothing else. There is one wake path — the narrow
+/// `receipts_by_lane_relay` index — so a sibling intent whose bootstrap DID
+/// commit is in that index and still wakes and publishes normally (no missed
+/// wakeup). The failed intent contributes no lanes to wake because it
+/// committed none: that is the progress a store failure costs, and the next
+/// boot rebuilds it from the durable rows. The read count below pins that
+/// there is no wider fallback scan hiding behind the narrow read.
 #[test]
 fn a_failed_lane_bootstrap_never_costs_a_sibling_intent_its_wakeup() {
     let author = Keys::generate();
@@ -1390,99 +1390,6 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 }
 
 // ---- #763: the deadline and coverage peeks -----------------------------
-
-/// #763 delivery falsifier: a corrupt durable delivery deadline is a typed
-/// read failure, never false absence that parks the runtime forever.
-#[test]
-fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
-    let directory = tempfile::tempdir().expect("delivery deadline directory");
-    let path = directory.path().join("delivery-deadline-corruption.redb");
-    let keys = Keys::generate();
-    let relay = RelayUrl::parse("wss://delivery-deadline-corruption.example").unwrap();
-    let deadline = Timestamp::from(1_033u64);
-    let attempt = {
-        let mut store = RedbStore::open(&path).expect("open persistent Redb fixture");
-        let signed = nostr::EventBuilder::new(Kind::TextNote, "delivery deadline")
-            .custom_created_at(Timestamp::from(1_000u64))
-            .sign_with_keys(&keys)
-            .expect("sign fixture event");
-        let frozen = nostr::Event::new(
-            signed.id,
-            signed.pubkey,
-            signed.created_at,
-            signed.kind,
-            signed.tags.clone(),
-            signed.content.clone(),
-            nmp_store::sentinel_signature(),
-        );
-        let accepted = store
-            .accept_write(AcceptWrite {
-                payload: nmp_store::AcceptWritePayload::Event {
-                    frozen: Box::new(frozen),
-                    routing: "delivery-deadline-proof".into(),
-                    sig_state: nmp_store::IntentSigState::Pending,
-                },
-                expected_pubkey: keys.public_key(),
-                signing_identity_ref: "delivery-deadline-proof".into(),
-                accepted_at: Timestamp::from(1_000u64),
-            })
-            .expect("accept fixture intent");
-        let intent = accepted.journaled_intent_id().expect("journaled intent");
-        store
-            .promote_signed(
-                nmp_store::PromotionTarget::Event(intent),
-                nmp_store::VerifiedSignature::verify(&signed).expect("verify fixture signature"),
-            )
-            .expect("promote fixture intent");
-        store
-            .record_route_revision(intent, BTreeSet::from([relay]))
-            .expect("record route");
-        let lane = store
-            .bootstrap_publish_queue_lanes(intent)
-            .expect("bootstrap lane")
-            .remove(0);
-        let eligible = store
-            .set_lane_eligible(&lane.key, lane.revision, Timestamp::from(1_001u64))
-            .expect("make lane eligible");
-        let (attempt, started) = store
-            .start_lane_attempt(
-                &eligible.key,
-                eligible.revision,
-                signed,
-                Timestamp::from(1_002u64),
-            )
-            .expect("start attempt");
-        store
-            .record_lane_handoff(
-                &started.key,
-                started.revision,
-                started.last_ordinal,
-                nmp_store::PublishQueueAttemptHandoff {
-                    at: Timestamp::from(1_003u64),
-                    result: nmp_store::HandoffEvidence::Written,
-                },
-                nmp_store::PublishQueuePostHandoffState::AwaitingAck { deadline },
-            )
-            .expect("record awaiting-ack handoff");
-        assert_eq!(store.next_expiration().unwrap(), None);
-        assert_eq!(store.next_publish_queue_deadline().unwrap(), Some(deadline));
-        attempt
-    };
-
-    testing::corrupt_publish_queue_deadline(&path, &attempt)
-        .expect("corrupt the exact ordered deadline row");
-    let store = RedbStore::open(&path).expect("reopen corrupted fixture");
-    assert_eq!(store.next_expiration().unwrap(), None);
-    let core = EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
-    let error = core
-        .next_deadline()
-        .expect_err("the corrupt delivery deadline must not become false absence");
-    assert!(
-        error.message().contains("decode publish queue deadline"),
-        "the exact deadline codec owns the error: {}",
-        error.message()
-    );
-}
 
 /// #763 under deferred relay admission: the cache seed is accepted before a
 /// relay plan exists. If the post-admission coverage projection fails, the

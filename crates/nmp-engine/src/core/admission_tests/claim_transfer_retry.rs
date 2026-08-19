@@ -107,7 +107,6 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
 
     let due = core
         .next_deadline()
-        .unwrap()
         .expect("the failed transfer owns a bounded retry deadline");
     let retried = core.tick(due);
     assert!(core.pending_request_claim_transfers.is_empty());
@@ -277,7 +276,7 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let census = core.bench_ownership_census();
     assert_eq!(census.attribution_live_shape_keys, 2);
     assert_eq!(census.attribution_live_shape_refs, 2);
-    assert_eq!(core.next_deadline().unwrap(), None);
+    assert_eq!(core.next_deadline(), None);
     core.tick(Timestamp::from(300u64));
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);
     assert_eq!(
