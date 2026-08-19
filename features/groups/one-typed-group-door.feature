@@ -1,3 +1,4 @@
+@designed
 Feature: Every NIP-29 operation crosses one typed group door
   #1122's reserved distinctions for the app-facing group door: identity,
   routing, and the operation surface's own shape. #1033 landed as
@@ -19,10 +20,6 @@ Feature: Every NIP-29 operation crosses one typed group door
   distinctions this file now carries as `built` -- equal-or-stronger
   governed evidence exists for all of them.
 
-  # nmp:id=PROTOCOL-GROUPISANIDENTITY-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::constructing_a_group_scope_and_a_group_contacts_no_relay
-  # nmp:falsifier=Neither `nip29::on` nor `RelayScope::group` takes an `Engine`, so there is no spelling that could reach the network; proved against a REAL running relay (contact_count/wire_record both stay at zero) rather than taken on the type signature alone, so a hidden global/lazy connection would still be caught.
   @nip29
   Scenario: Constructing a group scope contacts nothing
     When I construct the group scope and do nothing else
@@ -30,10 +27,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no subscription exists
     And no query was sent to any relay
 
-  # nmp:id=PROTOCOL-GROUPISANIDENTITY-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_join_request_is_publishable_with_no_subscription_at_all
-  # nmp:falsifier=`engine.observe` is never called anywhere in the falsifier; it asserts on the relay's own decoded wire log (`ScriptedRelay::wire_record().reqs`) staying empty even after the join request is fully acked -- a regression that opened a hidden subscription before writing would fail this exact assertion.
   @nip29
   Scenario: A join request is publishable with no subscription at all
     Given I have never observed anything from this group
@@ -42,10 +35,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no subscription existed at any point during that publication
     And the publication did not require a read to succeed first
 
-  # nmp:id=PROTOCOL-GROUPISANIDENTITY-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_join_request_is_delivered_while_the_same_groups_read_reports_one_hosts_refusal_as_an_explicit_fact_and_never_as_a_false_empty
-  # nmp:falsifier=Performed: mutating `Group::read_branches` to collapse every host's branch onto the SAME (refusing) host makes the healthy host's row and its `AcquisitionEvidence` source both disappear -- the live query then times out waiting for host B's row/source, a real observed failure (20s timeout, `rows=[]`) restored to green after reverting the mutation.
   @nip29
   Scenario: I can write into a group whose content one host refuses to let me read
     Given a host refuses my reads until I am a member
@@ -55,10 +44,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the query reports the refused read as a per-host source fact
     And the query does not report the group as empty because of it
 
-  # nmp:id=PROTOCOL-GROUPISANIDENTITY-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::one_retained_group_handle_mints_every_read_and_write_with_no_lifecycle_of_its_own
-  # nmp:falsifier=One `Group` binding, never reconstructed, mints two reads and two writes; the second write happens AFTER both reads' subscriptions are dropped -- if the handle secretly owned a lifecycle tied to either subscription, that second write would fail rather than deliver and ack normally.
   @nip29
   Scenario: One retained group handle mints every read and every write across its lifetime, with no lifecycle of its own
     Given a filter selecting kind 9
@@ -70,10 +55,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no group needed to be reconstructed between them
     And the handle owns no subscription lifecycle of its own
 
-  # nmp:id=PROTOCOL-NIP29OPERATIONS-009
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_moderation_rejection_reports_the_hosts_exact_message_and_is_never_accepted
-  # nmp:falsifier=Performed: mutating `classify_relay_ack` (crates/nmp/src/core/mod.rs) to reclassify the `restricted` OK prefix as `RelayAckClass::Transient` instead of `Rejected` makes the receipt stream loop on `RetryEligible`/re-`Sent` forever instead of ever producing `Rejected` -- a real observed 20s timeout, restored to green after reverting the mutation.
   @nip29
   Scenario: A moderation action the host refuses surfaces truthfully
     Given I am not an admin of the group
@@ -84,10 +65,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the removal is never reported as accepted
     And no other relay was tried
 
-  # nmp:id=PROTOCOL-NIP29OPERATIONS-010
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_moderation_rejection_is_a_host_fact_not_a_routing_failure
-  # nmp:falsifier=Same performed mutation as NIP29OPERATIONS-009 (`restricted` reclassified as `Transient`): this falsifier additionally asserts no `GaveUp`/`Failed`/`RoutePersistenceBlocked` status ever appears and that the OTHER host in a two-host scope acks independently -- both held under the mutation's real failure and were restored to green with it.
   @nip29
   Scenario: A refused moderation action is reported as a relay rejection, not a guess
     Given I am not an admin of the group
@@ -97,8 +74,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And the failure is not reported as a routing failure
     And NMP made no claim of its own about my permissions in the group
 
-  # nmp:id=PROTOCOL-NIP29OPERATIONS-012
-  # nmp:status=built
   @nip29
   Scenario: Every named operation takes semantic fields and a retained group capability, never a raw kind, tag, relay or route
     When I inspect the compiled Rust, Swift and Kotlin group operation surface
@@ -107,8 +82,6 @@ Feature: Every NIP-29 operation crosses one typed group door
     And no named operation accepts a tag name
     And no named operation accepts a relay or a route
 
-  # nmp:id=PROTOCOL-NIP29OPERATIONS-013
-  # nmp:status=built
   @nip29
   Scenario: Only deliberately modeled NIP-29 operations get named composers, on every surface
     When I inspect the group operation surface across Rust, FFI, Swift and Kotlin

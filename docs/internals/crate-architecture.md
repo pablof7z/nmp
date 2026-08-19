@@ -1236,8 +1236,7 @@ the value types — `PendingWrite` owning its own transitions rather than
 
   An `nmp-nip51` crate would be a category Nostr does not have, holding
   unrelated kinds together for an editorial reason rather than a semantic
-  one — the same defect as any other invented category
-  (`conventions/naming-no-invented-categories.md`), applied to crate
+  one — the same defect as any other invented category, applied to crate
   boundaries instead of type names. **Do not "fix" the absence**, and do not
   let an architecture diagram draw a single NIP-51 box; the absence reads
   like an omission to anyone scanning the crate list, and someone will

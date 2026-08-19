@@ -55,8 +55,7 @@ relays are asked and nothing is added. The full ruling is in
 `docs/internals/routing/outbox.md`.
 
 There is no menu of authorities here to pick from, and no name for any of
-these lanes on the app surface —
-`docs/internals/conventions/naming-no-invented-categories.md` §3 records why.
+these lanes on the app surface.
 
 Access context says which AUTH identity or visibility grant applies. Equal
 selections under different authenticated identities retain separate evidence unless the

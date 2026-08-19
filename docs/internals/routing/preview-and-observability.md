@@ -183,8 +183,7 @@ and the audience are known.
 
 The precedent still holds and is now literal rather than analogical:
 `SigningState::AwaitingSigner { pubkey }` is the same shape — a durable park
-that names the key it waits for, in the decoded type
-(`docs/internals/conventions/bech32-boundary.md`).
+that names the key it waits for, in the decoded type.
 
 This also fixes a verified defect: today a routing error at `on_signed`
 terminally `Failed`s and drops the intent

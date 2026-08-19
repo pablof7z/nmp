@@ -10,11 +10,11 @@ It answers, continuously and empirically:
 > Can a normal application actually use NMP to read, publish, recover,
 > reconnect, and remain fast and understandable under realistic conditions?
 
-It exists because every other layer — owner tests, headless falsifiers, BDD,
-SDK tests — can be green while the public API is awkward, an advertised flow
-does not work end to end, restart breaks only with real resources, relay work
-explodes, resources are pathological, a capability needs app-side lifecycle
-hacks, or an internal concern leaks into application state.
+It exists because a green test suite can coexist with an awkward public API,
+an advertised flow that does not work end to end, restart that breaks only
+with real resources, exploding relay work, pathological resource use, a
+capability that needs app-side lifecycle hacks, or an internal concern leaking
+into application state.
 
 It lives at `apps/Canary`, evolved from `apps/Falsifier` rather than built
 beside it. That decision and its evidence are in [Why Falsifier became the
@@ -232,10 +232,8 @@ churn; C18 clean shutdown.
 that appeared exactly once in this entire repository, in the line above,
 introduced by the commit that created the Canary. No definition anywhere, no
 matching public API, no `semantic` surface in `crates/nmp/src/`, and no
-protocol category by that name: a named category that does not exist, which
-standing convention 3 forbids
-(`docs/internals/conventions/naming-no-invented-categories.md`). The name now
-comes from the public surface — "capability" is
+protocol category by that name: a named category that does not exist. The
+name now comes from the public surface — "capability" is
 `docs/internals/crate-architecture.md` rule 2's own word and `nmp-ffi`'s own
 feature keys, "NIP-22 comments" is the protocol's name and the name of
 `Packages/NMP/Sources/NMP/NIP22.swift`.
@@ -1484,6 +1482,5 @@ relay".
   spelled out command by command, including both prerequisites.
 - `docs/known-gaps.md` — unproven scenarios and unexplained failures stay
   visible there until resolved.
-- `skills/nmp-dev/references/testing/` — the three-layer testing model the
-  Canary is the third layer of. A green result at one layer never substitutes
-  for a missing layer.
+- `skills/nmp-dev/references/testing/` — the other kinds of test available,
+  and what each is good for.

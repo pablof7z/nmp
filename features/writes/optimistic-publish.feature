@@ -38,10 +38,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- the moment of sending -------------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays
-  # nmp:falsifier=withholding a locally accepted row from a pinned projection until some relay has carried it -- dropping the ours clause from nmp_store::Provenance::visible_under_pin -- makes a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays time out waiting for a row that can never arrive, because neither host is reachable
   Scenario: The message is on screen before any host could possibly have answered
     Given neither "host-a" nor "host-b" can be reached
     And I am watching a feed whose filter the message matches
@@ -50,10 +46,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
     And the row reports the cache as its source
     And the row names zero relays
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays
-  # nmp:falsifier=deferring the acceptance fact until a first relay ACK makes a_publish_to_two_unreachable_hosts_appears_at_once_reporting_zero_relays hang on its receipt drain, which runs against two deliberately unreachable hosts precisely so no ACK can ever rescue it
   Scenario: "It will publish" is answered at acceptance, not at the first ack
     # What a chat input's send button actually asks. The completion an app
     # shows is the acceptance of the obligation, which NMP knows on its own;
@@ -66,10 +58,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- as the world answers ---------------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_row_is_never_duplicated
-  # nmp:falsifier=letting a refusing host enter the row's source set, or announcing the carried event as a second row rather than growing the first one's provenance, makes an_accepting_host_enters_provenance_a_rejecting_one_never_does_and_the_row_is_never_duplicated see a source set that is not exactly the accepting host, or an added-count of 2
   Scenario: Provenance names exactly the hosts that carried it, as they carry it
     Given I am watching a feed whose filter the message matches
     And I have sent a message that is on screen naming zero relays
@@ -79,10 +67,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
     And "host-b" is never named as a source
     And the feed still holds exactly one copy of the message
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::an_event_every_host_refused_stays_visible_reporting_zero_relays
-  # nmp:falsifier=treating an empty source set as "nobody will ever carry this, retract it" rather than "nobody has carried this" -- removing the ours clause from the pinned projection -- makes an_event_every_host_refused_stays_visible_reporting_zero_relays lose the row from both the already-open feed and a freshly opened one, while its per-host rejection receipts still arrive
   Scenario: A message every host refused is still the user's message
     # The only outcome in which the source set stays empty permanently rather
     # than momentarily, which is what makes it the case that asks whether
@@ -102,10 +86,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- which feeds see it ------------------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_query_opened_after_the_write_sees_it_exactly_as_one_already_open_does
-  # nmp:falsifier=pushing a locally accepted row only to subscriptions that were already open, instead of admitting it to the store every projection reads, makes a_query_opened_after_the_write_sees_it_exactly_as_one_already_open_does see an empty row set from the feed opened after the send and from the second simultaneous feed
   Scenario: Sending and then opening the feed shows the message, and so does a second feed
     # Two doors, one answer. An app that sends from a composer and then
     # navigates to the conversation is the ordinary case, not an edge case,
@@ -120,10 +100,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
     When I open a third feed on the same selection
     Then it also shows the message naming zero relays
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-006
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_locally_accepted_write_never_enters_a_query_its_filter_excludes
-  # nmp:falsifier=admitting locally accepted rows into a projection without re-checking the query's own filter -- the plausible wrong reading of "show it immediately" -- makes a_locally_accepted_write_never_enters_a_query_its_filter_excludes see the note appear in the unrelated feed through both the delta and the snapshot door
   Scenario: A feed the message does not match never shows it
     # The guard on the whole mechanism. "Immediately" qualifies WHEN, never
     # WHERE. A locally accepted write is filtered exactly like a row that
@@ -137,10 +113,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- across a restart --------------------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-007
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::a_write_still_in_flight_is_still_in_the_feed_after_a_restart
-  # nmp:falsifier=projecting locally accepted rows from process-local state rather than from the durable store makes a_write_still_in_flight_is_still_in_the_feed_after_a_restart find no row after the redb file is genuinely released and reopened, even though the write is still owed
   Scenario: A message still in flight is still in the feed after a restart
     # The row and the obligation have to agree. NMP is still going to publish
     # this message, so a feed that forgot it on restart would be hiding live
@@ -155,11 +127,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- what this does not weaken ----------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-008
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-store::a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound
-  # nmp:evidence=rust:nmp::a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group
-  # nmp:falsifier=widening the ours clause to admit rows this node never wrote under a pin that did not serve them makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound return the foreign row it asserts is invisible, and makes a_group_records_listing_never_lets_one_hosts_member_evidence_answer_for_anothers_group see one host's evidence answer for another host over two live relays
   Scenario: A row another host served still never answers for a host that did not serve it
     # The isolation this must not cost. It was always a rule about FOREIGN
     # data -- one host's cached rows answering a question about a different
@@ -171,10 +138,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
     Then that row is not among the results
     And a row no host has served is still among them
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-009
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-store::a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound
-  # nmp:falsifier=deciding visibility after applying a page bound rather than before it makes a_row_no_relay_has_served_is_visible_under_every_pin_and_counts_against_its_bound see the page under-fill to one row; admitting the locally accepted row without counting it makes the same page over-fill, including through the de-duplicated union door where the bound applies once to the merged set
   Scenario: A page of a pinned feed counts the unsent message like any other row
     # The consequence an app notices without knowing why: if a locally
     # accepted row were admitted but not counted, a page of ten would deliver
@@ -189,11 +152,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- ours versus foreign ----------------------------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-010
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly
-  # nmp:evidence=rust:nmp::a_foreign_row_carried_only_outside_the_pin_is_still_invisible
-  # nmp:falsifier=restoring the carried-versus-uncarried predicate -- admitting a row under a pin because NO relay has carried it rather than because this node accepted it -- makes the_users_own_row_survives_a_carrier_outside_the_pin_and_reports_it_honestly find the user's message gone from the watched feed the instant the unwatched host carries it, through both the delta and the snapshot door; widening the ours clause to admit every row makes a_foreign_row_carried_only_outside_the_pin_is_still_invisible see somebody else's note answer for a host that never served it
   Scenario: The user's own message is not withdrawn because of what an unrelated host did
     # Visibility under a pin asks whether a row is OURS, never whether some
     # relay has carried it yet. A locally accepted write keeps its local
@@ -220,11 +178,6 @@ Feature: A message the user just sent is in the feed before any relay has answer
 
   # ---- and none of it belongs to a protocol -----------------------------
 
-  # nmp:id=WRITES-OPTIMISTICPUBLISH-011
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::optimistic_publication_is_general_and_owes_nothing_to_nip29
-  # nmp:evidence=rust:nmp::nip29_code_never_names_publication_visibility_vocabulary
-  # nmp:falsifier=implementing optimistic visibility anywhere protocol-specific rather than in the general projection makes optimistic_publication_is_general_and_owes_nothing_to_nip29 fail for a plain note and a plain article, neither of which any group protocol has heard of; reintroducing a protocol-local visibility branch makes nip29_code_never_names_publication_visibility_vocabulary report the provenance or projection identifier that branch cannot be written without
   Scenario: Every publish gets this, and no protocol implements it
     # The rule the ruling is most insistent about. If this behaviour lived in
     # a protocol module it would be a behaviour every other protocol quietly

@@ -19,8 +19,7 @@
 //! written into content with no matching `p` row.
 //!
 //! Bech32 appears in the rendered content and nowhere else — that is the user
-//! boundary (`docs/internals/conventions/bech32-boundary.md`). Every macro
-//! argument stays a decoded [`nostr::PublicKey`] or an event; nothing here
+//! boundary. Every macro argument stays a decoded [`nostr::PublicKey`] or an event; nothing here
 //! takes an `npub` or an `nevent` as input.
 
 use nostr::nips::nip19::{Nip19Event, Nip19Profile, ToBech32};

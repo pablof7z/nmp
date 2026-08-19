@@ -44,9 +44,8 @@ pub enum EngineError {
     ///
     /// NMP states the fact; the app owns the response. The only response
     /// that lets this build run is to close every owner, discard the store,
-    /// and create a fresh one
-    /// (`docs/internals/conventions/schema-epoch-discard.md`) — but that
-    /// discard is permanent and it is the app's call, so
+    /// and create a fresh one — but that discard is permanent and it is the
+    /// app's call, so
     /// [`Engine::reset_persistent_store`](crate::Engine::reset_persistent_store)
     /// stays a separate deliberate act. The relay-backed read cache can be
     /// reacquired; the publish queue cannot, so accepted but unpublished

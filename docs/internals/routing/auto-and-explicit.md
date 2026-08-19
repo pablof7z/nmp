@@ -18,10 +18,9 @@ related:
   - docs/internals/routing/preview-and-observability.md
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
-  - docs/internals/conventions/no-backwards-compatibility.md
 issues:
   - "publishing before the first relay-list fetch terminally fails today (see resolution-lifecycle.md §8) — the design parks instead"
-  - "the current three `WriteRouting` variants are all deleted by this design; no aliases survive (conventions/no-backwards-compatibility.md)"
+  - "the current three `WriteRouting` variants are all deleted by this design; no aliases survive"
 ---
 
 # Write routing: Auto and Explicit
@@ -77,8 +76,7 @@ crash. At the FFI boundary, `FfiWriteRouting` has exactly ONE variant,
 can construct either of the other two.
 
 Every one of these three variants dies under this design. There is no
-migration, no alias, and no deprecation window — see
-`conventions/no-backwards-compatibility.md`, and Pablo's standing rule:
+migration, no alias, and no deprecation window. Pablo's words:
 
 > no backwards compatibility!!!! I told you this so many times!!!
 

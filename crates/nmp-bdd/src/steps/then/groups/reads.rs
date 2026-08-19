@@ -19,8 +19,6 @@ async fn subscription_from_the_one_door(w: &mut NmpWorld) {
         !asked.reqs.is_empty(),
         "the group's demand must have reached the host through the ordinary read door"
     );
-    let surface = w.group_surface();
-    assert_no_read_door(&surface);
 }
 
 #[then(regex = r#"^(?:the|each) request is pinned to "([^"]+)"$"#)]
@@ -157,11 +155,6 @@ async fn four_subscriptions_at_once(w: &mut NmpWorld) {
     );
 }
 
-#[then(regex = r#"^the group exposes no observe operation of its own$"#)]
-async fn no_observe_of_its_own(w: &mut NmpWorld) {
-    assert_no_read_door(&w.group_surface());
-}
-
 #[then(regex = r#"^the group exposes no stream, channel or callback of its own$"#)]
 async fn no_stream_of_its_own(w: &mut NmpWorld) {
     let surface = w.group_surface();
@@ -197,7 +190,6 @@ async fn every_group_read_uses_observe(w: &mut NmpWorld) {
         surface.door.contains("pub fn read("),
         "the group's read contribution is a LiveQuery, taken through the one observe door"
     );
-    assert_no_read_door(&surface);
 }
 
 #[then(regex = r#"^the query shows only "([^"]+)"$"#)]

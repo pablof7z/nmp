@@ -37,10 +37,6 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- one destination, one answer --------------------------------------
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::write_ack_per_relay_over_real_relays
-  # nmp:falsifier=Paraphrase a relay's own refusal into a generic failure; "blocked: not admitted" is actionable and "failed" is not, and NMP did not write the message it would be rewriting.
   Scenario: A relay's refusal is reported in the relay's own words
     Given relay "wss://one.example" rejects every event with "blocked: not admitted"
     When I publish a note saying "hello"
@@ -50,10 +46,6 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- authentication denial is not authentication waiting -------------
 
   @ledger-9 @ledger-16
-  # nmp:id=DIAG-ATTRIBUTION-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::exact_policy_denial_commits_before_emit_and_replays_the_same_terminal_fact
-  # nmp:falsifier=Emit an AUTH denial before its lane terminal commits, or replay it with a different source after restart; the receipt claims a terminal the store never established.
   Scenario: A policy denial finishes the exact write lane and survives restart
     Given relay "wss://one.example" requires authentication for writes
     And my authentication policy denies "wss://one.example" with "account not permitted"
@@ -68,10 +60,6 @@ Feature: Which destination failed, and why, one destination at a time
     And no further event attempt is made against "wss://one.example"
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-003
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: Authentication required is resumable rather than terminal
     Given relay "wss://one.example" requires authentication for writes
     And my authentication policy allows "wss://one.example"
@@ -83,10 +71,6 @@ Feature: Which destination failed, and why, one destination at a time
     Then the same write is delivered -- not a second copy of it
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-004
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: A subscription authentication closure cannot deny a write
     Given I have a pending write for "wss://one.example"
     And I have a separate subscription on "wss://one.example"
@@ -97,10 +81,6 @@ Feature: Which destination failed, and why, one destination at a time
     Then the same write is delivered -- not a second copy of it
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-005
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: Authentication denial is isolated by exact session identity
     Given Alice and Bob each have a pending authenticated write for "wss://one.example"
     When Alice's exact authentication session is denied
@@ -109,10 +89,6 @@ Feature: Which destination failed, and why, one destination at a time
     And Bob's write can still be delivered
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-006
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario Outline: A non-denial authentication outcome cannot deny a write
     Given relay "wss://one.example" requires authentication for writes
     And my authentication policy returns "<outcome>" for "wss://one.example"
@@ -126,10 +102,6 @@ Feature: Which destination failed, and why, one destination at a time
       | unavailable |
 
   @ledger-16
-  # nmp:id=DIAG-ATTRIBUTION-007
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: A transient failure says why it will be retried, and when
     Given relay "wss://one.example" fails the first attempt transiently
     When I publish a note saying "hello"
@@ -140,10 +112,6 @@ Feature: Which destination failed, and why, one destination at a time
     And "wss://one.example" is not reported as failed
 
   @ledger-16
-  # nmp:id=DIAG-ATTRIBUTION-008
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: A destination given up on is named as given up on
     # Distinct from retry-eligible on purpose: one is a promise that something
     # will happen next and the other is a statement that nothing will. Note
@@ -159,10 +127,6 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- four destinations, four answers ----------------------------------
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-009
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: One note, four relays, four different answers
     # The composite, and the reason an outcome is per-destination rather than
     # per-write. An app rendering this screen can name the relay that broke,
@@ -182,10 +146,6 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- sent, partially sent, and the difference -------------------------
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-010
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: Partially sent is representable without the app guessing
     Given relay "wss://one.example" accepts every event
     And relay "wss://two.example" accepts every event
@@ -197,10 +157,6 @@ Feature: Which destination failed, and why, one destination at a time
     And the receipt makes no claim that the note is fully sent
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-011
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: Fully sent means every destination acked, and nothing weaker
     Given every one of my write relays accepts every event
     When I publish a note saying "hello"
@@ -210,10 +166,6 @@ Feature: Which destination failed, and why, one destination at a time
   # ---- the boundary between the two failures ----------------------------
 
   @ledger-9
-  # nmp:id=DIAG-ATTRIBUTION-012
-  # nmp:status=specified
-  # nmp:gap=evidence
-  # nmp:issue=#1253
   Scenario: A write that never got a destination has no delivery failure
     # "We were trying to publish to relay X" and "we were trying to route this
     # event" are different sentences and an app shows different screens for

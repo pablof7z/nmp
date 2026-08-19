@@ -2257,8 +2257,8 @@ impl CoreState {
     /// production path that does, so a reconstruction would silently
     /// collapse two genuinely-distinct atoms (same selection, different
     /// context) that the resolver correctly tracks as two independent
-    /// entries into one. Widened rather than patched with an assertion,
-    /// per the repo's no-compat-alias convention -- this mirrors
+    /// entries into one. Widened rather than patched with an assertion, and
+    /// no alias kept for the old spelling -- this mirrors
     /// `nmp_resolver::Engine::active_demand()` exactly.
     pub(in crate::core) fn active_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire_demand()

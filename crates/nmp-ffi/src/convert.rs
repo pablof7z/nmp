@@ -2041,8 +2041,8 @@ pub fn write_status_to_ffi(s: WriteStatusRef<'_>) -> FfiWriteFact {
             complete: *complete,
             // Hex, never bech32: an `npub` exists to be shown to a person or
             // pasted by one, and this crosses to an app that will decide what
-            // to do with the key (`conventions/bech32-boundary.md`). The
-            // BTreeSet's key order survives into the vector, so two reads of
+            // to do with the key. The BTreeSet's key order survives into
+            // the vector, so two reads of
             // the same park compare equal.
             awaiting_author_routes: awaiting_author_routes
                 .iter()
@@ -2697,9 +2697,8 @@ pub fn parse_event_id(hex: &str) -> Result<EventId, FfiError> {
 /// module-wide [`parse_pubkey`] rule verbatim and nothing else: a bech32
 /// `npub` is REFUSED here, however well-formed, because "which encodings
 /// does this field take" must have one answer for every pubkey-shaped input
-/// rather than one answer per field
-/// (`docs/internals/conventions/bech32-boundary.md`). An app holding a
-/// display form decodes it with `decode_nostr_entity` at the boundary where
+/// rather than one answer per field. An app holding a display form decodes
+/// it with `decode_nostr_entity` at the boundary where
 /// the user pasted it. A malformed string is a typed
 /// [`FfiError::InvalidPublicKey`] naming the offending input,
 /// synchronously, BEFORE any engine call.

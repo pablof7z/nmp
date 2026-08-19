@@ -10,9 +10,6 @@ These are the authorities to inspect when a checkout differs from the verified r
 - Source: `docs/known-gaps.md`
 - Source: `docs/builder/28-patterns.md`
 - Source: `docs/design/async-observation-handles.md`
-- Source: `docs/internals/conventions/bech32-boundary.md`
-- Source: `docs/internals/conventions/no-backwards-compatibility.md`
-- Source: `docs/internals/conventions/schema-epoch-discard.md`
 - Source: `docs/design/durable-write-signing-and-retry.md`
 - Source: `docs/builder/15-editing-replaceable.md`
 - Source: `docs/internals/writes/payload-and-replaceable-edits.md`

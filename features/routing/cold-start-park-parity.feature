@@ -14,10 +14,6 @@ Feature: Fresh and recovered writes share the same cold-start park
   Background:
     Given I am logged in as my own account
 
-  # nmp:id=ROUTING-COLDSTARTPARK-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::fresh_and_recovered_auto_writes_share_one_later_author_route
-  # nmp:falsifier=Limit rewrite_open_routes to one pending id; the exact two-receipt Routed(outbox) set loses one member.
   @ledger-6
   Scenario: A young directory treats a fresh write and a recovered one alike
     # Two writes in the same condition -- one signed just now, one recovered

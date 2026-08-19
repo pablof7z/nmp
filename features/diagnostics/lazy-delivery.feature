@@ -5,11 +5,6 @@ Feature: Diagnostics changes are delivered without rebuilding every close
   and still gives a newly attached observer the truthful current snapshot
   immediately.
 
-  # nmp:id=DIAG-LAZY-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::distinct_physical_closes_defer_diagnostic_coverage_projection
-  # nmp:evidence=rust:nmp::one_due_delivery_fans_the_latest_full_snapshot_to_every_observer
-  # nmp:falsifier=Build a full diagnostic snapshot for every physical close; an incompatible close burst performs triangular coverage and filter work instead of one bounded latest-state delivery.
   Scenario: A close burst produces bounded latest diagnostics
     Given many independent physical requests are active
     And at least one diagnostics observer is attached
@@ -19,11 +14,6 @@ Feature: Diagnostics changes are delivered without rebuilding every close
     And one latest truthful snapshot is delivered to every observer at the boundary
     And no observer receives an intermediate stale snapshot
 
-  # nmp:id=DIAG-LAZY-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::new_observer_current_snapshot_satisfies_pending_delivery_without_duplicate
-  # nmp:evidence=rust:nmp::engine_deadline_delivers_the_lazy_withdrawal_snapshot
-  # nmp:falsifier=Register a diagnostics observer while a dirty delivery is pending but leave the old deadline armed; the observer receives the current state immediately and then receives an unchanged duplicate.
   Scenario: A new observer gets current truth without a duplicate deadline frame
     Given diagnostics changed and a bounded delivery is pending
     When a new diagnostics observer attaches before the deadline
@@ -31,11 +21,6 @@ Feature: Diagnostics changes are delivered without rebuilding every close
     And that immediate snapshot satisfies the pending delivery
     And neither existing nor new observers receive an unchanged duplicate at the old deadline
 
-  # nmp:id=DIAG-LAZY-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::eose_refreshes_live_evidence_without_event_index_query
-  # nmp:evidence=rust:nmp::no_observer_arms_no_work_and_the_first_observed_change_anchors_the_window
-  # nmp:falsifier=Materialize diagnostics inside an ordinary EOSE transition without an observer; lifecycle work builds snapshots even though nobody can receive them, or later observation delivers more than one coalesced latest state.
   Scenario: Unobserved request terminals update state without building diagnostics
     Given no diagnostics observer is attached
     When an ordinary EOSE changes diagnostic state
@@ -44,11 +29,6 @@ Feature: Diagnostics changes are delivered without rebuilding every close
     And repeated changes arm no delivery work while there are no observers
     And a later observer receives one current snapshot through the bounded delivery contract
 
-  # nmp:id=DIAG-LAZY-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::schedule_ready_skips_lane_less_obligations
-  # nmp:evidence=rust:nmp::the_detail_window_is_bounded_while_the_census_stays_exact
-  # nmp:falsifier=Let one healthy write rescan every lane-less durable obligation or rebuild and sort the entire stalled-write projection for an unrelated diagnostics request; periodic app heartbeats turn an old queue into recurring CPU saturation.
   Scenario: A large stalled queue is not ordinary write overhead
     Given many durable writes are stalled without physical relay lanes
     And their bounded diagnostic projection is current

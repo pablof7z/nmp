@@ -34,11 +34,6 @@ Feature: A named identity with no available signing provider waits; it does not 
 
   # ---- parking -----------------------------------------------------------
 
-  # nmp:id=IDENTITY-AWAITING-PROVIDER-001
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-ffi::ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability
-  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
-  # nmp:falsifier=Refuse an explicit public key merely because it has no available provider, or ask the current account to sign it; the facade or runtime proof no longer observes an accepted write pinned to the named key.
   Scenario: Naming an identity with no signing provider parks the write
     # The headline. The write is accepted -- a real, durable acceptance with
     # a frozen body -- and then waits. It is not refused, and it is not
@@ -50,11 +45,6 @@ Feature: A named identity with no available signing provider waits; it does not 
     And "2bd806c97f0e00af1a1fc3328fa763a9269723c8db8fac4f93af71db186d6e90" is never asked to sign it
     And "wss://hub.example" received nothing yet
 
-  # nmp:id=IDENTITY-AWAITING-PROVIDER-002
-  # nmp:status=built
-  # nmp:evidence=rust:nmp-ffi::ffi_explicit_identity_for_unregistered_pubkey_parks_awaiting_capability
-  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
-  # nmp:falsifier=Omit the frozen public key from the awaiting-signature fact or make its receipt unreattachable; the facade projection or runtime replay proof loses observable custody.
   Scenario: The park is visible, not inferred from silence
     # The failure this rules out is a write that looks live and is actually
     # stuck. The app must be able to render "waiting for your podcast signer"
@@ -66,10 +56,6 @@ Feature: A named identity with no available signing provider waits; it does not 
 
   # ---- durability --------------------------------------------------------
 
-  # nmp:id=IDENTITY-AWAITING-PROVIDER-003
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:falsifier=Re-resolve a recovered accepted write against the restored current account or discard its frozen body; recovery no longer preserves the one accepted obligation and exact public key.
   Scenario: A parked write survives restart still waiting for the same key
     When I compose an event of kind 1 saying "episode 19 is up" and publish it naming identity "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And the write reports accepted and the process stops immediately
@@ -77,11 +63,6 @@ Feature: A named identity with no available signing provider waits; it does not 
     Then the write is still awaiting a signer for "f62a697de0475d83990780a93267ba3113dcc90a84047574aeb274837df600fd"
     And its frozen body is byte-for-byte what it was before the restart
 
-  # nmp:id=IDENTITY-AWAITING-PROVIDER-004
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
-  # nmp:evidence=rust:nmp::an_explicit_identity_publishes_as_a_secondary_without_moving_the_current_account
-  # nmp:falsifier=Let session selection rewrite the public key frozen into an accepted write; removing, clearing, or selecting another account makes either the preserved obligation or secondary-identity proof fail.
   Scenario: Logging out and back in as somebody else leaves the park alone
     # A parked write is not a property of the session. The account switch is
     # exactly the event that would retarget it if the identity were not
@@ -92,11 +73,6 @@ Feature: A named identity with no available signing provider waits; it does not 
 
   # ---- revoking it -------------------------------------------------------
 
-  # nmp:id=IDENTITY-AWAITING-PROVIDER-005
-  # nmp:status=built
-  # nmp:evidence=rust:nmp::parked_awaiting_capability_reattach_cancel_does_not_retain_deliveries
-  # nmp:evidence=rust:nmp::facade_cancellation_is_typed_idempotent_and_reattachable
-  # nmp:falsifier=Let cancellation leave the signing request live or erase the terminal receipt; a later provider can sign, or the cancelled outcome cannot be reattached.
   Scenario: A parked write can be cancelled
     # What makes waiting indefinitely acceptable: the app is never stuck with
     # it. Cancelling is the app's own decision arriving later, the same way

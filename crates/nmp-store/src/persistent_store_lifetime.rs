@@ -697,8 +697,7 @@ pub enum RedbStoreOpenError {
     /// must discard and recreate the store to continue. Relay-backed cache
     /// rows can be reacquired; publish queue state cannot, so accepted but
     /// unpublished writes and their receipts, route
-    /// revisions, and attempt evidence are permanently lost
-    /// (`docs/internals/conventions/schema-epoch-discard.md`).
+    /// revisions, and attempt evidence are permanently lost.
     ///
     /// It is deliberately NOT a `Database` error: corruption of the CURRENT
     /// epoch stays `Database(redb::Error::Corrupted(..))`, so an operator can
