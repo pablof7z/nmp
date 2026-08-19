@@ -58,26 +58,15 @@ give-up policy in between — see §4.3.
 
 `preview_route`, `RoutePreview`, `RouteBlock`, `RouteSubject`, and
 `observeRoutePreview` are not built. There are zero hits for any of them
-across `crates/` and `Packages/`. (`nmp-router`'s `preview_admission` /
+across `crates/`. (`nmp-router`'s `preview_admission` /
 `AdmissionPreview` is a different, read-side subsystem — it answers a
 different question and is not this.)
 
 The use case the ruling above asked for is unserved: an app has no way to
-ask "where would this event route to" before accepting a write, and so
-cannot do what Pablo's example described —
-
-```swift
-let preview = try engine.previewRoute(builder: draft, identity: .active)
-sendButton.isEnabled = preview.complete
-if !preview.complete {
-    footer.text = "Can't determine a relay for \(preview.blocked.first!.who)"
-}
-```
-
-— disabling a compose screen's send button when a relay cannot be determined
-for one of the parties. This is illustrative of the gap, not a specification
-of an API to build: no `previewRoute`, `preview.complete`, or
-`preview.blocked` exists anywhere in the codebase today.
+ask "where would this event route to" before accepting a write — for
+example, disabling a compose screen's send button when a relay cannot be
+determined for one of the parties. No `preview_route` function, completeness
+flag, or blocked-parties list exists anywhere in the codebase today.
 
 ---
 

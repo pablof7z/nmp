@@ -1,8 +1,8 @@
 # Scoped acquisition evidence — #49 / #12 / #8 (evidence half)
 
 - **Status:** Shipped, as part of #43 step-5 (landed on #77). The cohesive
-  Rust/FFI/Swift/Kotlin evidence wave, native mapping falsifiers, and scoped
-  correctness proofs described below are built and merged.
+  engine evidence wave and scoped correctness proofs described below are
+  built and merged.
 - **Scope:** Replaced the engine-global `QueryCoverage::CompleteUpTo | Unknown`
   query-result value with **rows + compact, per-current-plan acquisition
   evidence**; fixed derived-query coverage to account for interior atoms (#12);
@@ -39,7 +39,6 @@ Authoritative contract (from #43 / #49 / `docs/known-gaps.md` /
 | **The collapse (the bug surface)** | `nmp-engine/src/core/coverage_query.rs` | `QueryCoverage{CompleteUpTo(Timestamp)\|Unknown}` + `query_coverage(atoms, plan, store)` — min-over-atoms-and-relays → one query-global verdict | **REWRITE.** This is the "authoritative-empty arriving through the derivation chain" (#12) and the "over-interprets relay evidence" global claim (#49). |
 | Handle emit path | `nmp-engine/src/core/mod.rs` — `rows_and_coverage_for` (~L1506), `Effect::EmitRows(HandleId, Vec<RowDelta>, QueryCoverage)` (L183), `HandleState.last_coverage` (L214) | Computes coverage from `resolver.root_atoms(id)` **only** (#12 bug at L1510); ships it on every batch | **REWIRE.** Input widens root→subtree; value type changes. |
 | Diagnostics (retained surface) | `nmp-engine/src/core/diagnostics.rs` — `FilterCoverageEntry{filter, coverage: QueryCoverage}` | Per-`(relay, filter)` coverage, **reuses** the query enum | **RETYPE.** Diagnostics legitimately keeps exact per-relay watermark evidence, but must stop borrowing the deleted query enum. |
-| Public FFI/Swift/Kotlin | `nmp-ffi/src/{types,convert,facade,observer}.rs` — `FfiCoverage{CompleteUpTo{unix_seconds}\|Unknown}`, `FfiBatch.coverage`, `FfiFilterCoverage`, `on_batch(deltas, coverage)` | Projects `QueryCoverage` across the boundary | **REPLACE** (breaking public-API change). |
 
 Key insight that shapes the whole plan: **the store never lied.** A
 `CoverageInterval` at `(shape, relay)` is exactly-scoped, honest evidence. The
@@ -196,9 +195,6 @@ in one PR):**
   `EmitRows(HandleId, Vec<RowDelta>, AcquisitionEvidence)`;
   `HandleState.last_coverage` → `last_evidence` (the change-detection compare at
   `mod.rs:1482` must compare evidence values — derive `PartialEq`).
-- FFI: `FfiCoverage` → `FfiAcquisitionEvidence` (+ `FfiSourceEvidence`,
-  `FfiSourceStatus`, `FfiAuthPhase`, `FfiShortfallFact`); `coverage_to_ffi` →
-  `evidence_to_ffi`; `on_batch` signature; Swift/Kotlin regenerated.
 
 **Retained (the diagnostics surface — this is allowed and required):**
 - `nmp-store::coverage` substrate: untouched. **No redb/persistence change.**
@@ -222,8 +218,8 @@ code-verified, the excision was genuinely narrow at the engine layer, and the
 (durable watermark vs. live link state — the contract's own "cached-only"
 fact was inexpressible in it), fixed by the `reconciled_through` field split
 now in §2; and the caller inventory was wider than the original unit table
-(`nmp-bdd`, the hand-written Swift/Kotlin SDK wrappers, and the in-flight
-`crates/nmp` facade were all consumers reshaped in the same wave — see below).
+(`nmp-bdd` and the in-flight `crates/nmp` facade were both consumers reshaped
+in the same wave — see below).
 
 ### Narrow-excision claim — verified against code
 
@@ -243,10 +239,7 @@ now in §2; and the caller inventory was wider than the original unit table
 
 The full consumer set reshaped in this wave was wider than the plan's
 original unit table: `crates/nmp-bdd` (`World::apply`, `feed_eventually`
-predicates), the hand-written SDK wrappers (`Packages/NMP/Sources/NMP/`:
-`Row.swift`, `Query.swift`, `Observable.swift`, `Diagnostics.swift`;
-`Packages/NMPKotlin/.../`: `Row.kt`, `Query.kt`, `Diagnostics.kt`), the
-`crates/nmp` facade, the engine integration falsifiers
+predicates), the `crates/nmp` facade, the engine integration falsifiers
 (`integration_capstone.rs`, `core_headless.rs`, `diagnostics_headless.rs`,
 `negentropy_live.rs`), and doc-comment prose referencing the deleted
 vocabulary.
@@ -259,10 +252,9 @@ contract's "never global completeness" forbids it and removing it loses
 convenience, not information — apps fold source facts into their own progress
 policy. Three teeth the builder must add:
 
-- **No aggregate anywhere** — no helper fn, no computed property on the Swift/
-  Kotlin wrappers either (an `isComplete` convenience in `Row.swift` would be
-  the same collapse one layer up; the parity review must watch the
-  hand-written wrappers for exactly this).
+- **No aggregate anywhere** — no helper fn, no computed convenience property
+  that reconstructs a single completeness verdict from the per-source facts
+  (an `isComplete`-style convenience would be the same collapse one layer up).
 - **Vacuous-emptiness guard:** a query whose subtree yields zero atoms or zero
   planned sources must read as explicit `shortfall`, never as an empty
   `sources` list an app can read as trivially settled. The old
@@ -350,7 +342,7 @@ orthogonal to every one of these effective current acquisition states.
   covering relays appear in `sources` (unproven ⇒ watermark `None`), rows
   still come from `root_atoms`, and no min crosses sources.
 - **Hard delete with no compat alias was safe** — the full consumer set
-  (nmp-ffi, nmp-bdd, engine tests, Swift+Kotlin wrappers, the in-flight
+  (nmp-ffi, nmp-bdd, engine tests, the hand-written SDK wrappers, the in-flight
   facade) was all in-repo and all reshaped in one PR. No out-of-repo consumer
   existed (pre-v2, no published crates).
 - **Determinism:** `AcquisitionEvidence`/`SourceEvidence` derive `PartialEq`/
@@ -358,12 +350,5 @@ orthogonal to every one of these effective current acquisition states.
   `equal_evidence_on_reconnect_does_not_spuriously_emit_rows`
   (`crates/nmp-engine/tests/core_headless/live_queries.rs`) proves two
   consecutive refreshes with no state change emit nothing.
-
-### Risk noted at checkpoint
-
-The hand-written SDK wrappers could quietly reintroduce judgment (a Swift/
-Kotlin `Coverage`-like convenience "for ergonomics" — e.g. an `isComplete`
-property — would be the same collapse one layer up). As shipped, no such
-aggregate exists in `Row.swift` or `Row.kt`.
 
 — Fable, design checkpoint, 2026-07-11.

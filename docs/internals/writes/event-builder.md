@@ -8,7 +8,6 @@ owns:
   - what replaces `WritePayload::Unsigned`, and why neither "unsigned" nor "draft" survives
   - the builder's shape, and why it is a value rather than an object
   - why an authorless builder is strictly stronger than #47's mismatch check
-  - the builder's Rust and FFI projections, and why a UniFFI Object builder was rejected
   - the `nostr::EventBuilder` naming collision and its resolution
   - the death of the deterministic-bytes requirement
 related:
@@ -144,8 +143,6 @@ present-then-changed stays impossible because the engine fills the field only
 when it is `None`. A builder that states a timestamp keeps it, verbatim, in
 the frozen body.
 
-**Second, the UniFFI constraint** — see §4.
-
 What the value-ness rules out is as important as what it enables. The builder
 carries no engine reference, no session, no signer handle. Composing one is
 pure and infallible; everything that can fail — no current account, no
@@ -156,13 +153,9 @@ publish door, and the builder is an argument to it, not a second lifecycle.
 (#838 deleted `publish_composed` precisely to avoid two write paths; a builder
 that owned its own `send()` would recreate that mistake.)
 
-## 4. Cross-platform projection — DESIGNED
+## 4. Construction — DESIGNED
 
-The builder projects differently per platform, because the idiomatic spelling
-of "a record with defaults" differs per platform — but it is the same value
-everywhere.
-
-**Rust** gets consuming combinators:
+The builder is a plain data value with consuming combinators:
 
 ```rust
 EventBuilder::new(Kind::TextNote)
@@ -174,36 +167,6 @@ EventBuilder::new(Kind::TextNote)
 Each method takes `self` and returns `Self`. No interior mutability, no
 builder-of-a-builder, and — because the struct's fields are public — a caller
 that prefers struct literal syntax can use it directly.
-
-**FFI** gets a UniFFI `Record` with `#[uniffi(default)]` fields. Chained
-methods returning `Self` project badly through UniFFI (this constraint had
-already eliminated designs in the NIP-29 thread), but that is not a loss to
-route around — it is a signpost: Swift and Kotlin's *native* idiom for a
-defaulted builder IS a labeled-argument initializer. A Swift caller writes
-`EventBuilder(kind: 1, content: "hello")` and a Kotlin caller
-`EventBuilder(kind = 1u, content = "hello")`, with `tags` and `createdAt`
-defaulted. This is already the established pattern on this exact surface:
-`FfiWriteIntent` defaults both `identity_override` and `correlation` with
-`#[uniffi(default = None)]` (`crates/nmp-ffi/src/types.rs:626` and `:638`), so
-existing callers construct intents with labeled arguments and omit what they
-don't use.
-
-**Why a UniFFI *Object* builder was rejected.** UniFFI objects cross the
-boundary as `Arc`-wrapped handles; a fluent method on one cannot consume
-`self`, so every combinator forces interior mutability (a lock or cell) plus a
-foreign-to-Rust round-trip per field set, plus a terminal `build()` call to
-get the value back out — three costs, each of them pure overhead for a type
-with no identity and no lifetime. Objects are for long-lived handles *with*
-identity (an engine, a stream, a receipt handle). A builder is four fields of
-data. Making it an object would spend the expensive representation on the
-cheap thing.
-
-The failure mode this split avoids is worth naming: if Rust and FFI shared one
-representation chosen for FFI's benefit, Rust callers would get a field-bag
-with no combinators; chosen for Rust's benefit, FFI callers would get the
-Arc-and-mutex object. Divergent *idioms* over one identical *value* is the
-design; the record's fields and the combinators' results are the same four
-fields, and both feed the same `WritePayload::Event` variant.
 
 ## 5. The naming collision, and why apps never see it — DESIGNED
 
@@ -308,12 +271,6 @@ Current source anchors on this revision:
 - `crates/nmp/src/core/write.rs:1912-1986` keeps a caller-stated timestamp,
   selects the only author from `Identity::{Active, Explicit}`, and freezes the
   builder at acceptance. There is no author field to compare or restamp.
-- `crates/nmp-ffi/src/types.rs:570-638` projects `FfiEventBuilder` as the
-  defaulted UniFFI record and `FfiWritePayload::{Event, Signed}` as the whole
-  FFI payload surface.
-- `Packages/NMP/Sources/NMP/WriteIntent.swift:60-104` and
-  `Packages/NMPKotlin/src/main/kotlin/com/nmp/sdk/WriteIntent.kt:70-120` expose
-  the corresponding native value shapes, with no author on the builder.
 - `crates/nmp-nip22/src/intent.rs:1-39` demonstrates the protocol-module
   consequence: composition stays engine-free and clock-free while returning a
   builder-backed ordinary `WriteIntent`; identity and time resolve at the

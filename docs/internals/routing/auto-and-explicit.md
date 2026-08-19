@@ -56,11 +56,6 @@ files) has exactly two variants:
 - `Explicit(Vec<RelayUrl>)` — "use these exact relays and that is that, no
   matter what else happens."
 
-At the FFI boundary, `FfiWriteRouting` mirrors it exactly
-(`crates/nmp-ffi/src/types.rs:656-661`): `Auto` and `Explicit { relays: Vec<String> }`.
-`Explicit` is app-constructible on every platform — Swift and Kotlin apps can
-build it directly.
-
 Three earlier variants — `AuthorOutbox`, `PrivateNarrow(PrivateRoute)`, and
 `RelayListBootstrap(RelayListBootstrapAuthority)` — are gone. No trace of any
 of the three remains in `crates/`. There was no migration, no alias, and no

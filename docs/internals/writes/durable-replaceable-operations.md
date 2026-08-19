@@ -307,7 +307,7 @@ atomic replacement of canonical source and effective query state, current
 publish-queue successor delivery, signing or routing of an installed semantic
 materialization, event-qualified relay attempts or acknowledgements or retry or
 settlement, cancellation with shared materializations, removal or compaction of
-semantic receipts and operations, complete Rust/FFI/Swift/Kotlin projection, or
+semantic receipts and operations, complete `nmp` facade projection, or
 capability-defined normalization and production storage bounds.
 
 One further limit, recorded honestly at the time and unchanged: relay ingest
