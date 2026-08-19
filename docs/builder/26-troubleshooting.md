@@ -36,6 +36,29 @@ signing, routing, attempts, ACK, rejection, terminal policy, and failure.
 - Relay rejection after signature changes receipt evidence only; the valid
   signed row remains in the canonical store.
 
+## Reads blocked on NIP-42
+
+A source stuck short of `Requesting` on a relay that requires authentication
+says which of the three parties is holding it, and you act on each differently.
+
+- `AwaitingAuth(AwaitingChallenge)` — the relay has not challenged. Against a
+  relay that only challenges in response to a request, the request goes out
+  first and the challenge answers it; this state persisting means the relay
+  demanded auth and never issued a challenge, and there is nothing to sign.
+- `AwaitingAuth(AwaitingPolicy)` — your own `AuthPolicy` has not answered. If it
+  prompts the user, that prompt is on screen or was dismissed without resolving.
+- `AwaitingAuth(AwaitingSignature)` — your own signer has not returned the
+  kind:22242. A remote signer may be offline.
+- `AwaitingAuth(AwaitingSend | AwaitingRelayAck)` — the event exists; NMP or the
+  relay owes the next move.
+- `AuthDenied(source)` — someone refused, and `source` says who: `Policy` is
+  your own policy, `Signer` is your own signer, `Relay` is the relay. Their own
+  words are on the AUTH diagnostics row as `denialReason`.
+
+`AuthDenied(Policy)` and `AuthDenied(Signer)` are your app's own decisions and
+never a relay problem. Only `AuthDenied(Relay)` means the operator refused this
+identity.
+
 ## An unexpected relay
 
 Inspect the lane and exact context that contributed it:

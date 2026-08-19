@@ -156,7 +156,15 @@ pub enum SourceStatus {
     AwaitingAuth {
         phase: AuthPhase,
     },
-    AuthDenied,
+    /// #8: this session's AUTH is terminally refused, and `source` says by
+    /// WHOM. A bare `AuthDenied` made an app's own policy refusal, its own
+    /// signer's refusal and the relay's refusal one value, so an app whose
+    /// reads stopped could not tell which of the three it had to fix. The
+    /// refusing party's own words are on the diagnostics snapshot's
+    /// `denial_reason`; this carries only the part that stays `Copy`.
+    AuthDenied {
+        source: crate::publish_queue::AuthDenialSource,
+    },
     /// This exact source cannot currently acquire its planned work: its
     /// required worker failed its current connection attempt, its connected REQ
     /// has neither an accepted placement nor an exact retry owner, or its

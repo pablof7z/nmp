@@ -130,7 +130,7 @@ fn availability(
     let hard_source_failure = sources().any(|source| {
         matches!(
             source.status,
-            SourceStatus::AuthDenied | SourceStatus::Error
+            SourceStatus::AuthDenied { .. } | SourceStatus::Error
         )
     });
     if hard_shortfall || hard_source_failure {
