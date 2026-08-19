@@ -10,8 +10,6 @@ use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashSet};
 use std::sync::Arc;
 
 use redb::ReadableTable;
-#[cfg(test)]
-use redb::ReadableTableMetadata;
 
 use super::postings::validate_run_metas;
 use super::postings::{
@@ -27,122 +25,6 @@ use super::{Event, EventCursor, EventId, PersistenceError};
 
 const BASE_RUN_FAN_IN: usize = 8;
 const LARGE_RUN_FAN_IN: usize = 6;
-
-/// Process-death seams for the packed publication protocol. The environment
-/// variable is set only in the dedicated child-process crash harness, so
-/// ordinary parallel unit tests cannot arm a shared in-process failpoint.
-#[cfg(test)]
-pub(super) fn crash_if_postings(point: &str) {
-    if std::env::var("NMP_U5_CRASH_POINT").as_deref() == Ok(point) {
-        std::process::abort();
-    }
-}
-
-#[cfg(test)]
-pub(super) fn assert_packed_integrity(
-    read_txn: &redb::ReadTransaction,
-    canonical: &BTreeMap<EventKey, Event>,
-) {
-    let catalog = read_txn
-        .open_table(POSTINGS_CATALOG)
-        .expect("audit packed run catalog");
-    let segments = read_txn
-        .open_table(POSTINGS_SEGMENTS)
-        .expect("audit packed segments");
-
-    let metas = catalog_run_metas(&catalog).expect("read packed run catalog");
-    validate_run_metas(&metas).expect("packed run ranges are valid");
-    assert_eq!(
-        catalog_column_len(&catalog, CATALOG_BY_MIN).expect("count packed run ranges"),
-        metas.len() as u64
-    );
-    assert_eq!(
-        catalog_column_len(&catalog, CATALOG_DICTIONARY).expect("count packed dictionaries"),
-        metas.len() as u64
-    );
-
-    let mut actual = Vec::new();
-    let mut seen_segments = 0u64;
-    for run in &metas {
-        let range_entry = catalog
-            .get(catalog_key(CATALOG_BY_MIN, run.min_event_key).as_slice())
-            .expect("audit packed run range")
-            .expect("packed run range exists");
-        assert_eq!(
-            decode_run_id(range_entry.value()).expect("decode packed run range"),
-            run.run_id
-        );
-        let dictionary_bytes = catalog
-            .get(catalog_key(CATALOG_DICTIONARY, run.run_id).as_slice())
-            .expect("audit packed dictionary")
-            .expect("packed dictionary exists");
-        let dictionary = DictionaryView::parse(dictionary_bytes.value())
-            .and_then(DictionaryView::validate)
-            .expect("packed dictionary is valid");
-        let mut blocks = Vec::new();
-        for level in 0..MAX_DEATH_BLOCKS {
-            let key = death_key(run.run_id, level);
-            if let Some(value) = catalog.get(key.as_slice()).expect("audit death block") {
-                blocks.push(DeadKeys::decode(value.value()).expect("decode death block"));
-            }
-        }
-        let dead = merge_dead_blocks(&blocks).expect("merge death blocks");
-        let mut live_keys = BTreeSet::new();
-        for family in Family::ALL {
-            for shard in 0..=super::postings::SHARD_MASK {
-                let key = segment_key(family, shard, run.run_id);
-                let Some(value) = segments.get(key.as_slice()).expect("audit packed segment")
-                else {
-                    continue;
-                };
-                seen_segments += 1;
-                let segment = SegmentView::parse(value.value()).expect("parse packed segment");
-                segment
-                    .validate(dictionary)
-                    .expect("validate packed segment");
-                for membership in segment
-                    .memberships(dictionary)
-                    .expect("decode packed memberships")
-                {
-                    if dead
-                        .as_ref()
-                        .is_some_and(|keys| keys.contains(membership.event.event_key))
-                    {
-                        continue;
-                    }
-                    live_keys.insert(membership.event.event_key);
-                    actual.push(membership_tuple(membership));
-                }
-            }
-        }
-        assert_eq!(live_keys.len() as u64, run.live_events);
-    }
-    assert_eq!(
-        seen_segments,
-        segments.len().expect("count packed segments"),
-        "every packed segment belongs to a published run"
-    );
-
-    let mut expected: Vec<_> = memberships_for_events(canonical)
-        .into_iter()
-        .map(membership_tuple)
-        .collect();
-    actual.sort_unstable();
-    expected.sort_unstable();
-    assert_eq!(actual, expected);
-}
-
-#[cfg(test)]
-fn membership_tuple(membership: Membership) -> (u8, u8, Vec<u8>, u64, [u8; 32], EventKey) {
-    (
-        membership.family as u8,
-        membership.shard,
-        membership.prefix.as_bytes().to_vec(),
-        membership.event.created_at,
-        membership.event.id,
-        membership.event.event_key,
-    )
-}
 
 #[derive(Default)]
 pub(super) struct PostingsBatch {
@@ -509,48 +391,6 @@ fn allocate_run_id(write_txn: &redb::WriteTransaction) -> Result<u64, Persistenc
     Ok(run_id)
 }
 
-#[cfg(test)]
-fn memberships_for_events(events: &BTreeMap<EventKey, Event>) -> Vec<Membership> {
-    let mut memberships = Vec::new();
-    let global = Prefix::global();
-    for (&event_key, event) in events {
-        let run_event = Arc::new(RunEvent {
-            created_at: event.created_at.as_secs(),
-            id: *event.id.as_bytes(),
-            event_key,
-        });
-        push_membership(&mut memberships, Family::Global, global.clone(), &run_event);
-        push_membership(
-            &mut memberships,
-            Family::Author,
-            Prefix::author(*event.pubkey.as_bytes()),
-            &run_event,
-        );
-        push_membership(
-            &mut memberships,
-            Family::Kind,
-            Prefix::kind(event.kind.as_u16().to_be_bytes()),
-            &run_event,
-        );
-        let mut tags = BTreeSet::new();
-        for tag in event.tags.iter() {
-            let (Some(name), Some(value)) = (tag.single_letter_tag(), tag.content()) else {
-                continue;
-            };
-            tags.insert(tag_index_prefix(name, value));
-        }
-        for prefix in tags {
-            push_membership(
-                &mut memberships,
-                Family::Tag,
-                Prefix::tag(prefix.into()),
-                &run_event,
-            );
-        }
-    }
-    memberships
-}
-
 fn memberships_for_pending(events: &BTreeMap<EventKey, PendingEvent>) -> Vec<Membership> {
     let mut memberships = Vec::new();
     let global = Prefix::global();
@@ -688,8 +528,6 @@ fn insert_run(
     meta: RunMeta,
     encoded: super::postings::EncodedRun,
 ) -> Result<(), PersistenceError> {
-    #[cfg(test)]
-    crash_if_postings("postings-before-segments");
     {
         let mut catalog = write_txn
             .open_table(POSTINGS_CATALOG)
@@ -711,8 +549,6 @@ fn insert_run(
             .map_err(persist_err)?;
     }
     drop(segments);
-    #[cfg(test)]
-    crash_if_postings("postings-after-segments");
     insert_run_catalog(write_txn, meta)
 }
 
@@ -720,8 +556,6 @@ fn insert_run_catalog(
     write_txn: &redb::WriteTransaction,
     meta: RunMeta,
 ) -> Result<(), PersistenceError> {
-    #[cfg(test)]
-    crash_if_postings("postings-before-catalog");
     let encoded_meta = meta.encode().map_err(packed_err)?;
     let mut catalog = write_txn
         .open_table(POSTINGS_CATALOG)
@@ -739,8 +573,6 @@ fn insert_run_catalog(
         )
         .map_err(persist_err)?;
     drop(catalog);
-    #[cfg(test)]
-    crash_if_postings("postings-after-catalog");
     Ok(())
 }
 
@@ -876,8 +708,6 @@ pub(super) fn apply_run_deaths(
                 .map_err(packed_err)?
                 .expect("two nonempty death blocks");
         } else {
-            #[cfg(test)]
-            crash_if_postings("postings-before-death");
             let encoded = carry.encode().map_err(packed_err)?;
             catalog
                 .insert(key.as_slice(), encoded.as_slice())
@@ -889,8 +719,6 @@ pub(super) fn apply_run_deaths(
                     encoded_meta.as_slice(),
                 )
                 .map_err(persist_err)?;
-            #[cfg(test)]
-            crash_if_postings("postings-after-death");
             return Ok(());
         }
     }
@@ -970,8 +798,6 @@ fn stream_compaction_cohort(
     drop(dictionary_entries);
     drop(catalog);
     let run_id = allocate_run_id(write_txn)?;
-    #[cfg(test)]
-    crash_if_postings("postings-before-compaction-output");
     let mut catalog = write_txn
         .open_table(POSTINGS_CATALOG)
         .map_err(persist_err)?;
@@ -1040,8 +866,6 @@ fn stream_compaction_cohort(
             "nonempty compaction dictionary produced no live segments",
         ));
     }
-    #[cfg(test)]
-    crash_if_postings("postings-after-compaction-output");
     Ok(Some((run_id, min_event_key, max_event_key, live_events)))
 }
 

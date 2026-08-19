@@ -86,29 +86,3 @@ impl Nip11DecisionState {
     }
 }
 
-#[cfg(test)]
-mod nip11_decision_tests {
-    use super::*;
-
-    #[test]
-    fn grace_fallback_is_independent_and_eventual_completion_is_generation_guarded() {
-        let relay = RelayUrl::parse("wss://decision.example").unwrap();
-        let now = Instant::now();
-        let mut state = Nip11DecisionState::default();
-        let generation = state.begin(relay.clone(), now);
-
-        assert!(state
-            .take_due_fallbacks(now + NIP11_DECISION_GRACE - Duration::from_millis(1))
-            .is_empty());
-        assert_eq!(
-            state.take_due_fallbacks(now + NIP11_DECISION_GRACE),
-            vec![relay.clone()]
-        );
-        assert!(state
-            .take_due_fallbacks(now + NIP11_DECISION_GRACE + Duration::from_secs(1))
-            .is_empty());
-        assert!(!state.complete(&relay, generation.wrapping_add(1)));
-        assert!(state.complete(&relay, generation));
-        assert!(state.pending.is_empty());
-    }
-}

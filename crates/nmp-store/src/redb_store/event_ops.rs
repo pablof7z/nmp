@@ -10,8 +10,6 @@ use super::schema::{
     event_local_key, event_row_key, persist_err, EventKey, COVERAGE, EVENTS, EVENT_COL_LOCAL,
     EVENT_COL_ROW, EVENT_IDS, EXPIRATION_INDEX, RELAYS,
 };
-#[cfg(test)]
-use super::store::RedbCrashPoint;
 use super::store::RedbStore;
 use super::{
     address_key_for, binary_event, compute_coverage_key, merge_interval, shrink_after_eviction,
@@ -74,11 +72,7 @@ pub(super) fn insert(
             "injected observation failed before commit",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcome = write.commit_prepared(outcome)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
     Ok(outcome)
 }
 
@@ -104,11 +98,7 @@ pub(super) fn insert_batch(
             "injected observation failed before commit",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationBeforeCommit);
     let outcomes = write.commit_prepared(outcomes)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::ObservationAfterCommit);
     Ok(outcomes)
 }
 
@@ -577,11 +567,7 @@ pub(super) fn record_coverage(
             "injected coverage write failure",
         ));
     }
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::CoverageBeforeCommit);
     commit_prepared(write_txn, ())?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::CoverageAfterCommit);
     Ok(())
 }
 
@@ -789,11 +775,7 @@ pub(super) fn gc(
 
         Ok(())
     })?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::GcBeforeCommit);
     let report = write.commit_prepared(report)?;
-    #[cfg(test)]
-    store.crash_if(RedbCrashPoint::GcAfterCommit);
 
     Ok(report)
 }

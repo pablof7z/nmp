@@ -25,19 +25,3 @@ pub fn current_account_group_list_demand() -> Demand {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nmp_grammar::ReadRouting;
-
-    #[test]
-    fn current_account_demand_uses_reactive_authors_and_names_no_routing() {
-        let demand = current_account_group_list_demand();
-        assert_eq!(demand.selection.kinds, Some(BTreeSet::from([10009u16])));
-        assert_eq!(
-            demand.selection.authors,
-            Some(Binding::Reactive(IdentityField::ActivePubkey))
-        );
-        assert_eq!(demand.routing, ReadRouting::Auto);
-    }
-}

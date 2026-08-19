@@ -426,14 +426,6 @@ impl HistorySessions {
         }
     }
 
-    /// I4, as a question: the window is gone AND no handle still points at
-    /// it. Both halves, because checking only one is what the seven
-    /// hand-written sites made easy to get wrong.
-    #[cfg(test)]
-    pub(super) fn is_retired(&self, id: HistorySessionId) -> bool {
-        !self.sessions.contains_key(&id) && self.by_handle.values().all(|owner| *owner != id)
-    }
-
     pub(super) fn ids(&self) -> Vec<HistorySessionId> {
         self.sessions.keys().copied().collect()
     }
@@ -453,13 +445,6 @@ impl HistorySessions {
                     .map(|acquisition| (*handle_id, acquisition))
             })
         })
-    }
-
-    /// A copy of the handle index, for falsifiers that assert a failed
-    /// transition left I4 exactly as it found it. A copy, not the map.
-    #[cfg(test)]
-    pub(super) fn handle_index_snapshot(&self) -> HashMap<HandleId, HistorySessionId> {
-        self.by_handle.clone()
     }
 
     #[cfg(any(
@@ -486,123 +471,6 @@ impl HistorySessions {
             .filter_map(ScopeAcquisition::opening_evidence)
             .map(|evidence| evidence.sources.len())
             .sum()
-    }
-}
-
-/// What one window currently projects, as ONE comparable value (#1850).
-///
-/// Every field here was reached for individually through `expect_live`, a
-/// production accessor that hands a falsifier the whole `HistoryState`. Two
-/// of them were reconstructed from two fields apiece and are stated as facts
-/// instead:
-///
-/// - `rows` is the one list a `HistoryBatch` would carry. A test that asked
-///   "which rows, newest-first" used to walk `order` and index `last_rows`
-///   by hand; both collections and their agreement are now
-///   [`HistoryRows`]' business, and this reads its
-///   [`newest_first`](HistoryRows::newest_first) door like production does.
-/// - `advance_staged` is `pending_load.is_some()` -- the only thing any
-///   falsifier ever asked that `Option` -- so no test holds a
-///   `PendingHistoryLoad`, whose eight rollback-bookkeeping fields are the
-///   window's own business.
-///
-/// `PartialEq` is the point of the struct: the rollback and refused-open
-/// falsifiers assert a failed transition left a window *byte-identical*, and
-/// that claim is one comparison of one value here rather than eight
-/// hand-listed field comparisons that the ninth field silently escapes.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WindowProjection {
-    /// The canonical current row set, newest-first -- membership AND order
-    /// as one fact.
-    pub(super) rows: Vec<Row>,
-    /// Per-branch acquisition evidence in canonical branch order, exactly as
-    /// last delivered (`None` before the first delivery).
-    pub(super) evidence: Option<Vec<AcquisitionEvidence>>,
-    pub(super) load: WindowLoad,
-    pub(super) target_rows: usize,
-    pub(super) acquired_tie_seconds: BTreeSet<u64>,
-    pub(super) projection_complete: bool,
-    pub(super) handle_ids: BTreeSet<HandleId>,
-    /// Whether an advance is staged but not yet committed or rolled back.
-    pub(super) advance_staged: bool,
-}
-
-#[cfg(test)]
-impl WindowProjection {
-    /// The projected row ids, newest-first.
-    pub(super) fn ids(&self) -> Vec<EventId> {
-        self.rows.iter().map(Row::id).collect()
-    }
-
-    /// The projected row with this id, if the window holds it.
-    pub(super) fn row(&self, id: &EventId) -> Option<&Row> {
-        self.rows.iter().find(|row| &row.id() == id)
-    }
-
-    /// Whether the window currently projects this row.
-    pub(super) fn holds(&self, id: &EventId) -> bool {
-        self.row(id).is_some()
-    }
-
-    /// How many rows the window currently projects.
-    pub(super) fn len(&self) -> usize {
-        self.rows.len()
-    }
-}
-
-/// The reads and forced states the window falsifiers need, as questions
-/// rather than fields (#1850).
-///
-/// Before this block existed the only way into a window from a test was
-/// [`HistorySessions::expect_live`] -- a `pub(super)` PRODUCTION accessor
-/// that panics if the window is not live and then hands back the entire
-/// `HistoryState`. 39 test sites used it. `AuthorRouteNeeds` shipped its
-/// question interface with the owner and had 16 clean reads over the same
-/// period; this is that interface, arriving late.
-#[cfg(test)]
-impl HistorySessions {
-    /// Everything one live window projects. Panics exactly where
-    /// [`Self::expect_live`] does, and for the same reason: every caller
-    /// here has already established the window is live, and a silently
-    /// `None`-shaped answer would let a falsifier pass because the window it
-    /// was asking about had vanished.
-    pub(super) fn projection(&self, id: HistorySessionId) -> WindowProjection {
-        let state = self.expect_live(id);
-        WindowProjection {
-            rows: state.rows.newest_first().cloned().collect(),
-            evidence: state.last_evidence.clone(),
-            load: state.load,
-            target_rows: state.target_rows,
-            acquired_tie_seconds: state.acquired_tie_seconds.clone(),
-            projection_complete: state.projection_complete,
-            handle_ids: state.handle_ids.clone(),
-            advance_staged: state.pending_load.is_some(),
-        }
-    }
-
-    /// Put one window into the state an evidence refresh must NOT be able to
-    /// serve from its own retained projection, so the falsifier can prove the
-    /// fallback store read happens. A named door for the corruption: the field it flips is
-    /// private even to `CoreState`, and a test writing it by hand is a test
-    /// that also silently depends on nothing else in the window changing.
-    pub(super) fn force_projection_incomplete(&mut self, id: HistorySessionId) {
-        self.get_mut(id)
-            .expect("forcing a projection incomplete requires a live session")
-            .projection_complete = false;
-    }
-
-    /// Record `second` as a tie second this window already acquired, so the
-    /// next advance takes the older-range path rather than re-proving the
-    /// boundary second. The store-failure falsifiers need to reach the older
-    /// read specifically; driving a real advance to get there first is not
-    /// available to them, because the whole point of the fixture is a store
-    /// that fails the moment it is read.
-    pub(super) fn force_tie_second_acquired(&mut self, id: HistorySessionId, second: u64) {
-        self.get_mut(id)
-            .expect("forcing an acquired tie second requires a live session")
-            .acquired_tie_seconds
-            .insert(second);
     }
 }
 
@@ -1552,12 +1420,6 @@ impl CoreState {
                     }
                     None => self.store.query_newest(&filter, state.target_rows)?,
                 };
-                #[cfg(test)]
-                self.history_rows_examined.set(
-                    self.history_rows_examined
-                        .get()
-                        .saturating_add(rows.len() as u64),
-                );
                 for stored in rows {
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match by_id.entry(stored.event.id) {
@@ -1659,12 +1521,6 @@ impl CoreState {
                         .query_newest_before_under_pin(&filter, relays, before, needed)?,
                     None => self.store.query_newest_before(&filter, before, needed)?,
                 };
-                #[cfg(test)]
-                self.history_rows_examined.set(
-                    self.history_rows_examined
-                        .get()
-                        .saturating_add(rows.len() as u64),
-                );
                 for stored in rows {
                     let sources: BTreeSet<RelayUrl> = stored.provenance.seen.into_keys().collect();
                     match candidates.entry(stored.event.id) {
@@ -1804,9 +1660,6 @@ impl CoreState {
                 {
                     continue;
                 }
-                #[cfg(test)]
-                self.history_affected_row_queries
-                    .set(self.history_affected_row_queries.get().saturating_add(1));
                 let current = match self.store.query(&nostr::Filter::new().id(changed.event.id)) {
                     Ok(mut rows) => rows.pop().map(|stored| {
                         let signature_state = stored
@@ -1958,12 +1811,6 @@ impl CoreState {
                     return true;
                 }
             };
-            #[cfg(test)]
-            self.history_rows_examined.set(
-                self.history_rows_examined
-                    .get()
-                    .saturating_add(rows.len() as u64),
-            );
             let state = self
                 .history
                 .get_mut(id)
@@ -2043,310 +1890,3 @@ impl CoreState {
     }
 }
 
-/// `HistorySessions::assert_consistent`'s falsifier, and its removal-site
-/// falsifiers (#1606). All three reach `sessions`/`by_handle` directly,
-/// something only a test inside this module can do -- exactly the reasoning
-/// `owner_index.rs`'s own falsifier module doc gives for the same technique.
-#[cfg(test)]
-mod tests {
-    use nmp_grammar::Filter;
-    use nmp_store::RedbStore;
-
-    use super::*;
-
-    /// A row-shaped value with an id and a timestamp chosen by the caller.
-    /// NIP-01 commits `created_at` into the id, so a real same-id pair can
-    /// never disagree about it; that is exactly why the hand-paired
-    /// `last_rows`/`order` sites got away with never re-keying a same-id
-    /// overwrite, and exactly why the guarantee has to be proven against a
-    /// value the protocol cannot produce. `Row::from_parts` is the raw
-    /// composition door and asserts no provenance.
-    fn row_at(id_byte: u8, created_at: u64) -> Row {
-        Row::from_parts(
-            EventId::from_byte_array([id_byte; 32]),
-            nostr::Keys::generate().public_key(),
-            Timestamp::from(created_at),
-            nostr::Kind::TextNote,
-            nostr::Tags::new(),
-            String::new(),
-            nmp_grammar::RowSignature::Pending,
-            BTreeSet::new(),
-        )
-    }
-
-    /// I5's falsifier: one membership, and every order key carrying its own
-    /// row's timestamp.
-    ///
-    /// The break this catches is the one the open-coded sites could not: a
-    /// same-id replacement whose `created_at` moved. The hand-written sites
-    /// rebuilt the order key from the row they were about to write, never
-    /// from the row they were displacing, so a moved timestamp would have
-    /// orphaned the old key and left the window ordering a row it no longer
-    /// held. Delete the `order.remove(&Self::key(previous))` line in
-    /// [`HistoryRows::insert`] and this reddens with the window delivering
-    /// that row TWICE: `[(1, 80), (2, 90), (1, 80)]`.
-    #[test]
-    fn a_replacement_whose_timestamp_moved_leaves_exactly_one_ordered_row() {
-        let mut rows = HistoryRows::default();
-        rows.insert(row_at(1, 100));
-        rows.insert(row_at(2, 90));
-
-        let displaced = rows.insert(row_at(1, 80));
-
-        assert_eq!(
-            displaced.map(|row| row.created_at().as_secs()),
-            Some(100),
-            "insert returns the row it displaced, which is what the committed \
-             batch's rollback journal records"
-        );
-        assert_eq!(rows.len(), 2, "one id is still one row");
-        assert_eq!(
-            rows.newest_first()
-                .map(|row| (row.id().to_bytes()[0], row.created_at().as_secs()))
-                .collect::<Vec<_>>(),
-            vec![(2, 90), (1, 80)],
-            "the moved row re-sorts under its NEW timestamp and appears once"
-        );
-        rows.assert_consistent("after a moved-timestamp replacement", HistorySessionId(0));
-    }
-
-    /// `newest_first` is TOTAL. The open-coded walk was a `filter_map` over
-    /// `order` indexing `last_rows`, so the one corruption it could have
-    /// reported -- an ordered id the row set had lost -- was the one it
-    /// silently swallowed. Fusing the two collections behind one door makes
-    /// the drop unrepresentable rather than invisible.
-    #[test]
-    fn every_ordered_row_is_delivered() {
-        let mut rows = HistoryRows::default();
-        for (id, created_at) in [(1u8, 100u64), (2, 100), (3, 90)] {
-            rows.insert(row_at(id, created_at));
-        }
-        rows.remove(&EventId::from_byte_array([2; 32]));
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows.newest_first().count(), rows.len());
-        assert_eq!(
-            rows.newest_first()
-                .map(|row| row.id().to_bytes()[0])
-                .collect::<Vec<_>>(),
-            vec![1, 3],
-            "NIP-01 newest-first: created_at DESC, ties by id ASC"
-        );
-    }
-
-    /// `truncate_to` evicts from the OLDEST end and hands back what it
-    /// dropped, so the committed batch's rollback journal is a return value
-    /// rather than a second read the caller has to remember to take.
-    #[test]
-    fn truncation_evicts_the_oldest_and_returns_it() {
-        let mut rows = HistoryRows::default();
-        for (id, created_at) in [(1u8, 100u64), (2, 90), (3, 80)] {
-            rows.insert(row_at(id, created_at));
-        }
-
-        let evicted = rows.truncate_to(1);
-
-        assert_eq!(
-            evicted
-                .iter()
-                .map(|row| row.id().to_bytes()[0])
-                .collect::<Vec<_>>(),
-            vec![3, 2],
-            "oldest first"
-        );
-        assert_eq!(
-            rows.boundary().map(|cursor| cursor.created_at.as_secs()),
-            Some(100),
-            "the surviving row is the window's new canonical boundary"
-        );
-        rows.assert_consistent("after truncation", HistorySessionId(0));
-    }
-
-    /// Two live, independent history sessions over an empty store, each with
-    /// exactly one open handle.
-    fn open_two_sessions() -> (CoreState, HistorySessionId, HistorySessionId) {
-        let store = RedbStore::temporary().expect("temporary Redb store");
-        let mut core = CoreState::new(store, 20);
-        let query_for = |kind: u16| {
-            HistoryQuery::new(
-                LiveQuery::single(nmp_grammar::Demand {
-                    selection: Filter {
-                        kinds: Some(BTreeSet::from([kind])),
-                        ..Filter::default()
-                    },
-                    ..nmp_grammar::Demand::default()
-                }),
-                3,
-                6,
-            )
-        };
-        let session_id = |effects: Vec<Effect>| {
-            effects
-                .into_iter()
-                .find_map(|effect| match effect {
-                    Effect::EmitHistory(id, _) => Some(id),
-                    _ => None,
-                })
-                .expect("history session opens")
-        };
-        let first = session_id(core.handle(EngineMsg::SubscribeHistory(query_for(1))));
-        let second = session_id(core.handle(EngineMsg::SubscribeHistory(query_for(2))));
-        (core, first, second)
-    }
-
-    /// `assert_consistent`'s falsifier: swap which session each of two
-    /// sessions' handles is indexed under in `by_handle`, WITHOUT adding or
-    /// removing a session or a handle. A census that only counts sessions
-    /// and handles cannot see this -- that is the whole point of checking
-    /// identity instead (same reasoning as `OwnerIndexed::assert_consistent`
-    /// and `RequestAttempts::assert_consistent`).
-    #[test]
-    #[should_panic(expected = "by_handle indexes under a different session")]
-    fn assert_consistent_catches_a_cardinality_preserving_owner_swap() {
-        let (mut core, first, second) = open_two_sessions();
-
-        // Precondition: the mirror is intact, and each session owns exactly
-        // one handle, before corrupting it.
-        core.history.assert_consistent("precondition");
-        let first_handle = *core
-            .history
-            .expect_live(first)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the first session opened at least one handle");
-        let second_handle = *core
-            .history
-            .expect_live(second)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the second session opened at least one handle");
-        assert_ne!(first_handle, second_handle);
-
-        // Swap ownership in `by_handle` only. Total handle-key count (2) is
-        // unchanged -- only identity moved.
-        core.history.by_handle.insert(first_handle, second);
-        core.history.by_handle.insert(second_handle, first);
-        assert_eq!(
-            core.history.by_handle.len(),
-            2,
-            "handle-key count must be unchanged"
-        );
-
-        core.history.assert_consistent("after swap");
-    }
-
-    /// `retire`'s falsifier: corrupt `by_handle` so it no longer names the
-    /// session being retired for one of its own handles, bypassing every
-    /// real removal path. `retire` must refuse to tolerate that silently.
-    #[test]
-    #[should_panic(expected = "found no by_handle entry for its own handle")]
-    fn retire_panics_when_by_handle_mirror_already_disagrees() {
-        let (mut core, first, _second) = open_two_sessions();
-        let first_handle = *core
-            .history
-            .expect_live(first)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the first session opened at least one handle");
-
-        // Corrupt only `by_handle`, bypassing every real removal path.
-        // `sessions[first].handle_ids` still names it.
-        core.history.by_handle.remove(&first_handle);
-
-        let _ = core.history.retire(first);
-    }
-
-    /// `unlink_handles`'s falsifier: corrupt `by_handle` so the handle being
-    /// unlinked is indexed under a DIFFERENT session, without changing any
-    /// count. `unlink_handles` must refuse rather than silently remove a
-    /// reverse edge it does not own.
-    #[test]
-    #[should_panic(expected = "indexed under a different session")]
-    fn unlink_handles_panics_when_by_handle_names_a_different_owner() {
-        let (mut core, first, second) = open_two_sessions();
-        let first_handle = *core
-            .history
-            .expect_live(first)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the first session opened at least one handle");
-
-        // Re-point the reverse edge at the OTHER session, without touching
-        // any count.
-        core.history.by_handle.insert(first_handle, second);
-
-        let handles: BTreeSet<HandleId> = BTreeSet::from([first_handle]);
-        core.history.unlink_handles(first, &handles);
-    }
-
-    /// `open`'s falsifier: a handle already linked to a live session must
-    /// refuse a second session claiming it, rather than silently relinking
-    /// it and leaving the first session's `handle_ids` stale.
-    #[test]
-    #[should_panic(expected = "was already linked to a session")]
-    fn open_refuses_a_handle_already_linked_to_another_session() {
-        let (mut core, first, _second) = open_two_sessions();
-        let first_handle = *core
-            .history
-            .expect_live(first)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the first session opened at least one handle");
-
-        // A minimal second window, deliberately reusing a handle id already
-        // live under `first`.
-        let query = HistoryQuery::new(
-            LiveQuery::single(nmp_grammar::Demand {
-                selection: Filter {
-                    kinds: Some(BTreeSet::from([3u16])),
-                    ..Filter::default()
-                },
-                ..nmp_grammar::Demand::default()
-            }),
-            3,
-            6,
-        );
-        let state = HistoryState {
-            target_rows: query.page_size(),
-            query,
-            acquisitions_by_branch: Vec::new(),
-            handles: Vec::new(),
-            handle_ids: BTreeSet::new(),
-            live_handle_ids: Vec::new(),
-            branch_of: BTreeMap::new(),
-            acquisitions: BTreeMap::new(),
-            acquired_tie_seconds: BTreeSet::new(),
-            rows: HistoryRows::default(),
-            last_evidence: None,
-            projection_complete: false,
-            load: WindowLoad::Idle,
-            pending_load: None,
-        };
-        core.history.open(state, [first_handle]);
-    }
-
-    /// `link_advance_handles`'s falsifier: an advance opening a handle id
-    /// already live under ANOTHER session must refuse, rather than silently
-    /// relinking it and leaving the other session's `handle_ids` stale --
-    /// same reasoning as `open`'s falsifier above, at the sibling link site.
-    #[test]
-    #[should_panic(expected = "was already linked to a session")]
-    fn link_advance_handles_refuses_a_handle_already_linked_to_another_session() {
-        let (mut core, first, second) = open_two_sessions();
-        let first_handle = *core
-            .history
-            .expect_live(first)
-            .handle_ids
-            .iter()
-            .next()
-            .expect("the first session opened at least one handle");
-
-        // `second`'s advance opens a handle id that is already `first`'s.
-        core.history.link_advance_handles(second, &[first_handle]);
-    }
-}

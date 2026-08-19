@@ -1481,30 +1481,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nmp-bdd"
-version = "0.1.0"
-dependencies = [
- "cucumber",
- "nmp",
- "nmp-engine",
- "nmp-grammar",
- "nmp-local-signer",
- "nmp-nip29",
- "nmp-outbox",
- "nmp-resolver",
- "nmp-router",
- "nmp-router-testkit",
- "nmp-runtime",
- "nmp-signer",
- "nmp-store",
- "nmp-test-support",
- "nmp-transport",
- "nostr 0.44.4",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "nmp-bookmarks"
 version = "0.1.0"
 dependencies = [

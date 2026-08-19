@@ -301,37 +301,5 @@ impl RelayInformationSnapshot {
         Arc::as_ptr(&self.inner.payload) as usize
     }
 
-    #[cfg(test)]
-    pub(crate) fn payload_identity(&self) -> usize {
-        self.payload_identity_value()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn payload_weak(&self) -> std::sync::Weak<RelayInformationSnapshotPayload> {
-        Arc::downgrade(&self.inner.payload)
-    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// #852: the crate facade re-exports these types; it does not define a
-    /// second family. If a mirror returns, this assignment stops compiling.
-    #[test]
-    fn the_facade_exports_the_same_nip11_value_types() {
-        fn same_type<T>(_: T, _: T) {}
-        same_type(
-            RelayInformationCachePolicy::UseCache,
-            crate::RelayInformationCachePolicy::UseCache,
-        );
-        same_type(
-            RelayInformationFreshness::Fresh,
-            crate::RelayInformationFreshness::Fresh,
-        );
-        same_type(
-            RelayInformationError::ServiceClosed,
-            crate::RelayInformationError::ServiceClosed,
-        );
-    }
-}

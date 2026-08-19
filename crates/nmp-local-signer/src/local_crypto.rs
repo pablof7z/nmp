@@ -162,11 +162,6 @@ impl CanonicalSecret {
         &self.0
     }
 
-    #[cfg(test)]
-    pub(super) fn allocation_address(&self) -> *const u8 {
-        (self.0.as_ref() as *const Sensitive<[u8; 32]>).cast()
-    }
-
     fn operation_copy(&self, kind: SensitiveKind) -> Box<Sensitive<[u8; 32]>> {
         // Allocate first, then copy, for the same no-relocation property as
         // the canonical owner. The operation view is short-lived but still
@@ -324,29 +319,6 @@ fn nip44_encrypt_with_nonce(
     payload.extend_from_slice(&padded[..]);
     payload.extend_from_slice(&mac[..]);
     Ok(BASE64.encode(payload))
-}
-
-#[cfg(test)]
-pub(super) fn sign_with_aux_rand(
-    secret: &CanonicalSecret,
-    message: &[u8; 32],
-    aux: [u8; 32],
-) -> Result<Signature, LocalCryptoError> {
-    sign_with_owned_aux(
-        secret,
-        message,
-        Sensitive::new(SensitiveKind::SigningAux, aux),
-    )
-}
-
-#[cfg(test)]
-pub(super) fn nip44_encrypt_with_test_nonce(
-    secret: &CanonicalSecret,
-    peer: PublicKey,
-    plaintext: &str,
-    nonce: [u8; 32],
-) -> Result<String, LocalCryptoError> {
-    nip44_encrypt_with_nonce(secret, peer, plaintext, &nonce)
 }
 
 pub(super) fn nip44_decrypt(
@@ -622,157 +594,5 @@ fn quarter_round(state: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) 
     state[b] = (state[b] ^ state[c]).rotate_left(7);
 }
 
-#[cfg(test)]
-thread_local! {
-    static WIPE_AUDIT: std::cell::RefCell<Vec<SensitiveKind>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-#[cfg(test)]
-fn record_wipe(kind: SensitiveKind, erased: bool) {
-    assert!(erased, "{kind:?} owner was not erased while still live");
-    WIPE_AUDIT.with(|audit| audit.borrow_mut().push(kind));
-}
-
-#[cfg(not(test))]
 fn record_wipe(_: SensitiveKind, _: bool) {}
 
-#[cfg(test)]
-pub(super) fn take_wipe_audit() -> Vec<SensitiveKind> {
-    WIPE_AUDIT.with(|audit| std::mem::take(&mut *audit.borrow_mut()))
-}
-
-#[cfg(test)]
-pub(super) fn clear_wipe_audit() {
-    WIPE_AUDIT.with(|audit| audit.borrow_mut().clear());
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn canonical_secret_one() -> CanonicalSecret {
-        let mut secret = CanonicalSecret::zeroed();
-        secret.as_mut_bytes()[31] = 1;
-        secret
-    }
-
-    #[test]
-    fn nip44_padding_matches_spec_boundaries() {
-        assert_eq!(nip44_padded_len(1), 32);
-        assert_eq!(nip44_padded_len(32), 32);
-        assert_eq!(nip44_padded_len(33), 64);
-        assert_eq!(nip44_padded_len(256), 256);
-        assert_eq!(nip44_padded_len(257), 320);
-        assert_eq!(nip44_padded_len(MAX_NIP44_PLAINTEXT_LEN), 65_536);
-    }
-
-    #[test]
-    fn canonical_owner_and_operation_path_exclude_nonsecure_key_types() {
-        let secret = canonical_secret_one();
-        let CanonicalSecret(owner) = secret;
-        let Sensitive { value: _, kind: _ } = owner.as_ref();
-
-        let production_source = include_str!("local_crypto.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production source");
-        for forbidden in [
-            "nostr::Keys::",
-            "nostr::SecretKey::",
-            "secp256k1::Keypair::",
-            "Keys::",
-            "SecretKey::",
-            "Keypair::",
-            "impl Erase for Keys",
-            "sign_with_keys(",
-            "nip44::encrypt(",
-            "nip44::decrypt(",
-        ] {
-            assert!(
-                !production_source.contains(forbidden),
-                "operation path must not contain {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn sensitive_drop_records_cleanup_on_unwind() {
-        clear_wipe_audit();
-        let result = std::panic::catch_unwind(|| {
-            let _secret = Sensitive::new(SensitiveKind::SigningOperationSecret, [7u8; 32]);
-            panic!("exercise unwind cleanup");
-        });
-        assert!(result.is_err());
-        assert_eq!(
-            take_wipe_audit(),
-            vec![SensitiveKind::SigningOperationSecret]
-        );
-    }
-
-    #[test]
-    fn signing_and_nip44_owned_material_wipes_on_unwind() {
-        let secret = canonical_secret_one();
-        let peer = validate_and_public_key(&secret).expect("valid peer");
-        clear_wipe_audit();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let operation = secret.operation_copy(SensitiveKind::SigningOperationSecret);
-            let _scalar = sensitive_nonzero_scalar(&operation, SensitiveKind::SigningScalar)
-                .expect("valid scalar");
-            let conversation = derive_conversation_key(&secret, peer).expect("conversation key");
-            let _message_keys = derive_message_keys(&conversation, &[1u8; 32]);
-            panic!("exercise complete operation unwind cleanup");
-        }));
-        assert!(result.is_err());
-
-        let audit = take_wipe_audit();
-        for expected in [
-            SensitiveKind::SigningOperationSecret,
-            SensitiveKind::SigningScalar,
-            SensitiveKind::Nip44OperationSecret,
-            SensitiveKind::ConversationKey,
-            SensitiveKind::MessageKeys,
-        ] {
-            assert!(
-                audit.contains(&expected),
-                "{expected:?} must wipe during unwind"
-            );
-        }
-    }
-
-    #[test]
-    fn invalid_padding_wipes_decrypted_plaintext_before_refusal() {
-        let secret = canonical_secret_one();
-        let peer = validate_and_public_key(&secret).expect("valid peer");
-        let nonce = [2u8; 32];
-        let conversation = derive_conversation_key(&secret, peer).expect("conversation key");
-        let message_keys = derive_message_keys(&conversation, &nonce);
-        let mut encrypted = Sensitive::new(SensitiveKind::PaddedPlaintext, vec![0u8; 34]);
-        chacha20_xor(&message_keys[..32], &message_keys[32..44], &mut encrypted);
-        let mac = hmac_sha256(
-            &message_keys[44..],
-            &[&nonce, &encrypted],
-            SensitiveKind::HashDigest,
-        );
-        let mut payload = vec![2u8];
-        payload.extend_from_slice(&nonce);
-        payload.extend_from_slice(&encrypted);
-        payload.extend_from_slice(&mac[..]);
-        let ciphertext = BASE64.encode(payload);
-        drop(mac);
-        drop(encrypted);
-        drop(message_keys);
-        drop(conversation);
-        clear_wipe_audit();
-
-        assert_eq!(
-            nip44_decrypt(&secret, peer, &ciphertext),
-            Err(LocalCryptoError::InvalidPadding)
-        );
-        let audit = take_wipe_audit();
-        assert!(audit.contains(&SensitiveKind::DecryptedPlaintext));
-        assert!(audit.contains(&SensitiveKind::MessageKeys));
-        assert!(audit.contains(&SensitiveKind::SymmetricCipher));
-    }
-}

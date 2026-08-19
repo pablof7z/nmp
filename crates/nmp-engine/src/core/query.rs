@@ -659,14 +659,6 @@ impl CoreState {
         });
     }
 
-    #[cfg(test)]
-    pub(in crate::core) fn reconcile_request_claim_transfers_for_wire_delta(
-        &mut self,
-        wire_delta: &WireDelta,
-    ) {
-        self.reconcile_request_claim_transfers_except(wire_delta, &BTreeSet::new());
-    }
-
     fn reconcile_request_claim_transfers_except(
         &mut self,
         wire_delta: &WireDelta,
@@ -972,11 +964,6 @@ impl CoreState {
     /// atoms are absent from this wire truth.
     pub(in crate::core) fn wire_demand(&self) -> BTreeSet<ContextualAtom> {
         self.wire.live_demand()
-    }
-
-    #[cfg(test)]
-    pub(in crate::core) fn retain_wire_atom_owner(&mut self, atom: &ContextualAtom) -> bool {
-        self.retain_wire_atom_owner_with_effects(atom, &mut Vec::new())
     }
 
     /// Add one owner and perform what that arrival implies elsewhere.

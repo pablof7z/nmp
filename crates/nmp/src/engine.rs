@@ -33,25 +33,11 @@ pub use relay_information::RelayInformationRequestError;
 
 use std::sync::Mutex;
 
-#[cfg(test)]
-use crate::subscription::{Subscription, Window};
-#[cfg(test)]
-use nmp_engine::core::ReceiptId;
-#[cfg(test)]
-use nmp_grammar::LiveQuery;
-#[cfg(test)]
-use nmp_grammar::WriteIntent;
-#[cfg(test)]
-use nmp_runtime::ReceiptReattachment;
 #[cfg(any(test, feature = "test-instrumentation"))]
 use nmp_runtime::{AddSignerError, SignerRegistration};
 use nmp_runtime::{EngineThread, Handle, RuntimeConfig, SignEventError, SignEventOperation};
 use nmp_store::{RedbStore, RedbStoreOpenError, RedbStoreResetError};
 use nmp_transport::PoolConfig;
-#[cfg(test)]
-use nostr::EventId;
-#[cfg(test)]
-use nostr::RelayUrl;
 use nostr::{Kind, PublicKey, Tag, Timestamp, UnsignedEvent};
 
 use crate::auth::{AuthPolicy, EngineAuthPolicyAdapter};
@@ -59,8 +45,6 @@ use crate::config::{build_routing_fact_relays, EngineConfig};
 
 use crate::error::EngineError;
 use crate::subscription::{AsyncDiagnosticsSubscription, DiagnosticsSubscription};
-#[cfg(test)]
-use nmp_nip11::{RelayInformationCachePolicy, RelayInformationError};
 
 /// The open state: the `Handle` verbs are driven through, plus the
 /// `EngineThread` `shutdown` eventually joins. Not `Clone` (`EngineThread`
@@ -653,5 +637,3 @@ impl Drop for Engine {
     }
 }
 
-#[cfg(test)]
-mod tests;

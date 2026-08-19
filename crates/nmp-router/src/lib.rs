@@ -36,8 +36,6 @@
 //!   and wire-token mint counter.
 
 mod admission;
-#[cfg(test)]
-mod admission_delta_tests;
 mod budget;
 mod coalesce;
 mod component;
@@ -46,8 +44,6 @@ mod diag;
 mod facts;
 mod ownership;
 mod plan;
-#[cfg(test)]
-mod rebuild_agreement_tests;
 mod route;
 mod router;
 mod solver;

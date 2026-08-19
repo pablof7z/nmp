@@ -6,8 +6,6 @@
 //! instead of reaching for ten tables.
 
 use super::canonical::CanonicalWriteTables;
-#[cfg(test)]
-use super::postings_store::crash_if_postings;
 use super::postings_store::PostingsBatch;
 use super::schema::{
     addr_suppress_key, id_suppress_key, persist_err, EventKey, ADDR_INDEX, EXPIRATION_INDEX,
@@ -67,11 +65,7 @@ impl GovernedWrite {
     /// caller prepared before this transaction exit.
     pub(super) fn commit_prepared<T>(mut self, prepared: T) -> Result<T, PersistenceError> {
         self.postings.flush(&self.write_txn)?;
-        #[cfg(test)]
-        crash_if_postings("postings-before-commit");
         self.write_txn.commit().map_err(persist_err)?;
-        #[cfg(test)]
-        crash_if_postings("postings-after-commit");
         Ok(prepared)
     }
 }

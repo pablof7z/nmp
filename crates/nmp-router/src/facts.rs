@@ -120,43 +120,4 @@ pub trait RoutingFacts {
 // must not grow into one; it exists for exactly the handful of call sites
 // that need *some* `RoutingFacts` value to hand a router function, most of
 // which just want the empty case.
-#[cfg(test)]
-#[derive(Default, Clone)]
-pub(crate) struct LocalFacts {
-    authors: std::collections::BTreeMap<PublicKey, AuthorRouteState>,
-}
 
-#[cfg(test)]
-impl LocalFacts {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn with_author_routes(
-        mut self,
-        author: PublicKey,
-        outbound: impl IntoIterator<Item = RelayUrl>,
-        inbound: impl IntoIterator<Item = RelayUrl>,
-    ) -> Self {
-        self.authors.insert(
-            author,
-            AuthorRouteState::Present(AuthorRoutes::new(outbound, inbound)),
-        );
-        self
-    }
-}
-
-#[cfg(test)]
-impl RoutingFacts for LocalFacts {
-    fn author_routes(&self, author: &PublicKey) -> AuthorRouteState {
-        self.authors.get(author).cloned().unwrap_or_default()
-    }
-
-    fn operator_app_relays(&self) -> Vec<RelayUrl> {
-        Vec::new()
-    }
-
-    fn operator_fallback_relays(&self) -> Vec<RelayUrl> {
-        Vec::new()
-    }
-}

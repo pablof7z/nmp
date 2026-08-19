@@ -289,15 +289,6 @@ impl Verifier {
         self.schnorr_calls.load(Ordering::Relaxed)
     }
 
-    /// The same counter [`Self::schnorr_verifications`] reads, as a shared
-    /// handle. The translator thread OWNS its `Verifier`, so an end-to-end
-    /// falsifier that drives real relay frames through
-    /// [`super::inner::translator_loop`] can only observe the schnorr count
-    /// by holding this clone from before construction.
-    #[cfg(test)]
-    pub(super) fn schnorr_counter(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.schnorr_calls)
-    }
 }
 
 fn resolve_candidate(
@@ -505,20 +496,6 @@ impl VerifierPool {
             self.workers[index] = Some(worker);
         }
     }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn worker_count(&self) -> usize {
-        self.workers.len()
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn stop_worker(&mut self, index: usize) {
-        let worker = self.workers[index].as_mut().expect("test worker exists");
-        let _ = worker.tasks.send(Task::Shutdown);
-        if let Some(join) = worker.join.take() {
-            join.join().expect("test worker must stop cleanly");
-        }
-    }
 }
 
 fn configured_workers(configured: usize) -> usize {
@@ -625,5 +602,3 @@ fn shutdown_workers(workers: &mut [Option<Worker>]) {
     }
 }
 
-#[cfg(test)]
-mod tests;

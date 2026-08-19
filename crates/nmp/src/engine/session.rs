@@ -38,41 +38,6 @@ fn session_mutation_from_add_signer(
 }
 
 impl Engine {
-    #[cfg(test)]
-    pub(super) fn install_test_local_provider(
-        &self,
-        secret_key: &str,
-    ) -> Result<crate::SessionAccount, crate::SessionMutationError> {
-        let signer = nmp_local_signer::LocalKeySigner::parse(secret_key)
-            .map_err(|_| crate::SessionMutationError::InvalidSecretKey)?;
-        self.with_handle(|handle| handle.add_private_key_account(signer, false))
-            .map_err(|_| crate::SessionMutationError::EngineClosed)?
-            .map_err(session_mutation_from_add_signer)
-    }
-
-    #[cfg(test)]
-    pub(super) fn select_test_account(
-        &self,
-        public_key: Option<PublicKey>,
-    ) -> Result<(), EngineError> {
-        match public_key {
-            Some(public_key) => {
-                self.add_public_key_account(public_key, false)
-                    .map_err(|_| EngineError::EngineClosed)?;
-                self.make_current_account(public_key)
-                    .map_err(|_| EngineError::EngineClosed)
-            }
-            None => {
-                self.with_handle(|handle| handle.set_current_account(None))?;
-                Ok(())
-            }
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn test_current_public_key(&self) -> Result<Option<PublicKey>, EngineError> {
-        Ok(self.session()?.current_pubkey)
-    }
 
     pub fn new_with_session(
         config: EngineConfig,

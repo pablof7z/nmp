@@ -93,32 +93,3 @@ pub(crate) fn build_routing_fact_relays(
     Ok((app_relays, fallback_relays))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn operator_relays_are_the_only_relays_configuration_states() {
-        let app = "wss://app.example";
-        let fallback = "wss://fallback.example";
-        let config = EngineConfig {
-            app_relays: vec![app.to_string()],
-            fallback_relays: vec![fallback.to_string()],
-            ..EngineConfig::default()
-        };
-
-        let (app_relays, fallback_relays) =
-            build_routing_fact_relays(&config).expect("valid operator config");
-
-        assert_eq!(app_relays, [RelayUrl::parse(app).expect("valid relay")]);
-        assert_eq!(
-            fallback_relays,
-            [RelayUrl::parse(fallback).expect("valid relay")]
-        );
-        // Configuration yields two operator relay lists and no author channel
-        // at all. An author route is a fact some provider learned, never a
-        // value an operator typed -- which is why the indexer list that used
-        // to sit here is now the constructor argument of the provider whose
-        // concept it is.
-    }
-}

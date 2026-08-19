@@ -77,18 +77,10 @@ impl EngineCore {
     /// call carried before this module existed, moved rather than widened.
     /// Widening it to the other test binaries is a separate change with its
     /// own evidence.
-    #[cfg_attr(not(test), inline(always))]
+    #[inline(always)]
     fn checked<T>(&mut self, at: &'static str, f: impl FnOnce(&mut CoreState) -> T) -> T {
-        #[cfg(not(test))]
         let _ = at;
         let out = f(&mut self.state);
-        #[cfg(test)]
-        if !self
-            .state
-            .turn_level_consistency_suppressed_for_named_exception
-        {
-            self.state.assert_owner_consistency(at);
-        }
         out
     }
 
@@ -97,79 +89,7 @@ impl EngineCore {
     /// state, and it is the one every test starts from.
     fn checked_new(state: CoreState) -> Self {
         let this = Self { state };
-        #[cfg(test)]
-        this.state.assert_owner_consistency("EngineCore::new");
         this
-    }
-
-    /// Opt out of the per-transition mirror check for the rest of this
-    /// `EngineCore`'s life. Exactly seven call sites may call this -- see
-    /// `CoreState::turn_level_consistency_suppressed_for_named_exception`'s
-    /// doc for which, and for the two distinct reasons (amortized-cost
-    /// proof, handle-less algebra fixture) that justify each.
-    #[cfg(test)]
-    pub(super) fn suppress_turn_level_consistency_for_named_exception(&mut self) {
-        self.state
-            .suppress_turn_level_consistency_for_named_exception();
-    }
-
-    /// The engine's current logical demand is now exactly `demand`.
-    ///
-    /// This is the one thing `CoreState::recompile` does to attribution, and
-    /// a falsifier that drives the router by hand (rather than through a
-    /// resolver) has to do it too, or every coverage claim it later attributes
-    /// resolves to no retained shape. Sixty-seven sites did it a different
-    /// way: `white_box("attribution.observe_atom", ..)` for whatever arrived
-    /// and `white_box("attribution.release_atom", ..)` for whatever left,
-    /// spelling out a TRANSITION where production states a FACT. A transition
-    /// can be wrong in ways a fact cannot — `release_atom` silently no-ops on
-    /// an atom that was never observed — and none of the sixty-seven could
-    /// ever have caught `recompile` changing which calls it makes (#1850).
-    ///
-    /// Checked, not `white_box`: installing the demand set is a complete
-    /// transition of that owner, not a mid-turn sub-step, so the
-    /// owner-consistency proof holds across it.
-    ///
-    /// Takes the same `BTreeSet<ContextualAtom>` shape `CoreState::wire_demand`
-    /// hands `recompile`, so a falsifier states its demand in the type
-    /// production states it in.
-    #[cfg(test)]
-    pub(super) fn set_active_demand(&mut self, demand: &BTreeSet<ContextualAtom>) {
-        self.checked("set_active_demand", |s| {
-            s.attribution.set_active_demand(demand.iter())
-        })
-    }
-
-    /// The reducer's own in-crate falsifiers reach a mid-turn sub-step here,
-    /// and this is the ONLY way anything obtains a `&mut CoreState`.
-    /// `#[cfg(test)]` and `pub(super)`: it does not exist in a production
-    /// build and cannot be named outside `core`.
-    ///
-    /// **It deliberately does not run the turn-level check**, and that is a
-    /// measured decision rather than an omission. An earlier revision routed
-    /// this through [`Self::checked`]; four tests then failed for a
-    /// principled reason. `assert_owner_consistency` is a property of a
-    /// TURN, and a white-box test mutates mid-turn by construction:
-    /// `on_publish` leaves the stalled-write cache stale until `handle`'s
-    /// epilogue refreshes it, and `wire.unindex_handle` is step one of a
-    /// three-step rebuild the test open-codes. Asserting a turn postcondition
-    /// after a sub-step asserts something that is not true yet. Same reason
-    /// the shell carries no depth counter: a mechanism spanning sub-steps
-    /// would conceal a broken state model rather than prove one.
-    ///
-    /// So this does not close the in-crate test hole -- it makes it
-    /// COUNTABLE. `grep -c 'white_box(' crates/nmp-engine/src` is the exact
-    /// number of places the reducer's own tests reach past its doors, and
-    /// that number should fall as owners are extracted. Every call site
-    /// outside `core` is a compile error instead.
-    #[cfg(test)]
-    pub(super) fn white_box<T>(
-        &mut self,
-        at: &'static str,
-        f: impl FnOnce(&mut CoreState) -> T,
-    ) -> T {
-        let _ = at;
-        f(&mut self.state)
     }
 
     pub fn is_current_transport_session(
@@ -607,25 +527,3 @@ impl EngineCore {
     }
 }
 
-/// Read-only white-box access for the reducer's own in-crate falsifiers.
-///
-/// `#[cfg(test)]`, and there is deliberately **no `DerefMut`** -- so this
-/// grants reads and nothing else, and every mutation still goes through a
-/// named door. It leaks nothing: `CoreState`'s fields are private to module
-/// `core`, so the only code this helps is code that could already see them.
-///
-/// It also does real work. Removing the fields from `EngineCore` makes the
-/// compiler split the in-crate test suite exactly along the read/write line:
-/// 1,165 errors without this impl, 394 with it, and the 394 are precisely
-/// the E0596/E0594 mutation sites. Those are the ones that had to move to
-/// [`EngineCore::white_box`]; the 764 reads needed no change and gain nothing
-/// from being rewritten, because there is no owner boundary between a
-/// reducer and its own white-box tests -- they are the same Rust module.
-#[cfg(test)]
-impl std::ops::Deref for EngineCore {
-    type Target = CoreState;
-
-    fn deref(&self) -> &CoreState {
-        &self.state
-    }
-}

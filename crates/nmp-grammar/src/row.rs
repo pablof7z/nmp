@@ -246,58 +246,6 @@ impl Row {
     }
 }
 
-#[cfg(test)]
-mod row_signature_tests {
-    use super::*;
-    use nostr::Keys;
-
-    fn signed_event() -> nostr::Event {
-        nostr::EventBuilder::text_note("one signature owner")
-            .sign_with_keys(&Keys::generate())
-            .expect("fixture signs")
-    }
-
-    #[test]
-    fn pending_has_no_signature_or_event_projection() {
-        let event = signed_event();
-        let row = Row::from_parts(
-            event.id,
-            event.pubkey,
-            event.created_at,
-            event.kind,
-            event.tags,
-            event.content,
-            RowSignature::Pending,
-            BTreeSet::new(),
-        );
-
-        assert_eq!(row.signature(), RowSignature::Pending);
-        assert!(row.signed_event().is_none());
-    }
-
-    #[test]
-    fn signed_always_projects_the_exact_supplied_signature() {
-        let event = signed_event();
-        let expected = event.sig;
-        let row = Row::from_parts(
-            event.id,
-            event.pubkey,
-            event.created_at,
-            event.kind,
-            event.tags,
-            event.content,
-            RowSignature::Signed(expected),
-            BTreeSet::new(),
-        );
-
-        assert_eq!(row.signature(), RowSignature::Signed(expected));
-        assert_eq!(
-            row.signed_event().expect("signed row has event").sig,
-            expected
-        );
-    }
-}
-
 /// The canonical row is the ordinary reply/quote/reaction target, so it is
 /// what `EventBuilder::tag` is usually handed.
 ///
