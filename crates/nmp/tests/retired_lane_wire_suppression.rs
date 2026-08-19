@@ -28,7 +28,7 @@
 //! socket witness sees exactly one `EVENT` -- the newer's -- ever, at any
 //! point, including rejected/pre-admission frames.
 //!
-//! nmp:falsifier=A replaceable-coordinate write retired before its own first
+//! A replaceable-coordinate write retired before its own first
 //! delivery attempt never reaches the wire, proven by the relay's own
 //! independent record of every EVENT frame it has seen -- not by receipt
 //! facts alone.

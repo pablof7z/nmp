@@ -40,7 +40,7 @@
 //! relay's current value for the coordinate is correctly parked rather than
 //! sending a list built over a base that relay may already have superseded.
 //!
-//! nmp:falsifier=Every member receipt of every generation settles once its
+//! Every member receipt of every generation settles once its
 //! lane is terminal, regardless of whether its relay published or gave up,
 //! and no durable/in-memory semantic state survives the last terminal lane.
 //!
@@ -430,7 +430,7 @@ fn every_member_of_n_generations_settles_under_mixed_outcomes() {
 /// 2 is even signed, after it is signed and dispatched, and interleaved with
 /// generation 2's own real settlement -- and must be inert every time.
 ///
-/// nmp:falsifier=An OK for a superseded generation's event can never settle,
+/// An OK for a superseded generation's event can never settle,
 /// publish, or otherwise advance its successor generation, even sharing the
 /// same coordinate, author, relay, session and owner receipt.
 #[test]
@@ -609,7 +609,7 @@ fn a_stale_ack_for_a_superseded_generation_cannot_settle_its_successor() {
 /// fresh coordinate neither disturbs the retired ones nor leaves anything of
 /// its own behind once it, too, settles.
 ///
-/// nmp:falsifier=Once every member of a generation settles, its
+/// Once every member of a generation settles, its
 /// `SEMANTIC_RESOURCES`/`SEMANTIC_OPERATIONS`/intent/deadline rows are gone,
 /// the effect does not scale with how many generations preceded it, and nothing
 /// later resurrects a retired coordinate's state.

@@ -1549,7 +1549,7 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
 /// name. Neither reuses the failed engine, because there is no door that
 /// would let them.
 ///
-/// nmp:falsifier=A post-acceptance store failure emits no app-facing fact and
+/// A post-acceptance store failure emits no app-facing fact and
 /// costs only progress: a fresh engine over the same file recovers the
 /// receipt, its frozen bytes and its route set, and the write resumes.
 #[test]
