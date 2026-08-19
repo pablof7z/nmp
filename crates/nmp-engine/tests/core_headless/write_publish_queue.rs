@@ -117,7 +117,7 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
     authenticate_signer(&mut core, 0, &good, &author);
     authenticate_signer(&mut core, 1, &blocked, &author);
 
-    let (id, signed, effects) =
+    let (id, _signed, effects) =
         publish_explicit(&mut core, &author, [good.clone(), blocked.clone()]);
     assert!(effects.iter().any(
         |effect| matches!(effect, Effect::PublishEvent(session, event, _)
@@ -127,12 +127,10 @@ fn one_attempt_start_failure_is_owned_nonterminal_and_never_hits_the_wire() {
         |effect| matches!(effect, Effect::PublishEvent(session, event, _)
             if session == &signer_session(&blocked, event.pubkey))
     ));
-    assert!(receipt_statuses(&effects)
-        .iter()
-        .any(|fact| fact == &attempt_stalled(signed.id, &blocked)));
+    assert!(no_relay_fact_for(&receipt_statuses(&effects), &blocked));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(signed.id, &blocked)));
+    assert!(no_relay_fact_for(&replay.facts, &blocked));
 }
 
 // ---- issue #93: durable EVENT handoff -----------------------------------
@@ -319,7 +317,7 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
     authenticate_signer(&mut core, 0, &a, &author);
     authenticate_signer(&mut core, 1, &b, &author);
 
-    let (id, signed, effects) = publish_explicit(&mut core, &author, [a.clone(), b.clone()]);
+    let (id, _signed, effects) = publish_explicit(&mut core, &author, [a.clone(), b.clone()]);
     assert_eq!(
         effects
             .iter()
@@ -328,13 +326,13 @@ fn all_attempt_start_failures_retain_every_lane_without_empty_terminal_sentinel(
         0
     );
     let statuses = receipt_statuses(&effects);
-    assert!(statuses.contains(&attempt_stalled(signed.id, &a)));
-    assert!(statuses.contains(&attempt_stalled(signed.id, &b)));
+    assert!(no_relay_fact_for(&statuses, &a));
+    assert!(no_relay_fact_for(&statuses, &b));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
     let replayed = replay.facts;
-    assert!(replayed.contains(&attempt_stalled(signed.id, &a)));
-    assert!(replayed.contains(&attempt_stalled(signed.id, &b)));
+    assert!(no_relay_fact_for(&replayed, &a));
+    assert!(no_relay_fact_for(&replayed, &b));
 }
 
 #[test]
@@ -373,7 +371,7 @@ fn ack_of_persisted_lane_does_not_terminalize_mixed_blocked_obligation() {
     )));
     let replay = core.reattach_receipt(id);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(signed.id, &blocked)));
+    assert!(no_relay_fact_for(&replay.facts, &blocked));
 }
 
 #[test]
@@ -382,7 +380,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     let relay = RelayUrl::parse("wss://recover-blocked.example").unwrap();
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("start-failure.redb");
-    let (receipt, event_id) = {
+    let (receipt, _event_id) = {
         let store = RedbStore::open_with_failed_lane_starts(&path, [relay.clone()])
             .expect("open Redb lane-start failure fixture");
         let mut first = EngineCore::new(store, 10);
@@ -407,7 +405,7 @@ fn restart_rediscovers_unstarted_lane_and_persists_it_before_recovery_publish() 
     authenticate_signer(&mut still_blocked, 0, &relay, &author);
     let replay = still_blocked.reattach_receipt(receipt);
     assert!(replay.is_attached());
-    assert!(replay.facts.contains(&attempt_stalled(event_id, &relay)));
+    assert!(no_relay_fact_for(&replay.facts, &relay));
     drop(still_blocked);
 
     let mut recovered = EngineCore::new(
@@ -611,14 +609,14 @@ fn author_outbox_failed_attempt_survives_restart_with_empty_directory() {
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
-        let event_id = signed.id;
+        let _event_id = signed.id;
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
         assert!(receipt_statuses(&effects)
             .iter()
-            .any(|fact| fact == &attempt_stalled(event_id, &relay)));
+            .all(|fact| !matches!(fact, WriteFact::Relay { relay: r, .. } if r == &relay)));
         id
     };
 
@@ -1045,7 +1043,7 @@ fn author_route_removal_cannot_erase_durable_lane_and_new_revision_failure_is_vo
         )));
         let replay = core.reattach_receipt(receipt);
         assert!(replay.is_attached());
-        assert!(replay.facts.contains(&route_stalled(old_event.id, &new)));
+        assert!(no_relay_fact_for(&replay.facts, &new));
     }
 
     {
@@ -1114,14 +1112,14 @@ fn route_revision_failure_emits_no_attempt_or_wire_and_claims_no_crash_durable_u
         }));
         let (id, generation, unsigned) = find_sign_request(&accepted);
         let signed = unsigned.sign_with_keys(&author).unwrap();
-        let event_id = signed.id;
+        let _event_id = signed.id;
         let effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
         assert!(!effects
             .iter()
             .any(|effect| matches!(effect, Effect::PublishEvent(..))));
         assert!(receipt_statuses(&effects)
             .iter()
-            .any(|fact| fact == &route_stalled(event_id, &relay)));
+            .all(|fact| !matches!(fact, WriteFact::Relay { relay: r, .. } if r == &relay)));
         assert!(
             !receipt_statuses(&effects)
                 .iter()

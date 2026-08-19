@@ -61,7 +61,7 @@ mod fifo_channel;
 mod history_mailbox;
 // The engine thread's owner for identity-session membership and signing
 // capability, moved beside the loop that drives it (#1731) — same treatment
-// as `nip11_decision`, `store_recovery`, and `wire_admission` below.
+// as `nip11_decision` and `wire_admission` below.
 mod identity_sessions;
 // The opaque app-owned session payload and its signer descriptors. It came
 // with the runtime rather than staying in `nmp` because `EngineThread::spawn`
@@ -84,7 +84,6 @@ mod request_wire;
 mod row_channel;
 mod sign_event;
 // The exponential store-recovery backoff schedule (#1731).
-mod store_recovery;
 // The 10ms wire-admission window (#1731).
 mod wire_admission;
 
@@ -183,7 +182,6 @@ use receipt_stream::{
 use request_wire::{apply_replay, apply_wire_delta, close_frame_text};
 use row_channel::{rows_channel, RowsSender};
 pub use row_channel::{AsyncRowsReceiver, RowsReceiver};
-use store_recovery::StoreRecoveryDriver;
 use wire_admission::WireAdmissionState;
 
 struct EnginePoolRuntime {
@@ -849,11 +847,7 @@ mod relay_worker_reconciliation_tests {
             .is_some_and(|failure| failure.contains("withdraw-owned")));
         let withdraw = core.handle(EngineMsg::Unsubscribe(id));
         assert!(core.diagnostics_snapshot().transport_degraded.is_none());
-        assert_eq!(
-            core.relay_worker_requirements()
-                .map(|requirements| requirements.all),
-            Some(BTreeSet::new())
-        );
+        assert_eq!(core.relay_worker_requirements().all, BTreeSet::new());
         dispatch_core_effects(
             &mut core,
             withdraw,
@@ -1684,56 +1678,12 @@ fn engine_loop(
     let _ = startup_ready.send(());
 
     let mut shutting_down = false;
-    let mut store_recovery = StoreRecoveryDriver::default();
     loop {
         // One increment per pass, before the wait this pass arms. A loop
         // parked in `recv()`/`recv_timeout(wait)` has not reached here again,
         // so the count standing still IS "still blocked on the same wait" --
         // which is what `EngineThread::wait_arms` exists to let a test read.
         wait_arms.fetch_add(1, Ordering::Relaxed);
-        if core.take_store_recovery_request().is_some() {
-            store_recovery.arm_now(Instant::now());
-        }
-        if !shutting_down && store_recovery.is_due(Instant::now()) {
-            match core.recover_store_after_failure() {
-                Ok(effects) => {
-                    store_recovery.recovered();
-                    dispatch_core_effects(
-                        &mut core,
-                        effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                }
-                Err(error) => {
-                    let retryable = error.fault().requires_reopen();
-                    let mut effects = Vec::new();
-                    core.degrade_store(error, &mut effects);
-                    if retryable {
-                        store_recovery.record_failure(Instant::now());
-                    } else {
-                        // An invariant/schema/value refusal is not made safer
-                        // by cycling a healthy handle. Leave the core visibly
-                        // degraded and wait for explicit external change.
-                        store_recovery.stop_retrying();
-                    }
-                    dispatch_core_effects(
-                        &mut core,
-                        effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                }
-            }
-        }
         // A continuously-ready command stream must not starve a delivery
         // deadline. This command-boundary check is still event-driven; the
         // timeout arm below owns the idle-engine case.
@@ -1744,41 +1694,17 @@ fn engine_loop(
             &diagnostics_delivery,
             Instant::now(),
         );
-        // A deadline the store could not read is neither "due now" nor
-        // "nothing to wait for" (#763). It is a persistence failure, and it
-        // is recorded as the one #122 degrade fact an app already reads
-        // rather than folded into the `None` that means "park forever". The
-        // wait then falls back to the plain `recv()`, and the next message
-        // re-reads the deadline -- so a failing store cannot spin this loop
-        // either.
-        let (core_deadline, core_wait) = if store_recovery.is_active() {
-            (None, None)
-        } else {
-            match core.next_deadline() {
-                Ok(deadline) => (
-                    deadline,
-                    deadline.map(|deadline| duration_until(deadline, clock.now())),
-                ),
-                Err(error) => {
-                    let mut effects = Vec::new();
-                    core.degrade_store(error, &mut effects);
-                    dispatch_core_effects(
-                        &mut core,
-                        effects,
-                        &pool,
-                        &mut row_channels,
-                        &mut history_channels,
-                        &mut diag_channels,
-                        &registry,
-                        dispatch_runtime,
-                    );
-                    (None, None)
-                }
-            }
+        let (core_deadline, core_wait) = match core.next_deadline() {
+            Ok(deadline) => (
+                deadline,
+                deadline.map(|deadline| duration_until(deadline, clock.now())),
+            ),
+            // A deadline the store could not read is neither "due now" nor
+            // "nothing to wait for". The wait falls back to the plain
+            // `recv()` and the next message re-reads it, so a failing store
+            // cannot spin this loop either.
+            Err(_) => (None, None),
         };
-        if core.take_store_recovery_request().is_some() {
-            store_recovery.arm_now(Instant::now());
-        }
         let nip11_wait = nip11_decisions
             .borrow()
             .next_deadline()
@@ -1791,7 +1717,6 @@ fn engine_loop(
             .borrow()
             .next_deadline()
             .map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let store_recovery_wait = store_recovery.wait(Instant::now());
         let wait = if shutting_down {
             None
         } else {
@@ -1800,7 +1725,6 @@ fn engine_loop(
                 nip11_wait,
                 wire_admission_wait,
                 diagnostics_wait,
-                store_recovery_wait,
             ]
             .into_iter()
             .flatten()
@@ -1850,31 +1774,12 @@ fn engine_loop(
                     }
                     // A failed re-read fires no `Tick`: the store this tick
                     // would drain is the store that just refused to be read,
-                    // and firing anyway would only reach the same failure
-                    // one door deeper. The degrade is recorded instead, and
-                    // the `continue` below re-arms from the top (#763).
-                    let due = if store_recovery.is_active() {
-                        false
-                    } else {
-                        match core.next_deadline() {
-                            Ok(deadline) => deadline.is_some_and(|deadline| deadline <= wall_now),
-                            Err(error) => {
-                                let mut effects = Vec::new();
-                                core.degrade_store(error, &mut effects);
-                                dispatch_core_effects(
-                                    &mut core,
-                                    effects,
-                                    &pool,
-                                    &mut row_channels,
-                                    &mut history_channels,
-                                    &mut diag_channels,
-                                    &registry,
-                                    dispatch_runtime,
-                                );
-                                false
-                            }
-                        }
-                    };
+                    // and firing anyway would only reach the same failure one
+                    // door deeper. The `continue` below re-arms from the top
+                    // (#763).
+                    let due = core
+                        .next_deadline()
+                        .is_ok_and(|deadline| deadline.is_some_and(|deadline| deadline <= wall_now));
                     if due {
                         let effects = core.handle(EngineMsg::Tick(wall_now));
                         dispatch_core_effects(
@@ -3232,7 +3137,8 @@ fn dispatch_core_effects(
     registry: &SignerRegistry,
     runtime: DispatchRuntime<'_>,
 ) {
-    if let Some(required) = core.relay_worker_requirements() {
+    {
+        let required = core.relay_worker_requirements();
         let mut terminal_frames: BTreeMap<RelaySessionKey, Vec<String>> = BTreeMap::new();
         for effect in &effects {
             let Effect::Wire(delta) = effect else {
@@ -3398,9 +3304,7 @@ fn ensure_write_effect_session(
 /// Every NMP read worker keeps an empty transport preamble because reducer
 /// replay is the single generation-aware owner.
 fn retry_required_relay_workers(core: &EngineCore, pool: &Pool) {
-    let Some(required) = core.relay_worker_requirements() else {
-        return;
-    };
+    let required = core.relay_worker_requirements();
     // #598: a protected durable obligation may have released a same-relay
     // Public worker to time-share a cap-sized pool. When the retirement slot
     // becomes reusable, restore the protected session first; reopening Public

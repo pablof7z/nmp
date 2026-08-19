@@ -355,9 +355,6 @@ fn repeated_same_filter_failed_generations_coalesce_into_one_current_transfer_jo
     assert_eq!(core.request_claim_transfer_claims_attempted.get(), 1);
     assert_eq!(core.request_claim_transfer_failures.get(), 1);
 
-    core.white_box("retry_scheduler_blocked", |s| {
-        s.retry_scheduler_blocked = true
-    });
     let due = core
         .next_deadline()
         .unwrap()

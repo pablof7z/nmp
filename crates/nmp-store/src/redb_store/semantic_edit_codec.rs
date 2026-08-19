@@ -139,7 +139,7 @@ impl<'a> Decoder<'a> {
 }
 
 fn invariant(message: impl Into<String>) -> PersistenceError {
-    PersistenceError::invariant(message)
+    PersistenceError::new(message)
 }
 
 pub(super) fn coordinate_key(coordinate: &Coordinate) -> Result<Vec<u8>, PersistenceError> {

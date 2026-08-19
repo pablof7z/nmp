@@ -4,36 +4,10 @@ use nmp_store::testing;
 
 // ---- fallible persistence doors and recovery indexing ------------------
 
-pub(super) fn recover_after_observation_io(core: &mut EngineCore) -> Vec<Effect> {
-    let (fault, effects) = core
-        .recover_requested_redb_store_for_test()
-        .expect("the same Redb target reconstructs")
-        .expect("observation I/O must request reconstruction");
-    assert_eq!(fault, PersistenceFault::Io);
-    assert!(matches!(
-        effects.last(),
-        Some(Effect::EmitDiagnostics(snapshot)) if snapshot.store_degraded.is_none()
-    ));
-    assert!(
-        effects.iter().all(|effect| matches!(
-            effect,
-            Effect::EmitDiagnostics(_)
-                | Effect::DiagnosticsChanged
-                | Effect::EmitRows(..)
-                | Effect::Wire(_)
-        )),
-        "unexpected reconstruction effect: {effects:?}"
-    );
-    effects
-}
-
 /// Door-level falsifier (issue #122): the real Redb `insert` transaction
 /// surfaces a persistence I/O failure as `Err(PersistenceError)` rather than
-/// panicking, closes that failed generation, and reconstructs the same target.
-///
-/// It also pins #895's classification across the crate boundary: the fault
-/// and its durability outcome reach `nmp` as types, so a consumer
-/// never has to read the message to learn whether the write may have landed.
+/// panicking, and the failed generation stays closed rather than answering
+/// the read as an absence.
 #[test]
 fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
     let a = Keys::generate();
@@ -45,34 +19,23 @@ fn ingest_door_surfaces_io_failure_as_persistence_error_not_panic() {
         RelayUrl::parse("wss://relay.example.com").unwrap(),
         Timestamp::from(1_000u64),
     );
-    let outcome = store.insert(event, from);
-    let error = outcome.expect_err("an ingest-path I/O failure must surface as Err");
-    assert_eq!(error.fault(), PersistenceFault::Io);
-    assert_eq!(
-        error.durability(),
-        DurabilityOutcome::Unknown,
-        "an I/O failure never claims the write is absent"
-    );
-    assert!(error.fault().requires_reopen());
-    let latched = store
-        .query(&nostr::Filter::new().id(event_id))
-        .expect_err("the failed Redb generation must stay closed");
-    assert_eq!(latched.fault(), PersistenceFault::Latched);
     store
-        .reopen_after_failure()
-        .expect("the same temporary Redb target must reconstruct");
+        .insert(event, from)
+        .expect_err("an ingest-path I/O failure must surface as Err");
+    // The refusal precedes the commit, so the whole transaction rolled back:
+    // the store holds nothing the caller was told did not land.
     assert!(store
         .query(&nostr::Filter::new().id(event_id))
-        .unwrap()
+        .expect("a rolled-back ingest leaves the store readable")
         .is_empty());
 }
 
 /// Engine-level falsifier (issue #122): a relay EVENT frame whose store
-/// `insert` fails on I/O DEGRADES the engine to read-only (a `store_degraded`
-/// diagnostic is emitted) and never panics the reducer. The failed frame
-/// delivers no phantom rows, and the engine stays usable for later messages.
+/// `insert` fails on I/O never panics the reducer. The failed frame delivers
+/// no phantom rows, reports nothing about the failure, and the engine stays
+/// usable for later messages.
 #[test]
-fn ingest_io_failure_degrades_read_only_without_panicking() {
+fn ingest_io_failure_never_panics_and_fabricates_no_rows() {
     let a = Keys::generate();
     let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
     let dir = FixtureRoutingFacts::new().with_outbound_routes(a.public_key(), [relay.clone()]);
@@ -104,14 +67,6 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
         event_frame("s", event),
     ));
 
-    // Degrade, don't panic: the read-only signal reaches the diagnostics
-    // surface.
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())),
-        "an ingest I/O failure must surface a `store_degraded` diagnostic, got {effects:?}"
-    );
     // A failed ingest fabricates no rows.
     assert!(
         !effects
@@ -119,8 +74,7 @@ fn ingest_io_failure_degrades_read_only_without_panicking() {
             .any(|e| matches!(e, Effect::EmitRows(_, rows, _) if !rows.is_empty())),
         "a failed ingest must not deliver phantom rows, got {effects:?}"
     );
-    let _ = recover_after_observation_io(&mut core);
-    // The reducer survives reconstruction and keeps handling messages.
+    // The reducer keeps handling messages afterwards.
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
 }
 
@@ -208,7 +162,7 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
     let wire = wire_sub_string(&request);
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
 
-    let failed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -219,11 +173,6 @@ fn failed_event_commit_prevents_its_exact_request_from_recording_coverage() {
             nmp_resolver_testkit::kind1(&author, "must not earn coverage", 100),
         ),
     ));
-    assert!(failed
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.store_degraded.is_some())));
-    let _ = recover_after_observation_io(&mut core);
 
     let completed = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -371,7 +320,7 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
     );
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
-    let failed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -382,11 +331,6 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
             nmp_resolver_testkit::kind1(&public_author, "the public transaction fails", 100),
         ),
     ));
-    assert!(failed
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.store_degraded.is_some())));
-    let _ = recover_after_observation_io(&mut core);
 
     let protected_event =
         nmp_resolver_testkit::kind1(&protected_author, "the protected transaction commits", 101);
@@ -444,8 +388,8 @@ fn failed_event_commit_isolated_by_session_identity_on_the_same_relay() {
 }
 
 /// A failed EVENT commit poisons only the immutable request that delivered
-/// it. Real store reconstruction retires that request; its stale EOSE earns
-/// nothing, while the fresh successor can still earn coverage.
+/// it: that request's later EOSE earns no coverage, while its siblings and
+/// any later request are untouched.
 #[test]
 fn failed_event_commit_poisons_only_its_immutable_request() {
     let a = Keys::generate();
@@ -475,7 +419,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     let first_wire = wire_sub_string(&first_sub);
 
     let _ = core.handle(EngineMsg::Tick(Timestamp::from(500u64)));
-    let failed = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -486,15 +430,6 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
             nmp_resolver_testkit::kind1(&a, "failed immutable request", 100),
         ),
     ));
-    assert!(failed
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.store_degraded.is_some())));
-    let recovery = recover_after_observation_io(&mut core);
-    let recovered_sub = req_for(&recovery, &relay).0.clone();
-    assert_ne!(first_sub, recovered_sub);
-    assert_ne!(second_sub, recovered_sub);
-
     let third = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
         &[1],
         &c.public_key().to_hex(),
@@ -502,7 +437,6 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
     let third_sub = req_for(&third, &relay).0.clone();
     assert_ne!(first_sub, third_sub);
     assert_ne!(second_sub, third_sub);
-    assert_ne!(recovered_sub, third_sub);
 
     let atom_a = ctx_atom(cf(&[1], &[&a.public_key().to_hex()]));
     let atom_b = ctx_atom(cf(&[1], &[&b.public_key().to_hex()]));
@@ -529,7 +463,7 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
         assert_eq!(
             core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone())).expect("coverage peek"),
             None,
-            "stale EOSE must not mint coverage after reconstruction"
+            "the poisoned request's stale EOSE must not mint coverage"
         );
     }
 
@@ -548,14 +482,22 @@ fn failed_event_commit_poisons_only_its_immutable_request() {
             .any(|effect| matches!(effect, Effect::EmitRows(..))),
         "only the fresh successor may advance acquisition evidence: {current:?}"
     );
-    for atom in [&atom_a, &atom_b, &atom_c] {
-        assert!(
-            core.get_coverage(atom, &RelaySessionKey::unauthenticated(relay.clone()))
-                .expect("coverage peek")
-                .is_some(),
-            "the fresh successor must retain coverage authority"
-        );
-    }
+    assert!(
+        core.get_coverage(&atom_c, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek")
+            .is_some(),
+        "the fresh successor earns coverage for its own atom"
+    );
+    // The poisoned request is never rebuilt, so its atom never earns
+    // coverage. That is the whole cost of the failed commit: this read has
+    // to be asked again, and nothing pretends it was answered.
+    assert_eq!(
+        core.get_coverage(&atom_a, &RelaySessionKey::unauthenticated(relay.clone()))
+            .expect("coverage peek"),
+        None,
+        "a poisoned request's atom stays uncovered rather than silently \
+         inheriting a sibling's authority"
+    );
 }
 
 /// A projection read can fail only after the EVENT transaction has committed.
@@ -622,14 +564,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         selection: derived_filter,
         ..Demand::default()
     });
-    let initial = core.handle_and_flush(EngineMsg::Subscribe(derived_from_latest_note));
-    assert!(
-        initial.iter().all(|effect| !matches!(
-            effect,
-            Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some()
-        )),
-        "the initial top-1 projection must select only the healthy newest row: {initial:?}"
-    );
+    let _initial = core.handle_and_flush(EngineMsg::Subscribe(derived_from_latest_note));
     let kind5 = LiveQuery::single(
         nmp_grammar::Demand::new(
             Filter {
@@ -640,14 +575,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         )
         .expect("a literal kind:5 request can be pinned to the fixture relay"),
     );
-    let kind5_open = core.handle_and_flush(EngineMsg::Subscribe(kind5));
-    assert!(
-        kind5_open.iter().all(|effect| !matches!(
-            effect,
-            Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some()
-        )),
-        "the independent kind:5 request must open before the post-commit failure: {kind5_open:?}"
-    );
+    let _kind5_open = core.handle_and_flush(EngineMsg::Subscribe(kind5));
     let connected = connect(&mut core, 0, &relay);
     let request = connected
         .iter()
@@ -673,7 +601,7 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         .custom_created_at(Timestamp::from(300u64))
         .sign_with_keys(&author)
         .expect("valid deletion event");
-    let failed_projection = core.handle(EngineMsg::RelayFrame(
+    let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
             slot: 0,
             generation: 1,
@@ -681,10 +609,6 @@ fn post_commit_projection_failure_does_not_poison_request_coverage() {
         public_session(&relay),
         event_frame(&wire, event),
     ));
-    assert!(failed_projection
-        .iter()
-        .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot)
-            if snapshot.store_degraded.is_some())));
 
     let _ = core.handle(EngineMsg::RelayFrame(
         RelayHandle {
@@ -825,11 +749,6 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
     let corrupt_error = core
         .get_coverage(&atom_a, &RelaySessionKey::unauthenticated(failed_relay.clone()))
         .expect_err("the corrupt coverage row must remain unreadable");
-    assert_eq!(
-        corrupt_error.fault(),
-        PersistenceFault::Invariant,
-        "stored-row decoding is an invariant failure"
-    );
     assert!(
         corrupt_error.message().contains("decode coverage row"),
         "unexpected coverage refusal: {}",
@@ -864,10 +783,8 @@ fn coverage_failure_is_atomic_for_one_request_and_isolated_from_another() {
 // relay afterward, and then run a SECOND time inside `schedule_ready` at the
 // end of the same call. The fix adds two reducer-owned indexes
 // (`intent_receipts`, `receipts_by_lane_relay`) so a single relay event only
-// re-reads the intents actually routed through that relay, with a
-// `lane_relay_index_degraded` safety valve that falls back to the exact old
-// full-scan behavior whenever the index cannot be proven complete. The
-// falsifiers below exercise both the narrow path and the degraded fallback.
+// re-reads the intents actually routed through that relay. The falsifiers
+// below exercise that narrow path.
 
 /// A large durable backlog can contain obligations that own no physical lane
 /// at all (for example, writes still waiting for a signer). Scheduling one
@@ -1141,75 +1058,6 @@ fn route_parked_intents_add_no_worker_demand_and_no_store_reads() {
     );
 }
 
-/// #985's hardest fail-closed shape: a lane CREATION whose post-state was
-/// never observed. Retaining the previous projection is not enough, because
-/// the lanes that may or may not have committed are NEW -- so every relay the
-/// attempted bootstrap could have minted a lane for stays conservatively
-/// owned until an explicit recovery proves otherwise. A false-positive worker
-/// can be retired later; a false negative strands a durable obligation
-/// forever.
-///
-/// `bootstrap_publish_queue_lanes` is both the create-if-missing mutation and the
-/// one complete read that establishes the projection, so even a provably
-/// `Absent` outcome (the injected fault here) does not prove that OLDER lanes
-/// were absent.
-#[test]
-fn an_unknown_lane_creation_failure_retains_every_candidate_worker() {
-    let author = Keys::generate();
-    let relays: Vec<RelayUrl> = (0..3)
-        .map(|i| RelayUrl::parse(&format!("wss://unproven-creation-{i}.example.com")).unwrap())
-        .collect();
-
-    let mut core = EngineCore::new(
-        RedbStore::temporary_with_failed_lane_bootstrap()
-            .expect("temporary Redb lane-bootstrap failure fixture"),
-        10,
-    );
-    activate(&mut core, &author);
-
-    let accepted = core.handle(EngineMsg::Publish(WriteIntent {
-        payload: WritePayload::Event(draft(600, "unproven lane creation")),
-        routing: WriteRouting::Explicit(relays.to_vec()),
-        identity: Identity::Active,
-    }));
-    let (id, generation, unsigned_event) = find_sign_request(&accepted);
-    let signed = unsigned_event.sign_with_keys(&author).unwrap();
-    let event_id = signed.id;
-    let signed_effects = core.handle(EngineMsg::SignerCompleted(id, generation, Ok(signed)));
-
-    // Non-vacuity: the injected bootstrap failure really is the path taken,
-    // so the ownership below cannot be coming from an ordinary lane. The one
-    // delivery owner publishes every receipt fact as an effect, so the whole
-    // accept-and-sign sequence is the exact status stream a receipt observer
-    // would have seen.
-    let statuses: Vec<WriteFact> = receipt_statuses(&accepted)
-        .into_iter()
-        .chain(receipt_statuses(&signed_effects))
-        .collect();
-    for relay in &relays {
-        assert!(
-            statuses
-                .iter()
-                .any(|status| status == &attempt_stalled(event_id, relay)),
-            "the fixture must actually take the failed-creation path for {relay}: {statuses:?}"
-        );
-    }
-
-    for relay in &relays {
-        let effects = core.handle(EngineMsg::RelayOpenFailed(
-            signer_session(relay, author.public_key()),
-            "injected open failure after an unprovable lane creation".to_string(),
-        ));
-        assert!(
-            effects
-                .iter()
-                .any(|effect| matches!(effect, Effect::EmitDiagnostics(_))),
-            "{relay} was a candidate of the failed bootstrap, so it must stay \
-             owned rather than lose its worker on an unproven creation"
-        );
-    }
-}
-
 /// Manual before/after harness for #985. Run in release mode on the base and
 /// candidate revisions with the same constants:
 ///
@@ -1285,7 +1133,7 @@ fn relay_worker_projection_redb_benchmark() {
 /// event's `recover_publish_queue_lanes` call count matches the FULL-scan
 /// composition rather than the narrower indexed one.
 #[test]
-fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
+fn a_failed_lane_bootstrap_never_costs_a_sibling_intent_its_wakeup() {
     let author = Keys::generate();
     let relay = RelayUrl::parse("wss://wake-degraded.example.com").unwrap();
 
@@ -1296,8 +1144,9 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     );
     activate(&mut core, &author);
 
-    // Intent #1: its `bootstrap_publish_queue_lanes` call is the injected failure
-    // -- the reducer must degrade rather than pretend it has no lanes.
+    // Intent #1: its `bootstrap_publish_queue_lanes` call is the injected
+    // failure, so its lanes never enter the projection and nothing is
+    // reported about them.
     let accepted1 = core.handle(EngineMsg::Publish(WriteIntent {
         payload: WritePayload::Event(draft(200, "degraded 1")),
         routing: WriteRouting::Explicit(vec![relay.clone()]),
@@ -1307,13 +1156,14 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
     let signed1 = u1.sign_with_keys(&author).unwrap();
     let event_id1 = signed1.id;
     let signed_effects1 = core.handle(EngineMsg::SignerCompleted(id1, gen1, Ok(signed1)));
+    let _ = event_id1;
     assert!(
-        signed_effects1
+        !signed_effects1
             .iter()
-            .any(|e| matches!(e, Effect::EmitReceipt(rid, fact)
-                if *rid == id1 && fact == &attempt_stalled(event_id1, &relay))),
-        "the injected bootstrap failure must surface as a persistence stall, got \
-         {signed_effects1:?}"
+            .any(|e| matches!(e, Effect::EmitReceipt(rid, WriteFact::Relay { relay: r, .. })
+                if *rid == id1 && r == &relay)),
+        "a failed lane bootstrap reports nothing about the relay it could not \
+         reach, got {signed_effects1:?}"
     );
 
     // Intent #2: an ordinary write to the SAME relay accepted right after --
@@ -1364,18 +1214,17 @@ fn degraded_index_falls_back_to_full_scan_and_never_misses_a_wakeup() {
         "a degraded index must never cost a missed wakeup, got {effects:?}"
     );
 
-    // #1537's concrete Redb-door count proves the FULL scan ran, not the
-    // narrow index: 2 pending intents this event; the degraded wake reads
-    // both directly (2) plus
-    // `schedule_ready`'s own unchanged full scan (2) = 4. The non-degraded
-    // composition here would have been 1 (index has exactly 1 receipt for
-    // this relay) + 2 (schedule_ready) = 3.
+    // One store read, down from four. The narrow index names exactly the one
+    // receipt whose bootstrap committed, and `schedule_ready` now answers
+    // from the reducer's own projection instead of re-reading every intent's
+    // lanes -- deleting the degraded full-scan fallback took its two reads
+    // with it. Intent #1 contributes nothing because its lanes never
+    // committed: that is the progress a store failure costs, and the next
+    // boot rebuilds it from the durable rows.
     assert_eq!(
         core.publish_queue_lane_recovery_reads(),
-        4,
-        "expected the full-scan composition (2 wake + 2 schedule_ready), \
-         proving the degraded flag drove this wake rather than the (here \
-         incomplete) index"
+        1,
+        "expected exactly the narrow index read"
     );
 }
 
@@ -1542,76 +1391,6 @@ fn receipt_for_intent_unaffected_by_an_earlier_pending_removal() {
 
 // ---- #763: the deadline and coverage peeks -----------------------------
 
-/// #763 falsifier: a failing expiration peek is a value the driver can act on,
-/// not a panic and not a false `None`.
-///
-/// `EngineCore::next_deadline` is what the runtime loop arms its wait from,
-/// on the embedder's own thread. A closed Redb generation must leave that door
-/// as a typed failure; `Ok(None)` means only honest absence.
-#[test]
-fn a_failing_store_read_makes_the_next_deadline_a_typed_error_not_a_false_none() {
-    let author = Keys::generate();
-    let relay = RelayUrl::parse("wss://relay.example.com").unwrap();
-    let dir = FixtureRoutingFacts::new().with_outbound_routes(author.public_key(), [relay.clone()]);
-    let store = RedbStore::temporary_with_observation_precommit_io()
-        .expect("temporary Redb observation-I/O fixture");
-    let mut core = EngineCore::new_with_fixture_routing_facts(store, dir, 10);
-
-    // Honest absence from a healthy store: nothing expiring, nothing due.
-    assert_eq!(
-        core.next_deadline().expect("a healthy peek answers"),
-        None,
-        "a fresh core genuinely has no deadline"
-    );
-
-    let _ = core.handle_and_flush(EngineMsg::Subscribe(literal_query(
-        &[1],
-        &author.public_key().to_hex(),
-    )));
-    let _ = core.handle(EngineMsg::RelayConnected(
-        RelayHandle {
-            slot: 0,
-            generation: 1,
-        },
-        public_session(&relay),
-    ));
-    let failed = core.handle(EngineMsg::RelayFrame(
-        RelayHandle {
-            slot: 0,
-            generation: 1,
-        },
-        public_session(&relay),
-        event_frame(
-            "s",
-            nmp_resolver_testkit::kind1(&author, "close Redb generation", 1_000),
-        ),
-    ));
-    assert!(
-        failed.iter().any(
-            |effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())
-        ),
-        "the real observation I/O refusal must degrade the store: {failed:?}"
-    );
-
-    let error = core
-        .next_deadline()
-        .expect_err("the closed Redb generation must not be reported as `no deadline`");
-    assert_eq!(
-        error.fault(),
-        PersistenceFault::Latched,
-        "the deadline read must preserve the real closed-handle fault: {}",
-        error.message()
-    );
-
-    let _ = recover_after_observation_io(&mut core);
-    assert_eq!(
-        core.next_deadline()
-            .expect("the reconstructed Redb generation answers"),
-        None,
-        "the same deadline door is healthy after reconstruction"
-    );
-}
-
 /// #763 delivery falsifier: a corrupt durable delivery deadline is a typed
 /// read failure, never false absence that parks the runtime forever.
 #[test]
@@ -1698,7 +1477,6 @@ fn a_failing_publish_queue_deadline_read_is_a_typed_error_not_a_false_none() {
     let error = core
         .next_deadline()
         .expect_err("the corrupt delivery deadline must not become false absence");
-    assert_eq!(error.fault(), PersistenceFault::Invariant);
     assert!(
         error.message().contains("decode publish queue deadline"),
         "the exact deadline codec owns the error: {}",
@@ -1733,18 +1511,10 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
             .expect("seed exact coverage row");
     }
     let wrong_atom = ctx_atom(cf(&[2], &[&author.public_key().to_hex()]));
-    assert_eq!(
-        testing::corrupt_coverage(&path, nmp_store::coverage_key(&wrong_atom), &relay)
-            .expect_err("a different coverage key must be refused")
-            .fault(),
-        PersistenceFault::Invariant
-    );
-    assert_eq!(
-        testing::corrupt_coverage(&path, key.clone(), &absent_relay)
-            .expect_err("an absent relay row must be refused")
-            .fault(),
-        PersistenceFault::Invariant
-    );
+    testing::corrupt_coverage(&path, nmp_store::coverage_key(&wrong_atom), &relay)
+        .expect_err("a different coverage key must be refused");
+    testing::corrupt_coverage(&path, key.clone(), &absent_relay)
+        .expect_err("an absent relay row must be refused");
     {
         let store = RedbStore::open(&path).expect("inspect refused corruption controls");
         assert_eq!(
@@ -1767,12 +1537,6 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
         &[1],
         &author.public_key().to_hex(),
     )));
-    assert!(
-        seed.iter().all(
-            |effect| !matches!(effect, Effect::EmitDiagnostics(snap) if snap.store_degraded.is_some())
-        ),
-        "the immediate seed must precede the deferred coverage read: {seed:?}"
-    );
     assert_eq!(
         seed.iter()
             .filter(|effect| matches!(effect, Effect::EmitRows(..)))
@@ -1782,12 +1546,6 @@ fn a_failing_post_admission_coverage_peek_keeps_the_immediate_seed() {
     );
 
     let admission = core.handle(EngineMsg::FlushWireAdmission(Timestamp::from(0u64)));
-    assert!(
-        admission
-            .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.as_deref().is_some_and(|message| message.contains("decode coverage row")))),
-        "the exact coverage decode failure must surface after admission: {admission:?}"
-    );
     assert_eq!(
         admission
             .iter()
@@ -1852,12 +1610,6 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
         ..Demand::default()
     })));
     assert!(
-        opened.iter().all(
-            |effect| !matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.is_some())
-        ),
-        "A's coverage row must be healthy before the reactive switch: {opened:?}"
-    );
-    assert!(
         opened
             .iter()
             .any(|effect| matches!(effect, Effect::EmitRows(..))),
@@ -1868,97 +1620,240 @@ fn a_failing_coverage_peek_never_republishes_live_evidence_as_unproven() {
     assert!(
         effects
             .iter()
-            .any(|effect| matches!(effect, Effect::EmitDiagnostics(snapshot) if snapshot.store_degraded.as_deref().is_some_and(|message| message.contains("decode coverage row")))),
-        "B's first post-open coverage dereference must surface the decode failure: {effects:?}"
-    );
-    assert!(
-        effects
-            .iter()
             .all(|effect| !matches!(effect, Effect::EmitRows(..))),
         "a failed reactive coverage read must not republish evidence"
     );
 }
 
-/// I7: a reopen-required store failure must REBUILD the write plane from
-/// durable keys, not merely retain whatever the in-memory projection already
-/// held. `recover_store_after_failure` clears every volatile write-plane
-/// index before `recover_on_boot` repopulates them (write.rs); this is the
-/// one reducer-level door that exercises it -- nothing else in this corpus
-/// calls it, so a change that quietly turned the clear-then-rebuild into a
-/// no-op currently passes `cargo test -p nmp-engine` unnoticed.
+/// The claim: **an accepted write is never lost -- only its progress is.**
 ///
-/// The observable consequence of "retained rather than rebuilt": a lane
-/// already dispatched (`AwaitingAck`, its in-flight wire correlation known
-/// only to this process) survives a reopen with THAT stale correlation
-/// intact, so nothing ever re-establishes it -- the write silently stops
-/// making progress. A genuine rebuild has no such correlation to retain: it
-/// re-derives the lane from the durable route revision alone and re-arms it,
-/// which is observable as a fresh `EnsureWriteRelay` for the exact relay
-/// already in flight before the failure.
+/// This is the whole contract that survives deleting NMP's modelling of local
+/// disk failure. There is no classification, no degraded mode, no reopen and
+/// no latched fault; a store write that fails, fails. What bounds the damage
+/// is acceptance atomicity -- `accept_write` commits the intent, the receipt,
+/// the frozen body and the canonical pending row in ONE transaction, and
+/// `publish()` returning `Ok` is only constructible after that commit. So
+/// every failure AFTER acceptance can destroy progress and nothing else, and
+/// the next process to open the file finds the write and resumes it.
 ///
-/// nmp:falsifier=A dispatched, unacknowledged write is re-armed for delivery
-/// after a reopen-required store failure, not left waiting on a wire
-/// correlation that failure destroyed.
+/// Both falsifiers below drive a REAL redb store on a REAL file through a
+/// real post-acceptance commit failure, then drop the engine entirely and
+/// open a fresh one over the same file -- a process restart in everything but
+/// name. Neither reuses the failed engine, because there is no door that
+/// would let them.
+///
+/// nmp:falsifier=A post-acceptance store failure emits no app-facing fact and
+/// costs only progress: a fresh engine over the same file recovers the
+/// receipt, its frozen bytes and its route set, and the write resumes.
 #[test]
-fn a_reopen_required_store_failure_rearms_a_dispatched_lane_from_durable_keys() {
+fn a_failed_lane_attempt_commit_loses_progress_and_a_fresh_engine_resumes_the_write() {
     let author = Keys::generate();
-    let relay = RelayUrl::parse("wss://store-recovery.example").unwrap();
-    let mut core = EngineCore::new(RedbStore::temporary().expect("temporary Redb store"), 10);
-    connect_signer(&mut core, 0, &relay, author.public_key());
-    authenticate_signer(&mut core, 0, &relay, &author);
+    let relay = RelayUrl::parse("wss://lane-start-failure.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("lane-attempt-failure.redb");
 
-    let (id, signed, dispatched) = publish_explicit(&mut core, &author, [relay.clone()]);
-    assert!(
-        dispatched.iter().any(|effect| matches!(
-            effect,
-            Effect::PublishEvent(session, event, _)
-                if session == &signer_session(&relay, event.pubkey)
-        )),
-        "fixture sanity: the write must actually dispatch to its one relay before the \
-         failure, got {dispatched:?}"
+    let (receipt, signed) = {
+        // 1. A real persistent redb engine whose lane-attempt commit refuses
+        //    for this exact relay.
+        let store = RedbStore::open_with_failed_lane_starts(&path, [relay.clone()])
+            .expect("open the lane-start failure fixture");
+        let mut core = EngineCore::new(store, 10);
+        connect_signer(&mut core, 0, &relay, author.public_key());
+        authenticate_signer(&mut core, 0, &relay, &author);
+
+        // 2. Publish. Acceptance is a separate, already-committed transaction,
+        //    so this takes custody and answers with a receipt id.
+        let (receipt, signed, effects) = publish_explicit(&mut core, &author, [relay.clone()]);
+
+        // 3. The lane attempt did not commit, so nothing reached the wire.
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+            "the failed attempt commit must not emit a wire EVENT: {effects:?}"
+        );
+
+        // 4. No app-facing fault fact, and the engine keeps serving.
+        assert!(
+            no_relay_fact_for(&receipt_statuses(&effects), &relay),
+            "a post-acceptance store failure produces no app-facing fact: {effects:?}"
+        );
+        let replay = core.reattach_receipt(receipt);
+        assert!(replay.is_attached(), "the write is still live and reattachable");
+        assert!(
+            no_relay_fact_for(&replay.facts, &relay),
+            "and its durable prefix invents no fact either: {:?}",
+            replay.facts
+        );
+        // Still serving: an ordinary message is handled, not refused.
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
+        assert!(core.reattach_receipt(receipt).is_attached());
+
+        (receipt, signed)
+    };
+    // 5. The engine is gone. Nothing in this process holds the store.
+
+    // 6. A FRESH engine over the same file recovers the write and resumes it.
+    let mut restarted = EngineCore::new(
+        RedbStore::open(&path).expect("a fresh generation opens the same file"),
+        10,
     );
-    mark_written(&mut core, &dispatched, &relay);
-    // Fixture sanity: the lane is now durably `AwaitingAck` and this
-    // process is the only place its wire correlation exists -- nothing
-    // re-dispatches it while the store is healthy.
+    let boot = restarted.recover_on_boot();
     assert!(
-        core.reattach_receipt(id).is_attached(),
-        "fixture sanity: the write is live before the failure"
+        boot.iter().any(|effect| matches!(effect, Effect::EnsureWriteRelay(session)
+            if session == &signer_session(&relay, author.public_key()))),
+        "boot must re-arm the exact relay the failed attempt never reached: {boot:?}"
     );
 
-    let mut effects = Vec::new();
-    core.degrade_store(
-        nmp_store::PersistenceError::new(PersistenceFault::Io, "fixture reopen-required fault"),
-        &mut effects,
-    );
+    // The receipt survived, and it is the SAME write -- its frozen bytes are
+    // the ones that were signed, not a coincidentally similar event.
+    let replay = restarted.reattach_receipt(receipt);
+    assert!(replay.is_attached(), "the accepted write survived the restart");
     assert_eq!(
-        core.take_store_recovery_request(),
-        Some(PersistenceFault::Io),
-        "fixture sanity: an I/O fault must arm reconstruction"
-    );
-
-    let recovery = core
-        .recover_store_after_failure()
-        .expect("fixture recovery against a healthy backend must succeed");
-    assert!(
-        recovery.iter().any(|effect| matches!(
-            effect,
-            Effect::EnsureWriteRelay(session)
-                if session == &signer_session(&relay, author.public_key())
-        )),
-        "I7: recovery must re-arm the relay this dispatched-but-unacked write was already \
-         waiting on, rebuilt from the durable route revision -- not silently retain the \
-         stale in-flight state and never re-establish it, got {recovery:?}"
-    );
-    assert!(
-        core.reattach_receipt(id).is_attached(),
-        "the write itself must still be live and reattachable after recovery"
-    );
-    assert_eq!(
-        core.reattach_receipt(id).facts.first(),
+        replay.facts.first(),
         Some(&WriteFact::Signing(SigningState::Signed {
             event_id: signed.id
         })),
-        "recovery must rebuild the SAME durable write, not a coincidentally similar one"
+        "the recovered receipt must carry the exact frozen event id: {:?}",
+        replay.facts
+    );
+
+    // Its route set survived too: the durable route revision committed at
+    // acceptance time, which is why boot could name the relay above.
+    let entry = restarted
+        .publish_queue_entries(None, 8)
+        .expect("enumerate the recovered queue")
+        .into_iter()
+        .find(|entry| entry.receipt_id == receipt)
+        .expect("the recovered write is enumerable");
+    assert_eq!(entry.event_id, signed.id, "the frozen body is the recovered one");
+    assert!(
+        entry.relays.contains(&relay),
+        "the durable route set is recovered: {:?}",
+        entry.relays
+    );
+    assert!(
+        entry.outcome.is_none(),
+        "the write resumes rather than having been terminalized by the failure: {:?}",
+        entry.outcome
+    );
+
+    // And it actually sends: the same relay connects and the write goes out.
+    connect_signer(&mut restarted, 0, &relay, author.public_key());
+    let sent = authenticate_signer(&mut restarted, 0, &relay, &author);
+    assert!(
+        sent.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&relay, event.pubkey) && event.id == signed.id
+        )),
+        "the resumed write must reach the wire on the healthy generation: {sent:?}"
+    );
+}
+
+/// The same claim against the other post-acceptance commit: the append-only
+/// route revision. Here the failure destroys MORE progress -- not even the
+/// resolved relay URL is durable -- so boot has to re-resolve from the
+/// intent's surviving routing strategy rather than read the route back.
+///
+/// This is also what makes `route_complete` false on a failed route commit
+/// load-bearing: routing that named relays but persisted none is UNFINISHED
+/// work, and reporting it as complete would let the empty durable route set
+/// read as the terminal `NoDestination` verdict -- which would lose the
+/// write, not merely its progress.
+#[test]
+fn a_failed_route_revision_commit_loses_progress_and_a_fresh_engine_resumes_the_write() {
+    let author = Keys::generate();
+    let relay = RelayUrl::parse("wss://route-revision-failure.example").unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("route-revision-failure.redb");
+
+    let (receipt, signed) = {
+        let store = RedbStore::open_with_route_revision_write_failure(&path)
+            .expect("open the route-revision failure fixture");
+        let mut core = EngineCore::new(store, 10);
+        connect_signer(&mut core, 0, &relay, author.public_key());
+        authenticate_signer(&mut core, 0, &relay, &author);
+
+        let (receipt, signed, effects) = publish_explicit(&mut core, &author, [relay.clone()]);
+
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::PublishEvent(..))),
+            "a route revision that did not commit mints no lane: {effects:?}"
+        );
+        assert!(
+            no_relay_fact_for(&receipt_statuses(&effects), &relay),
+            "a post-acceptance store failure produces no app-facing fact: {effects:?}"
+        );
+
+        // The write must NOT be terminalized. An empty durable route set plus
+        // a "complete" routing answer is exactly the shape that would read as
+        // `NoDestination`, and that verdict is unrecoverable.
+        let statuses = receipt_statuses(&effects);
+        assert!(
+            !statuses.iter().any(|fact| matches!(
+                fact,
+                WriteFact::Outcome(WriteOutcome::NoDestination)
+            )),
+            "a route revision that did not persist must never terminalize the write as \
+             NoDestination -- that would lose it, not just its progress: {statuses:?}"
+        );
+
+        assert!(core.reattach_receipt(receipt).is_attached());
+        let _ = core.handle(EngineMsg::Tick(Timestamp::from(1u64)));
+        assert!(core.reattach_receipt(receipt).is_attached());
+
+        (receipt, signed)
+    };
+
+    let mut restarted = EngineCore::new(
+        RedbStore::open(&path).expect("a fresh generation opens the same file"),
+        10,
+    );
+    let boot = restarted.recover_on_boot();
+
+    let replay = restarted.reattach_receipt(receipt);
+    assert!(replay.is_attached(), "the accepted write survived the restart");
+    assert_eq!(
+        replay.facts.first(),
+        Some(&WriteFact::Signing(SigningState::Signed {
+            event_id: signed.id
+        })),
+        "the recovered receipt must carry the exact frozen event id: {:?}",
+        replay.facts
+    );
+
+    // The routing STRATEGY survived acceptance even though its answer did
+    // not, so boot re-resolves it, commits the revision this time, and re-arms
+    // the relay.
+    assert!(
+        boot.iter().any(|effect| matches!(effect, Effect::EnsureWriteRelay(session)
+            if session == &signer_session(&relay, author.public_key()))),
+        "boot must re-resolve the intent's surviving routing and re-arm its relay: {boot:?}"
+    );
+    let entry = restarted
+        .publish_queue_entries(None, 8)
+        .expect("enumerate the recovered queue")
+        .into_iter()
+        .find(|entry| entry.receipt_id == receipt)
+        .expect("the recovered write is enumerable");
+    assert!(
+        entry.relays.contains(&relay),
+        "the re-resolved route set is durable on the healthy generation: {:?}",
+        entry.relays
+    );
+    assert!(entry.outcome.is_none(), "the write resumes: {:?}", entry.outcome);
+
+    connect_signer(&mut restarted, 0, &relay, author.public_key());
+    let sent = authenticate_signer(&mut restarted, 0, &relay, &author);
+    assert!(
+        sent.iter().any(|effect| matches!(
+            effect,
+            Effect::PublishEvent(session, event, _)
+                if session == &signer_session(&relay, event.pubkey) && event.id == signed.id
+        )),
+        "the resumed write must reach the wire on the healthy generation: {sent:?}"
     );
 }

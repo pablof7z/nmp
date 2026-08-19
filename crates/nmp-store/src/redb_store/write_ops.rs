@@ -112,7 +112,7 @@ fn retire_superseded_owners_in_txn(
                 super::publish_queue_codec::decode_lane(lane_bytes.value())
                     .map_err(|error| codec_error("lane", error))?;
             if key_intent != owner {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "lane retirement range escaped intent prefix",
                 ));
             }
@@ -217,9 +217,7 @@ fn retire_superseded_owners_in_txn(
             .publish_queue_receipts
             .remove(&receipt_key(*receipt_id))
             .map_err(persist_err)?
-            .ok_or_else(|| {
-                PersistenceError::invariant("open delivery intent must retain its receipt")
-            })?;
+            .ok_or_else(|| PersistenceError::new("open delivery intent must retain its receipt"))?;
     }
 
     let retired = eligible
@@ -665,9 +663,7 @@ pub(super) fn accept_write(
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_accept_write_before_commit) {
         drop(write);
-        drop(store.db.take());
         return Err(PersistenceError::new(
-            crate::PersistenceFault::Io,
             "injected acceptance failed before commit",
         ));
     }
@@ -711,7 +707,7 @@ pub(super) fn promote_signed(
                 // transaction touches a single table, and the
                 // `GovernedWrite` is abandoned rather than committed.
                 if verified.event_id() != frozen_event.id {
-                    return Err(PersistenceError::invariant(format!(
+                    return Err(PersistenceError::new(format!(
                         "promotion evidence verifies event {} but intent {} froze event {}",
                         verified.event_id(),
                         intent_id.0,
@@ -1032,7 +1028,7 @@ pub(super) fn compensate_write_with_state(
                                 .map_err(|error| codec_error("displaced event", error))?,
                         );
                         let Some(mut local) = other_record.local.clone() else {
-                            return Err(PersistenceError::invariant(format!(
+                            return Err(PersistenceError::new(format!(
                                 "displaced event for intent {} lost local ownership",
                                 intent_id.0
                             )));
@@ -1119,7 +1115,7 @@ pub(super) fn compensate_write_with_state(
                                 SuppressClaimRecord::Id { target, .. } => Some(*target),
                                 SuppressClaimRecord::Addr { key: addr_key, .. } => {
                                     let addr_key = std::str::from_utf8(addr_key).map_err(|_| {
-                                        PersistenceError::invariant(
+                                        PersistenceError::new(
                                             "address suppression key is not UTF-8",
                                         )
                                     })?;
@@ -1217,7 +1213,7 @@ pub(super) fn compensate_write_with_state(
     )?;
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_compensation_with_state) {
-        return Err(PersistenceError::invariant("injected compensation failure"));
+        return Err(PersistenceError::new("injected compensation failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::CompensateBeforeCommit);

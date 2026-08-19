@@ -289,30 +289,6 @@ final class EvidenceMappingTests: XCTestCase {
         XCTAssertNotEqual(first, second)
     }
 
-    /// A lane the local disk stalled is a lane that is still ours: it is
-    /// `.waiting`, so it is nonterminal, and it is not the relay having
-    /// refused us or the attempt ceiling having been reached.
-    func testPersistenceStalledReceiptMappingRemainsNonterminal() {
-        let blocked = RelayState(.waiting(waiting: .persistenceStalled(detail: "disk full")))
-        XCTAssertEqual(blocked, .waiting(.persistenceStalled(detail: "disk full")))
-        XCTAssertFalse(blocked.isTerminal)
-        XCTAssertNotEqual(blocked, .gaveUp)
-        XCTAssertNotEqual(blocked, .rejected(reason: "disk full"))
-    }
-
-    /// A stalled durable fact carries the WHY across intact. Two different
-    /// stalls are two different facts -- the detail is the only thing that
-    /// distinguishes them, so it must not be dropped or rolled up -- and
-    /// neither of them claims a wire attempt: no `EVENT` was emitted, so no
-    /// attempt ordinal is spent.
-    func testPersistenceStalledKeepsItsDetailAndClaimsNoAttempt() {
-        let route = RelayState(.waiting(waiting: .persistenceStalled(detail: "route not committed")))
-        let attempt = RelayState(.waiting(waiting: .persistenceStalled(detail: "attempt not committed")))
-        XCTAssertEqual(route, .waiting(.persistenceStalled(detail: "route not committed")))
-        XCTAssertNotEqual(route, attempt)
-        XCTAssertNotEqual(route, .sent(attempt: 1, writtenAt: 0))
-    }
-
     func testEveryAcquisitionEvidenceVariantMapsWithoutARollup() {
         let raw = FfiAcquisitionEvidence(
             sources: [

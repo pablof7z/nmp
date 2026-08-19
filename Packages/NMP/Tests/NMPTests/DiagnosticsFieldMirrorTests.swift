@@ -144,7 +144,6 @@ final class DiagnosticsFieldMirrorTests: XCTestCase {
             droppedMergeRules: [],
             sessionsRejectedOverCap: 1,
             sessionsRefusedBySubscriptionBudget: 1,
-            storeDegraded: nil,
             transportDegraded: nil,
             stalledWrites: [],
             stalledWriteTotals: FfiStalledWriteTotals(

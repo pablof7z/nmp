@@ -23,10 +23,11 @@ boundary records:
   replaceable/addressable winner, retired with retained receipt facts;
 - initial route/retry state that is already known.
 
-If the call returns an error, the caller receives no `Accepted` answer. An I/O
-error has unknown durability: reconstruction and publish-queue enumeration may
-reveal that the transaction committed one pending row. `Accepted` never means merely
-queued in memory.
+If the call returns an error, the caller receives no `Accepted` answer. A commit
+that fails has unknown durability: boot recovery or publish-queue enumeration may
+still reveal one pending row it committed. NMP branches on nothing here — it does
+not classify the failure, does not reconcile it, and does not repeat the
+operation. `Accepted` never means merely queued in memory.
 
 ### Replaceable delivery coalescing
 
@@ -209,44 +210,43 @@ the fleet.
 There is no fixed-rate polling. The scheduler sleeps until the earliest real
 deadline and rearms after every state transition.
 
-### The engine owns durable-store reconstruction
+### A store failure loses progress, never an accepted write
 
-A backend fault classified `requires_reopen()` closes only the poisoned
-database generation. The persistent store retains its canonical-target
-ownership fence, reopens that exact target with bounded exponential backoff,
-validates the existing schema, and refuses a missing or incompatible target
-instead of initializing a replacement. The engine then reconstructs every
-store-derived resolver and write projection before clearing
-`store_degraded`; live query handles, receipt streams, registered signers,
-policies, and the engine instance keep their identity across that transition
-(#1362).
+There is no degraded mode, no latched fault, no reopen, and no classification
+of local disk failure. A store operation that fails returns
+`PersistenceError` — opaque, carrying only the backend's message — the caller
+propagates it, and the engine carries on with the same handle. Nothing branches
+on the kind of failure, because nothing needs to: the cost of losing a durable
+write is bounded by where acceptance commits.
 
-This is reconstruction, not blind retry. A call whose commit returned an I/O
-error still has unknown durability. NMP reopens and reconciles durable facts,
-but never repeats that acceptance operation. An application-supplied
-correlation id is the durable identity that lets a caller repeat `publish`
-and recover the original receipt if the first transaction did commit. A
-permanent fault remains degraded and retry timing stays inside the event-driven
-engine scheduler.
+`accept_write` commits the intent, the receipt, the frozen body and the
+canonical pending row in **one** transaction, and `publish()` returning `Ok` is
+constructible only after that commit. So a store failure can destroy progress —
+which relays a write reached, how far a lane got — and boot recovery rebuilds
+that from the durable rows the acceptance transaction already holds. It cannot
+destroy the obligation itself. Publish while offline, quit, reopen, and it
+sends.
+
+Progress that fails to commit stays *unfinished*, never *finished-as-nothing*.
+A route revision whose commit fails leaves `pending.route_complete` false:
+routing is not complete when nothing durable holds the answer, so the next pass
+resolves and commits again rather than letting an empty durable route set read
+as the terminal `NoDestination` verdict.
+
+The cross-process ownership fence is unaffected — it just no longer needs a
+reopen-while-owned path.
 
 Falsifiers:
-`nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once`
-(the real post-commit Redb generation closes, the first runtime reconstruction
-reopens it, and one live engine/query handle reconciles one correlated
-obligation),
-`nmp::persistent_engine_recovers_after_precommit_acceptance_io_once` (the real
-pre-commit transaction is dropped, the Redb generation closes, the first
-runtime reconstruction reopens it, and the exact retry creates one receipt),
-`nmp-store::reopen_replaces_only_the_database_generation_and_preserves_durable_identity`
-(the ownership fence never opens and the original receipt/event survive the
-new database generation),
-`nmp::invariant_store_failure_does_not_request_reconstruction` (the typed core
-branch arms reconstruction for I/O but not for an invariant),
+`nmp-engine::a_failed_lane_attempt_commit_loses_progress_and_a_fresh_engine_resumes_the_write`
+and
+`nmp-engine::a_failed_route_revision_commit_loses_progress_and_a_fresh_engine_resumes_the_write`
+(a real redb file takes a real post-acceptance commit failure at each of the
+two durable progress boundaries; no app-facing fact is emitted, the engine
+keeps serving, and a fresh engine over the same file recovers the receipt, its
+frozen bytes and its route set and sends the write), and
 `nmp::persistent_engine_keeps_healthy_store_usable_after_invariant_fault` (real
-targeted canonical corruption surfaces the invariant and the next write uses
-the same healthy Redb handle), and
-`nmp::recovery_backoff_is_exponential_event_driven_and_capped` (100 ms
-initial delay, 30 s ceiling, no polling owner).
+targeted canonical corruption refuses that exact publish and the next write
+uses the same healthy Redb handle).
 
 ### Recovery costs what changed, not what accumulated
 

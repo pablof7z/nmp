@@ -105,9 +105,6 @@ fn post_eose_claim_transfer_retries_the_exact_generation_after_one_store_failure
     assert_eq!(core.request_claim_transfer_commits.get(), 0);
     core.set_active_demand(&BTreeSet::from([incumbent.clone()]));
 
-    core.white_box("retry_scheduler_blocked", |s| {
-        s.retry_scheduler_blocked = true
-    });
     let due = core
         .next_deadline()
         .unwrap()
@@ -280,9 +277,6 @@ fn successful_same_filter_eose_supersedes_an_older_pending_claim_transfer() {
     let census = core.bench_ownership_census();
     assert_eq!(census.attribution_live_shape_keys, 2);
     assert_eq!(census.attribution_live_shape_refs, 2);
-    core.white_box("retry_scheduler_blocked", |s| {
-        s.retry_scheduler_blocked = true
-    });
     assert_eq!(core.next_deadline().unwrap(), None);
     core.tick(Timestamp::from(300u64));
     assert_eq!(core.request_claim_transfer_attempts.get(), 1);

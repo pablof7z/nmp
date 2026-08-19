@@ -290,33 +290,6 @@ fn production_transaction_files() -> BTreeSet<String> {
         .collect()
 }
 
-fn collect_variant_names(pattern: &syn::Pat, names: &mut BTreeSet<String>) {
-    match pattern {
-        syn::Pat::Or(alternatives) => {
-            for pattern in &alternatives.cases {
-                collect_variant_names(pattern, names);
-            }
-        }
-        syn::Pat::Path(path) => {
-            if let Some(segment) = path.path.segments.last() {
-                names.insert(segment.ident.to_string());
-            }
-        }
-        syn::Pat::Struct(structure) => {
-            if let Some(segment) = structure.path.segments.last() {
-                names.insert(segment.ident.to_string());
-            }
-        }
-        syn::Pat::TupleStruct(tuple) => {
-            if let Some(segment) = tuple.path.segments.last() {
-                names.insert(segment.ident.to_string());
-            }
-        }
-        syn::Pat::Wild(_) => {}
-        _ => panic!("unexpected classify pattern"),
-    }
-}
-
 #[test]
 fn production_transaction_file_census_fails_closed() {
     let expected = PRODUCTION_TRANSACTION_FILES
@@ -355,7 +328,7 @@ fn executor_body_rejects_fallible_work_after_raw_commit() {
         ) -> Result<T, PersistenceError> {
             write_txn.commit().map_err(persist_err)?;
             std::fs::metadata(".").map_err(|error| {
-                PersistenceError::invariant(error.to_string())
+                PersistenceError::new(error.to_string())
             })?;
             Ok(prepared)
         }
@@ -373,81 +346,4 @@ fn executor_body_rejects_fallible_work_after_raw_commit() {
             "{file}'s raw commit executor must reject restored fallible work: {failures:?}"
         );
     }
-}
-
-#[test]
-fn future_redb_errors_use_the_conservative_fallback() {
-    let syntax = parse_source("schema.rs");
-    let classify = syntax
-        .items
-        .iter()
-        .find_map(|item| match item {
-            syn::Item::Fn(function) if function.sig.ident == "classify" => Some(function),
-            _ => None,
-        })
-        .expect("schema owns one classify function");
-    let Some(Stmt::Expr(Expr::Match(classification), None)) = classify.block.stmts.last() else {
-        panic!("classify must remain one exhaustive match");
-    };
-    let wildcard = classification
-        .arms
-        .iter()
-        .filter(|arm| matches!(arm.pat, syn::Pat::Wild(_)))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        wildcard.len(),
-        1,
-        "classify must have one future-variant arm"
-    );
-    assert!(
-        matches!(
-            wildcard[0].body.as_ref(),
-            Expr::Call(call)
-                if matches!(
-                    call.func.as_ref(),
-                    Expr::Path(path)
-                        if path.path.segments.last().is_some_and(
-                            |segment| segment.ident == "unknown_backend_fault"
-                        )
-                )
-        ),
-        "the non-exhaustive redb fallback must map through unknown_backend_fault"
-    );
-
-    let mut explicit = BTreeSet::new();
-    for arm in &classification.arms {
-        collect_variant_names(&arm.pat, &mut explicit);
-    }
-    let expected = BTreeSet::from([
-        "Corrupted",
-        "DatabaseAlreadyOpen",
-        "DatabaseClosed",
-        "EphemeralSavepointExists",
-        "ImmediateDurabilityRequired",
-        "InvalidSavepoint",
-        "Io",
-        "LockPoisoned",
-        "PersistentSavepointExists",
-        "PersistentSavepointModified",
-        "PreviousIo",
-        "ReadTransactionStillInUse",
-        "RepairAborted",
-        "TableAlreadyOpen",
-        "TableDoesNotExist",
-        "TableExists",
-        "TableIsMultimap",
-        "TableIsNotMultimap",
-        "TableTypeMismatch",
-        "TransactionInProgress",
-        "TypeDefinitionChanged",
-        "UpgradeRequired",
-        "ValueTooLarge",
-    ])
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
-    assert_eq!(
-        explicit, expected,
-        "redb 4.1's complete current error table must remain explicit"
-    );
 }

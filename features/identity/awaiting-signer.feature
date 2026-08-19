@@ -68,7 +68,6 @@ Feature: A named identity with no available signing provider waits; it does not 
 
   # nmp:id=IDENTITY-AWAITING-PROVIDER-003
   # nmp:status=built
-  # nmp:evidence=rust:nmp::persistent_engine_recovers_latched_store_and_resolves_ambiguous_acceptance_once
   # nmp:evidence=rust:nmp::removing_or_clearing_session_never_retargets_or_discards_accepted_writes
   # nmp:falsifier=Re-resolve a recovered accepted write against the restored current account or discard its frozen body; recovery no longer preserves the one accepted obligation and exact public key.
   Scenario: A parked write survives restart still waiting for the same key

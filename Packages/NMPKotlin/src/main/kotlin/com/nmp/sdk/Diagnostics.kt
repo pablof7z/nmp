@@ -248,10 +248,6 @@ data class DiagnosticsSnapshot(
      * operator's ceiling, the other says this relay will hold nothing
      * open. An app acts on them differently. */
     val sessionsRefusedBySubscriptionBudget: ULong = 0uL,
-    /** Set when the local durable store is degraded. Reads may be serving
-     * stale data and writes may not be durable -- the one condition an app
-     * cannot infer from any other field here. */
-    val storeDegraded: String? = null,
     val transportDegraded: String? = null,
     /** Every durable write obligation that cannot progress, bounded to
      * `stalledWriteTotals.detailLimit` rows in a deterministic display
@@ -269,7 +265,6 @@ data class DiagnosticsSnapshot(
                 droppedMergeRules = ffi.droppedMergeRules,
                 sessionsRejectedOverCap = ffi.sessionsRejectedOverCap,
                 sessionsRefusedBySubscriptionBudget = ffi.sessionsRefusedBySubscriptionBudget,
-                storeDegraded = ffi.storeDegraded,
                 transportDegraded = ffi.transportDegraded,
                 stalledWrites = ffi.stalledWrites.map { StalledWrite.from(it) },
                 stalledWriteTotals = StalledWriteTotals.from(ffi.stalledWriteTotals),

@@ -267,10 +267,6 @@ public struct DiagnosticsSnapshot: Sendable {
     /// one says the plan was too wide for the operator's ceiling, the other
     /// says this relay will hold nothing open.
     public let sessionsRefusedBySubscriptionBudget: UInt64
-    /// Non-`nil` once an ingest/read store door has degraded the local
-    /// cache to read-only (issue #122). Observer-visible only -- never a
-    /// routing input.
-    public let storeDegraded: String?
     public let transportDegraded: String?
     /// Every durable write obligation that cannot progress, bounded to
     /// `stalledWriteTotals.detailLimit` rows in a deterministic display
@@ -288,7 +284,6 @@ public struct DiagnosticsSnapshot: Sendable {
         droppedMergeRules = ffi.droppedMergeRules
         sessionsRejectedOverCap = ffi.sessionsRejectedOverCap
         sessionsRefusedBySubscriptionBudget = ffi.sessionsRefusedBySubscriptionBudget
-        storeDegraded = ffi.storeDegraded
         transportDegraded = ffi.transportDegraded
         stalledWrites = ffi.stalledWrites.map(StalledWrite.init)
         stalledWriteTotals = StalledWriteTotals(ffi.stalledWriteTotals)
@@ -304,7 +299,6 @@ public struct DiagnosticsSnapshot: Sendable {
         droppedMergeRules: [String] = [],
         sessionsRejectedOverCap: UInt64 = 0,
         sessionsRefusedBySubscriptionBudget: UInt64 = 0,
-        storeDegraded: String? = nil,
         transportDegraded: String? = nil,
         stalledWrites: [StalledWrite] = [],
         stalledWriteTotals: StalledWriteTotals = StalledWriteTotals()
@@ -315,7 +309,6 @@ public struct DiagnosticsSnapshot: Sendable {
         self.droppedMergeRules = droppedMergeRules
         self.sessionsRejectedOverCap = sessionsRejectedOverCap
         self.sessionsRefusedBySubscriptionBudget = sessionsRefusedBySubscriptionBudget
-        self.storeDegraded = storeDegraded
         self.transportDegraded = transportDegraded
         self.stalledWrites = stalledWrites
         self.stalledWriteTotals = stalledWriteTotals

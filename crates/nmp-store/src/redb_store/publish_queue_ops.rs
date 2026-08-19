@@ -157,12 +157,10 @@ fn intern_relay_in_txn(
             .get(&key)
             .map_err(persist_err)?
             .ok_or_else(|| {
-                PersistenceError::invariant(
-                    "delivery relay reverse map points at missing dictionary row",
-                )
+                PersistenceError::new("delivery relay reverse map points at missing dictionary row")
             })?;
         if decode_relay(forward.value()).map_err(|error| codec_error("relay", error))? != *relay {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "delivery relay dictionary directions disagree",
             ));
         }
@@ -171,7 +169,7 @@ fn intern_relay_in_txn(
 
     let raw = alloc_counter_in_txn(publish_queue_meta, NEXT_RELAY_ID_KEY)?;
     let id = PublishQueueRelayId::try_from(raw)
-        .map_err(|_| PersistenceError::invariant("delivery relay id namespace exhausted"))?;
+        .map_err(|_| PersistenceError::new("delivery relay id namespace exhausted"))?;
     let key = relay_key(id);
     let encoded = encode_relay(relay).map_err(|error| codec_error("relay", error))?;
     publish_queue_relays
@@ -199,9 +197,7 @@ pub(super) fn record_route_revision(
             .map_err(persist_err)?
             .is_none()
         {
-            return Err(PersistenceError::invariant(
-                "route revision intent is not open",
-            ));
+            return Err(PersistenceError::new("route revision intent is not open"));
         }
         let mut revisions = write_txn
             .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
@@ -220,7 +216,7 @@ pub(super) fn record_route_revision(
             let (key_intent, ordinal) = parse_route_revision_key(key.value())
                 .map_err(|error| codec_error("route revision key", error))?;
             if key_intent != intent_id {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "route revision range does not match its value intent",
                 ));
             }
@@ -229,7 +225,7 @@ pub(super) fn record_route_revision(
         }
         let ordinal = last
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("route revision ordinal exhausted"))?;
+            .ok_or_else(|| PersistenceError::new("route revision ordinal exhausted"))?;
         let mut publish_queue_meta = write_txn
             .open_table(PUBLISH_QUEUE_META)
             .map_err(persist_err)?;
@@ -262,9 +258,7 @@ pub(super) fn record_route_revision(
     };
     #[cfg(any(test, feature = "test-instrumentation"))]
     if store.fail_route_revision_writes {
-        return Err(PersistenceError::invariant(
-            "injected route revision failure",
-        ));
+        return Err(PersistenceError::new("injected route revision failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::RouteRevisionBeforeCommit);
@@ -293,7 +287,7 @@ pub(super) fn recover_route_revisions(
         let (key_intent, ordinal) = parse_route_revision_key(key.value())
             .map_err(|error| codec_error("route revision key", error))?;
         if key_intent != intent_id {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "route revision range does not match its value intent",
             ));
         }
@@ -336,7 +330,7 @@ pub(super) fn recover_attempts(
         let (key_intent, relay_id, ordinal) =
             parse_attempt_key(key.value()).map_err(|error| codec_error("attempt key", error))?;
         if key_intent != intent_id {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "delivery attempt range escaped intent prefix",
             ));
         }
@@ -396,11 +390,11 @@ pub(super) fn bootstrap_publish_queue_lanes(
             .get(&intent_key(intent_id))
             .map_err(persist_err)?
             .map(|value| value.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("lane bootstrap intent is not open"))?;
+            .ok_or_else(|| PersistenceError::new("lane bootstrap intent is not open"))?;
         let event_id = decode_intent(&intent_bytes)
             .map_err(|error| codec_error("lane bootstrap intent", error))?
             .current_event_id()
-            .ok_or_else(|| PersistenceError::invariant("lane bootstrap has no current event"))?;
+            .ok_or_else(|| PersistenceError::new("lane bootstrap has no current event"))?;
         let route_revisions = write_txn
             .open_table(PUBLISH_QUEUE_ROUTE_REVISIONS)
             .map_err(persist_err)?;
@@ -423,7 +417,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             let (key_intent, relay_id, ordinal) = parse_attempt_key(key.value())
                 .map_err(|error| codec_error("attempt detail key", error))?;
             if key_intent != intent_id {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "attempt detail range escaped intent prefix",
                 ));
             }
@@ -443,9 +437,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             let (key_intent, relay_id, ordinal) = parse_attempt_key(key.value())
                 .map_err(|error| codec_error("attempt key", error))?;
             if key_intent != intent_id {
-                return Err(PersistenceError::invariant(
-                    "attempt range escaped intent prefix",
-                ));
+                return Err(PersistenceError::new("attempt range escaped intent prefix"));
             }
             let relay = store.publish_queue_relay(relay_id)?;
             let (event_id, mut outcome) =
@@ -486,7 +478,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             let (key_intent, _) = parse_route_revision_key(key.value())
                 .map_err(|error| codec_error("route revision key", error))?;
             if key_intent != intent_id {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "route revision range escaped intent prefix",
                 ));
             }
@@ -542,15 +534,13 @@ pub(super) fn bootstrap_publish_queue_lanes(
                         )
                     }))
             {
-                return Err(PersistenceError::invariant(
-                    "contradictory live attempt history",
-                ));
+                return Err(PersistenceError::new("contradictory live attempt history"));
             }
             if let Some(existing) = lanes.get(&storage_key).map_err(persist_err)? {
                 let (lane_event_id, _, _, _) =
                     decode_lane(existing.value()).map_err(|error| codec_error("lane", error))?;
                 if lane_event_id != event_id {
-                    return Err(PersistenceError::invariant(
+                    return Err(PersistenceError::new(
                         "delivery lane belongs to a predecessor event",
                     ));
                 }
@@ -590,9 +580,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
             let (key_intent, relay_id) =
                 parse_lane_key(key.value()).map_err(|error| codec_error("lane key", error))?;
             if key_intent != intent_id {
-                return Err(PersistenceError::invariant(
-                    "lane range escaped intent prefix",
-                ));
+                return Err(PersistenceError::new("lane range escaped intent prefix"));
             }
             let relay = store.publish_queue_relay(relay_id)?;
             let (lane_event_id, revision, last_ordinal, state) =
@@ -621,9 +609,7 @@ pub(super) fn bootstrap_publish_queue_lanes(
     }
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_lane_bootstrap) {
-        return Err(PersistenceError::invariant(
-            "injected lane bootstrap failure",
-        ));
+        return Err(PersistenceError::new("injected lane bootstrap failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneBootstrapBeforeCommit);
@@ -652,9 +638,7 @@ pub(super) fn recover_publish_queue_lanes(
         let (key_intent, relay_id) =
             parse_lane_key(key.value()).map_err(|error| codec_error("lane key", error))?;
         if key_intent != intent_id {
-            return Err(PersistenceError::invariant(
-                "lane range escaped intent prefix",
-            ));
+            return Err(PersistenceError::new("lane range escaped intent prefix"));
         }
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(value.value()).map_err(|error| codec_error("lane", error))?;
@@ -679,9 +663,7 @@ pub(super) fn due_publish_queue_deadlines(
     limit: usize,
 ) -> Result<Vec<PublishQueueDeadline>, PersistenceError> {
     if limit > 1_024 {
-        return Err(PersistenceError::invariant(
-            "deadline read limit exceeds 1024",
-        ));
+        return Err(PersistenceError::new("deadline read limit exceeds 1024"));
     }
     let read_txn = store.database()?.begin_read().map_err(persist_err)?;
     let deadlines = read_txn
@@ -709,7 +691,7 @@ pub(super) fn due_publish_queue_deadlines(
             .get(&lane_storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
+            .ok_or_else(|| PersistenceError::new("deadline references missing lane"))?;
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let relay = store.publish_queue_relay(relay_id)?;
@@ -734,7 +716,7 @@ pub(super) fn due_publish_queue_deadlines(
             kind,
         };
         if lane_deadline(&lane).as_ref() != Some(&deadline) {
-            return Err(PersistenceError::invariant("deadline and lane disagree"));
+            return Err(PersistenceError::new("deadline and lane disagree"));
         }
         recovered.push(deadline);
     }
@@ -765,7 +747,7 @@ pub(super) fn next_publish_queue_deadline(
         .get(&lane_storage_key)
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| PersistenceError::invariant("deadline references missing lane"))?;
+        .ok_or_else(|| PersistenceError::new("deadline references missing lane"))?;
     let (lane_event_id, revision, last_ordinal, state) =
         decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
     let relay = store.publish_queue_relay(relay_id)?;
@@ -790,7 +772,7 @@ pub(super) fn next_publish_queue_deadline(
         kind,
     };
     if lane_deadline(&lane).as_ref() != Some(&deadline) {
-        return Err(PersistenceError::invariant("deadline and lane disagree"));
+        return Err(PersistenceError::new("deadline and lane disagree"));
     }
     Ok(Some(at))
 }
@@ -838,7 +820,7 @@ pub(super) fn set_lane_transient(
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
     {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
@@ -859,11 +841,11 @@ pub(super) fn set_lane_transient(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, _, last_ordinal, _) =
             decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
         if lane_event_id != key.event_id || last_ordinal != ordinal {
-            return Err(PersistenceError::invariant("stale attempt ordinal"));
+            return Err(PersistenceError::new("stale attempt ordinal"));
         }
         if ordinal > 0 {
             let detail_key = attempt_key(key.intent_id, relay_id, ordinal);
@@ -871,7 +853,7 @@ pub(super) fn set_lane_transient(
                 .get(&detail_key)
                 .map_err(persist_err)?
                 .map(|guard| guard.value().to_vec())
-                .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
+                .ok_or_else(|| PersistenceError::new("attempt detail row not found"))?;
             let mut detail =
                 decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                     .map_err(|error| codec_error("attempt details", error))?;
@@ -920,7 +902,7 @@ pub(super) fn suspend_lane_attempt(
         .as_ref()
         .is_some_and(|reason| reason.len() > 4_096)
     {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
@@ -941,7 +923,7 @@ pub(super) fn suspend_lane_attempt(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, revision, last_ordinal, _) =
             decode_lane(&encoded).map_err(|error| codec_error("lane", error))?;
         if lane_event_id != key.event_id
@@ -949,14 +931,14 @@ pub(super) fn suspend_lane_attempt(
             || last_ordinal != ordinal
             || ordinal == 0
         {
-            return Err(PersistenceError::invariant("stale suspended attempt"));
+            return Err(PersistenceError::new("stale suspended attempt"));
         }
         let detail_key = attempt_key(key.intent_id, relay_id, ordinal);
         let detail_encoded = details
             .get(&detail_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
+            .ok_or_else(|| PersistenceError::new("attempt detail row not found"))?;
         let mut detail =
             decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                 .map_err(|error| codec_error("attempt details", error))?;
@@ -1005,7 +987,7 @@ pub(super) fn start_lane_attempt(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("attempt intent is not open"))?;
+            .ok_or_else(|| PersistenceError::new("attempt intent is not open"))?;
         decode_intent(&encoded).map_err(|error| codec_error("attempt intent", error))?
     };
     let (intent_event, sig_state) = match &intent.work {
@@ -1018,7 +1000,7 @@ pub(super) fn start_lane_attempt(
         } => {
             let rows = store.query(&nostr::Filter::new().id(materialization.current.event_id))?;
             let stored = rows.into_iter().next().ok_or_else(|| {
-                PersistenceError::invariant("operation materialization event is missing")
+                PersistenceError::new("operation materialization event is missing")
             })?;
             (stored.event, materialization.sig_state)
         }
@@ -1026,7 +1008,7 @@ pub(super) fn start_lane_attempt(
             materialization: None,
             ..
         } => {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "operation intent has no current materialization",
             ))
         }
@@ -1037,7 +1019,7 @@ pub(super) fn start_lane_attempt(
     // body. Re-running schnorr here proved nothing the two lines above had
     // not already established.
     if sig_state != IntentSigState::Signed || intent_event != event {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "attempt bytes are not the intent's promoted signed bytes",
         ));
     }
@@ -1061,20 +1043,20 @@ pub(super) fn start_lane_attempt(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         if lane_event_id != key.event_id
             || revision != expected_revision
             || !matches!(state, PublishQueueLaneState::Eligible { .. })
         {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "lane is not expected eligible cursor",
             ));
         }
         let ordinal = last_ordinal
             .checked_add(1)
-            .ok_or_else(|| PersistenceError::invariant("attempt ordinal exhausted"))?;
+            .ok_or_else(|| PersistenceError::new("attempt ordinal exhausted"))?;
         let attempt = PublishQueueAttempt {
             intent_id: key.intent_id,
             relay: key.relay.clone(),
@@ -1118,9 +1100,7 @@ pub(super) fn start_lane_attempt(
     };
     #[cfg(any(test, feature = "test-instrumentation"))]
     if store.failed_lane_start_relays.contains(&key.relay) {
-        return Err(PersistenceError::invariant(
-            "injected attempt start failure",
-        ));
+        return Err(PersistenceError::new("injected attempt start failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneStartBeforeCommit);
@@ -1142,7 +1122,7 @@ pub(super) fn record_lane_handoff(
             ..
         } if reason.len() > 4_096
     ) {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "transient raw reason exceeds 4096 bytes",
         ));
     }
@@ -1163,12 +1143,12 @@ pub(super) fn record_lane_handoff(
             .get(&lane_storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, revision, last_ordinal, current_state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         if lane_event_id != key.event_id || revision != expected_revision || last_ordinal != ordinal
         {
-            return Err(PersistenceError::invariant("stale lane handoff"));
+            return Err(PersistenceError::new("stale lane handoff"));
         }
         if !matches!(
             current_state,
@@ -1177,20 +1157,20 @@ pub(super) fn record_lane_handoff(
                 phase: PublishQueueInFlightPhase::AwaitingHandoff,
             } if current == ordinal
         ) {
-            return Err(PersistenceError::invariant("lane is not awaiting handoff"));
+            return Err(PersistenceError::new("lane is not awaiting handoff"));
         }
         let attempt_key_value = attempt_key(key.intent_id, relay_id, ordinal);
         let detail_encoded = details
             .get(&attempt_key_value)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
+            .ok_or_else(|| PersistenceError::new("attempt detail row not found"))?;
         let mut recovered_detail =
             decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                 .map_err(|error| codec_error("attempt details", error))?;
         if let Some(existing) = &recovered_detail.handoff {
             if existing != &detail {
-                return Err(PersistenceError::invariant("conflicting handoff evidence"));
+                return Err(PersistenceError::new("conflicting handoff evidence"));
             }
         } else {
             recovered_detail.handoff = Some(detail);
@@ -1220,7 +1200,7 @@ pub(super) fn record_lane_handoff(
                 finished_at,
             } => {
                 if outcome == PublishQueueAttemptOutcome::Started {
-                    return Err(PersistenceError::invariant("Started is not terminal"));
+                    return Err(PersistenceError::new("Started is not terminal"));
                 }
                 recovered_detail.finished_at = Some(finished_at);
                 recovered_detail.terminal = Some(outcome.clone());
@@ -1239,7 +1219,7 @@ pub(super) fn record_lane_handoff(
             state,
         )?;
         if lane.last_ordinal != ordinal {
-            return Err(PersistenceError::invariant("stale lane handoff ordinal"));
+            return Err(PersistenceError::new("stale lane handoff ordinal"));
         }
         let detail_encoded = encode_attempt_details(&recovered_detail)
             .map_err(|error| codec_error("attempt details", error))?;
@@ -1250,7 +1230,7 @@ pub(super) fn record_lane_handoff(
     };
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_lane_handoff) {
-        return Err(PersistenceError::invariant("injected lane handoff failure"));
+        return Err(PersistenceError::new("injected lane handoff failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::LaneHandoffBeforeCommit);
@@ -1266,7 +1246,7 @@ pub(super) fn finish_lane_attempt(
     finished_at: Timestamp,
 ) -> Result<PublishQueueLane, PersistenceError> {
     if outcome == PublishQueueAttemptOutcome::Started {
-        return Err(PersistenceError::invariant("Started is not terminal"));
+        return Err(PersistenceError::new("Started is not terminal"));
     }
     let lane_outcome = PublishQueueTerminalOutcome::from_attempt(outcome.clone())?;
     let relay_id = store.publish_queue_relay_id(&key.relay)?;
@@ -1286,7 +1266,7 @@ pub(super) fn finish_lane_attempt(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
@@ -1299,14 +1279,14 @@ pub(super) fn finish_lane_attempt(
             || current.revision != expected_revision
             || current.last_ordinal != ordinal
         {
-            return Err(PersistenceError::invariant("stale terminal attempt"));
+            return Err(PersistenceError::new("stale terminal attempt"));
         }
         let detail_key = attempt_key(key.intent_id, relay_id, ordinal);
         let detail_encoded = details
             .get(&detail_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("attempt detail row not found"))?;
+            .ok_or_else(|| PersistenceError::new("attempt detail row not found"))?;
         let mut detail =
             decode_attempt_details(&detail_encoded, key.intent_id, key.relay.clone(), ordinal)
                 .map_err(|error| codec_error("attempt details", error))?;
@@ -1323,7 +1303,7 @@ pub(super) fn finish_lane_attempt(
             {
                 current
             } else {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "attempt already has conflicting terminal evidence",
                 ));
             }
@@ -1350,9 +1330,7 @@ pub(super) fn finish_lane_attempt(
     };
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_lane_attempt_finish) {
-        return Err(PersistenceError::invariant(
-            "injected attempt finish failure",
-        ));
+        return Err(PersistenceError::new("injected attempt finish failure"));
     }
     #[cfg(test)]
     store.crash_if(RedbCrashPoint::FinishAttemptBeforeCommit);
@@ -1366,7 +1344,7 @@ pub(super) fn deny_lane_auth(
     denial: AuthDenial,
 ) -> Result<PublishQueueLane, PersistenceError> {
     if denial.reason.len() > 4_096 {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "authentication denial reason exceeds 4096 bytes",
         ));
     }
@@ -1384,7 +1362,7 @@ pub(super) fn deny_lane_auth(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("delivery lane not found"))?;
+            .ok_or_else(|| PersistenceError::new("delivery lane not found"))?;
         let (lane_event_id, revision, last_ordinal, state) =
             decode_lane(&lane_encoded).map_err(|error| codec_error("lane", error))?;
         let current = PublishQueueLane {
@@ -1394,7 +1372,7 @@ pub(super) fn deny_lane_auth(
             state,
         };
         if lane_event_id != key.event_id || current.revision != expected_revision {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "authentication denial lane revision is stale",
             ));
         }
@@ -1408,7 +1386,7 @@ pub(super) fn deny_lane_auth(
             current
         } else {
             if !matches!(current.state, PublishQueueLaneState::WaitingAuth) {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "lane is not waiting for authentication",
                 ));
             }
@@ -1448,7 +1426,7 @@ pub(super) fn recover_attempt_details(
         let (key_intent, relay_id, ordinal) = parse_attempt_key(key.value())
             .map_err(|error| codec_error("attempt detail key", error))?;
         if key_intent != intent_id {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "attempt detail range escaped intent prefix",
             ));
         }
@@ -1506,7 +1484,7 @@ pub(super) fn terminal_intent_evidence_bytes(
         let (key, value) = row.map_err(persist_err)?;
         total = total
             .checked_add((key.value().len() + value.value().len()) as u64)
-            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+            .ok_or_else(|| PersistenceError::new("terminal evidence bytes overflow"))?;
     }
     let details = write_txn
         .open_table(PUBLISH_QUEUE_ATTEMPT_DETAILS)
@@ -1518,7 +1496,7 @@ pub(super) fn terminal_intent_evidence_bytes(
         let (key, value) = row.map_err(persist_err)?;
         total = total
             .checked_add((key.value().len() + value.value().len()) as u64)
-            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+            .ok_or_else(|| PersistenceError::new("terminal evidence bytes overflow"))?;
     }
     let (lane_lower, lane_upper) = lane_range(intent_id);
     let lanes = write_txn
@@ -1531,7 +1509,7 @@ pub(super) fn terminal_intent_evidence_bytes(
         let (key, value) = row.map_err(persist_err)?;
         total = total
             .checked_add((key.value().len() + value.value().len()) as u64)
-            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+            .ok_or_else(|| PersistenceError::new("terminal evidence bytes overflow"))?;
     }
     let (route_lower, route_upper) = route_revision_range(intent_id);
     let routes = write_txn
@@ -1544,7 +1522,7 @@ pub(super) fn terminal_intent_evidence_bytes(
         let (key, value) = row.map_err(persist_err)?;
         total = total
             .checked_add((key.value().len() + value.value().len()) as u64)
-            .ok_or_else(|| PersistenceError::invariant("terminal evidence bytes overflow"))?;
+            .ok_or_else(|| PersistenceError::new("terminal evidence bytes overflow"))?;
     }
     Ok(total)
 }
@@ -1584,7 +1562,7 @@ fn close_intent(
                 let (key_intent, _) =
                     parse_lane_key(key.value()).map_err(|error| codec_error("lane key", error))?;
                 if key_intent != intent_id {
-                    return Err(PersistenceError::invariant(
+                    return Err(PersistenceError::new(
                         "lane close range escaped intent prefix",
                     ));
                 }
@@ -1602,7 +1580,7 @@ fn close_intent(
                 }
             };
             if !shape_holds {
-                return Err(PersistenceError::invariant(match shape {
+                return Err(PersistenceError::new(match shape {
                     LaneShape::None => "intent still owns lanes",
                     LaneShape::AllTerminal => "intent lanes are not non-empty and terminal",
                 }));
@@ -1672,7 +1650,7 @@ pub(super) fn accept_refused(
     reason: crate::RefuseReason,
 ) -> Result<u64, PersistenceError> {
     if reason == crate::RefuseReason::AlreadyExpired {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "already-expired writes are refused before receipt custody",
         ));
     }
@@ -1836,21 +1814,21 @@ pub(super) fn maintain_terminal_receipts_in_txn(
                 .map_err(persist_err)?
                 .map(|guard| guard.value().to_vec())
                 .ok_or_else(|| {
-                    PersistenceError::invariant("terminal index references missing receipt")
+                    PersistenceError::new("terminal index references missing receipt")
                 })?;
             let record =
                 decode_receipt(&receipt).map_err(|error| codec_error("terminal receipt", error))?;
-            let terminal_bytes = record.terminal_bytes.ok_or_else(|| {
-                PersistenceError::invariant("terminal receipt has no byte accounting")
-            })?;
+            let terminal_bytes = record
+                .terminal_bytes
+                .ok_or_else(|| PersistenceError::new("terminal receipt has no byte accounting"))?;
             if record.terminal_sequence != Some(sequence) {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "terminal receipt and FIFO sequence disagree",
                 ));
             }
-            let terminal_at = record.terminal_at.ok_or_else(|| {
-                PersistenceError::invariant("terminal receipt has no completion time")
-            })?;
+            let terminal_at = record
+                .terminal_at
+                .ok_or_else(|| PersistenceError::new("terminal receipt has no completion time"))?;
             let age_due =
                 now.as_secs() >= terminal_at.as_secs().saturating_add(limits.max_age_secs);
             if !age_due
@@ -1862,13 +1840,13 @@ pub(super) fn maintain_terminal_receipts_in_txn(
             candidates.push(receipt_id);
             remaining_count = remaining_count
                 .checked_sub(1)
-                .ok_or_else(|| PersistenceError::invariant("terminal receipt count underflow"))?;
+                .ok_or_else(|| PersistenceError::new("terminal receipt count underflow"))?;
             remaining_bytes = remaining_bytes
                 .checked_sub(terminal_bytes)
-                .ok_or_else(|| PersistenceError::invariant("terminal receipt bytes underflow"))?;
+                .ok_or_else(|| PersistenceError::new("terminal receipt bytes underflow"))?;
         }
         if remaining_count > limits.max_count || remaining_bytes > limits.max_bytes {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "terminal receipt accounting exceeds its FIFO index",
             ));
         }
@@ -1879,7 +1857,7 @@ pub(super) fn maintain_terminal_receipts_in_txn(
         if remove_publish_queue_entry_in_txn(write_txn, *receipt_id)?
             != crate::RemoveQueueEntryOutcome::Removed
         {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "terminal FIFO references a non-removable receipt",
             ));
         }
@@ -1926,17 +1904,17 @@ fn terminal_retention_due(
         .get(&receipt_key(receipt_id))
         .map_err(persist_err)?
         .map(|guard| guard.value().to_vec())
-        .ok_or_else(|| PersistenceError::invariant("terminal index references missing receipt"))?;
+        .ok_or_else(|| PersistenceError::new("terminal index references missing receipt"))?;
     let record =
         decode_receipt(&receipt).map_err(|error| codec_error("terminal receipt", error))?;
     if record.terminal_sequence != Some(sequence) {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "terminal receipt and FIFO sequence disagree",
         ));
     }
     let terminal_at = record
         .terminal_at
-        .ok_or_else(|| PersistenceError::invariant("terminal receipt has no completion time"))?;
+        .ok_or_else(|| PersistenceError::new("terminal receipt has no completion time"))?;
     Ok(now.as_secs() >= terminal_at.as_secs().saturating_add(limits.max_age_secs))
 }
 
@@ -1984,7 +1962,7 @@ fn remove_publish_queue_entry_in_txn(
                 .map_err(persist_err)?
                 .is_some()
             {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "terminal receipt still owns provisional suppression claims",
                 ));
             }

@@ -22,7 +22,7 @@ use super::schema::{
 };
 use super::RedbStore;
 use crate::{
-    AcceptOutcome, CoverageKey, PersistenceError, PersistenceFault, PublishQueueAttempt,
+    AcceptOutcome, CoverageKey, PersistenceError, PublishQueueAttempt,
     PublishQueueAttemptOutcome, PublishQueueDeadlineKind, PublishQueueInFlightPhase,
     PublishQueueLaneState,
 };
@@ -126,19 +126,18 @@ pub fn create_nonempty_markerless_store(path: &Path) -> Result<(), PersistenceEr
     Ok(())
 }
 
-/// Commit one real event acceptance, close that exact Redb generation, and
-/// hide the committed outcome behind a typed I/O failure. This test-owned
-/// exit is deliberately outside the production transaction modules so their
-/// structural gate continues to require a tail-position commit.
+/// Commit one real event acceptance and then hide the committed outcome
+/// behind an I/O failure -- the case where the caller is handed `Err` for a
+/// transaction that is already durable. This test-owned exit is deliberately
+/// outside the production transaction modules so their structural gate
+/// continues to require a tail-position commit.
 pub(super) fn commit_acceptance_then_return_io(
-    store: &mut RedbStore,
+    _store: &mut RedbStore,
     write: GovernedWrite,
     outcome: AcceptOutcome,
 ) -> Result<AcceptOutcome, PersistenceError> {
     let _committed = write.commit_prepared(outcome)?;
-    drop(store.db.take());
     Err(PersistenceError::new(
-        PersistenceFault::Io,
         "injected acceptance committed before I/O failure",
     ))
 }
@@ -162,9 +161,9 @@ fn corrupt_first_row<const N: usize>(
             .collect::<Result<Vec<_>, PersistenceError>>()?
             .into_iter()
             .find(|(key, _)| key.as_slice().starts_with(prefix))
-            .ok_or_else(|| PersistenceError::invariant("matching publish-queue row"))?;
+            .ok_or_else(|| PersistenceError::new("matching publish-queue row"))?;
         if value.len() < 5 {
-            return Err(PersistenceError::invariant("versioned delivery envelope"));
+            return Err(PersistenceError::new("versioned delivery envelope"));
         }
         value[4] = 200;
         opened.insert(&key, value.as_slice()).map_err(persist_err)?;
@@ -201,7 +200,7 @@ pub fn corrupt_publish_queue_deadline(
     attempt: &PublishQueueAttempt,
 ) -> Result<(), PersistenceError> {
     if attempt.outcome != PublishQueueAttemptOutcome::Started {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "deadline fixture attempt is not live",
         ));
     }
@@ -216,7 +215,7 @@ pub fn corrupt_publish_queue_deadline(
             .get(attempt.relay.as_str().as_bytes())
             .map_err(persist_err)?
             .map(|guard| u32::from_be_bytes(*guard.value()))
-            .ok_or_else(|| PersistenceError::invariant("deadline fixture relay is not interned"))?;
+            .ok_or_else(|| PersistenceError::new("deadline fixture relay is not interned"))?;
         relay_id
     };
     let (key, lane_revision) = {
@@ -226,11 +225,11 @@ pub fn corrupt_publish_queue_deadline(
             .get(&storage_key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("deadline fixture lane is missing"))?;
+            .ok_or_else(|| PersistenceError::new("deadline fixture lane is missing"))?;
         let (event_id, revision, last_ordinal, state) =
             decode_lane(&encoded).map_err(|error| codec_error("deadline fixture lane", error))?;
         if event_id != attempt.event_id || last_ordinal != attempt.ordinal {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "deadline fixture attempt does not own the current lane",
             ));
         }
@@ -240,7 +239,7 @@ pub fn corrupt_publish_queue_deadline(
                 phase: PublishQueueInFlightPhase::AwaitingAck { deadline },
             } if ordinal == attempt.ordinal => deadline,
             _ => {
-                return Err(PersistenceError::invariant(
+                return Err(PersistenceError::new(
                     "deadline fixture lane is not awaiting this attempt's acknowledgement",
                 ))
             }
@@ -258,11 +257,11 @@ pub fn corrupt_publish_queue_deadline(
             .get(&key)
             .map_err(persist_err)?
             .map(|guard| guard.value().to_vec())
-            .ok_or_else(|| PersistenceError::invariant("deadline fixture row is missing"))?;
+            .ok_or_else(|| PersistenceError::new("deadline fixture row is missing"))?;
         let decoded = decode_deadline(&encoded)
             .map_err(|error| codec_error("deadline fixture row", error))?;
         if decoded != (lane_revision, PublishQueueDeadlineKind::AckTimeout) {
-            return Err(PersistenceError::invariant(
+            return Err(PersistenceError::new(
                 "deadline fixture row does not match the awaiting-ack lane",
             ));
         }
@@ -303,7 +302,7 @@ pub fn corrupt_canonical_event(path: &Path, event_id: EventId) -> Result<(), Per
             .get(event_id.as_bytes())
             .map_err(persist_err)?
             .map(|value| value.value())
-            .ok_or_else(|| PersistenceError::invariant("canonical event id fixture"))?;
+            .ok_or_else(|| PersistenceError::new("canonical event id fixture"))?;
         event_key
     };
     {
@@ -335,7 +334,7 @@ pub fn corrupt_coverage(
             .map_err(persist_err)?
             .is_none()
         {
-            return Err(PersistenceError::invariant("coverage row fixture"));
+            return Err(PersistenceError::new("coverage row fixture"));
         }
         coverage
             .insert(row_key.as_str(), "{ not a coverage row")

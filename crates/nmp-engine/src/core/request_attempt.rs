@@ -8,7 +8,7 @@ use nmp_store::CoverageKey;
 use nostr::Timestamp;
 
 use super::{
-    bootstrap_retry_delay_secs, CoreState, Effect, EventFailureTarget, TransportRelayHandle,
+    unjittered_retry_delay_secs, CoreState, Effect, EventFailureTarget, TransportRelayHandle,
 };
 
 /// Reducer-minted identity of one exact local request-send attempt.
@@ -322,7 +322,7 @@ impl RequestAttempts {
             key,
             PendingRequestRetry {
                 attempt,
-                due: now + bootstrap_retry_delay_secs(failures),
+                due: now + unjittered_retry_delay_secs(failures),
                 failures,
             },
         );

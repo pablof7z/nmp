@@ -277,7 +277,7 @@ impl EngineCore {
         Self::checked_new(self.state.with_max_publish_attempts(max_publish_attempts))
     }
 
-    pub fn relay_worker_requirements(&self) -> Option<RelayWorkerRequirements> {
+    pub fn relay_worker_requirements(&self) -> RelayWorkerRequirements {
         self.state.relay_worker_requirements()
     }
 
@@ -344,16 +344,6 @@ impl EngineCore {
 
     pub fn active_pubkey(&self) -> Option<PublicKey> {
         self.state.active_pubkey()
-    }
-
-    #[cfg(any(test, feature = "test-instrumentation"))]
-    #[doc(hidden)]
-    pub fn recover_requested_redb_store_for_test(
-        &mut self,
-    ) -> Result<Option<(PersistenceFault, Vec<Effect>)>, PersistenceError> {
-        self.checked("recover_requested_redb_store_for_test", |s| {
-            s.recover_requested_redb_store_for_test()
-        })
     }
 
     #[cfg(any(test, feature = "test-instrumentation"))]
@@ -532,22 +522,6 @@ impl EngineCore {
         outcome: RequestHandoffOutcome,
     ) -> Vec<Effect> {
         self.checked("on_nip77_handoff", |s| s.on_nip77_handoff(frame, outcome))
-    }
-
-    pub fn degrade_store(&mut self, err: PersistenceError, effects: &mut Vec<Effect>) {
-        self.checked("degrade_store", |s| s.degrade_store(err, effects))
-    }
-
-    pub fn take_store_recovery_request(&mut self) -> Option<PersistenceFault> {
-        self.checked("take_store_recovery_request", |s| {
-            s.take_store_recovery_request()
-        })
-    }
-
-    pub fn recover_store_after_failure(&mut self) -> Result<Vec<Effect>, PersistenceError> {
-        self.checked("recover_store_after_failure", |s| {
-            s.recover_store_after_failure()
-        })
     }
 
     pub fn recover_on_boot(&mut self) -> Vec<Effect> {

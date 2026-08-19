@@ -1036,10 +1036,6 @@ pub struct FfiDiagnosticsSnapshot {
     /// `sessions_rejected_over_cap`: one says the plan was too wide for the
     /// operator's ceiling, the other says this relay will hold nothing open.
     pub sessions_refused_by_subscription_budget: u64,
-    /// `Some(message)` once an ingest/read store door has degraded the local
-    /// cache to read-only (issue #122). Observer-visible only -- never a
-    /// routing input.
-    pub store_degraded: Option<String>,
     /// Latest transport acceptance/verifier failure, if any. This is
     /// observational diagnostics and never changes routing or trust policy.
     pub transport_degraded: Option<String>,
@@ -1232,17 +1228,6 @@ pub enum FfiRelayWaiting {
         cause: FfiRetryCause,
         detail: Option<String>,
     },
-    /// The lane is owned and nonterminal, but a durable fact about it could
-    /// not be committed — the local disk is refusing writes. No wire EVENT
-    /// was emitted.
-    ///
-    /// Also LATCHED onto the queue entry
-    /// ([`FfiPublishQueueEntry::persistence_fault`]) and never cleared by a
-    /// later ack: an operator must not lose the only signal that the disk is
-    /// failing because a relay succeeded afterwards.
-    PersistenceStalled {
-        detail: String,
-    },
 }
 
 /// `nmp::WriteOutcome` mirror: the whole-write terminal. Exactly one of these
@@ -1325,9 +1310,6 @@ pub struct FfiPublishQueueEntry {
     pub relay_states: Vec<FfiQueueRelayState>,
     /// `None` while the write is still in progress.
     pub outcome: Option<FfiWriteOutcome>,
-    /// LATCHED. Set the first time local persistence refused a durable fact
-    /// for this write, and never cleared by a later success.
-    pub persistence_fault: Option<String>,
 }
 
 /// One `(relay, state)` pair on a [`FfiPublishQueueEntry`]. A record rather

@@ -5,11 +5,9 @@
 //! Each test corrupts exactly ONE class of persisted row through a raw
 //! `redb` handle — the store's own doors cannot write these bytes, which is
 //! the point — reopens through the ordinary public constructor, and proves
-//! four things about the owning door:
+//! three things about the owning door:
 //!
-//! 1. it returns `Err`, classified [`PersistenceFault::Invariant`] with
-//!    [`DurabilityOutcome::Absent`] (see that variant's doc for why a
-//!    decode failure is `Invariant` and not `Corrupted`);
+//! 1. it returns `Err`;
 //! 2. it does not panic — asserted directly with `catch_unwind`, because
 //!    "returns `Err`" and "does not abort the embedding host" are different
 //!    claims and this issue exists because of the second one;
@@ -32,7 +30,7 @@ use super::postings_store::{
     catalog_column_bounds, catalog_key, CATALOG_BY_MIN, CATALOG_DICTIONARY, CATALOG_RUN_META,
 };
 use super::*;
-use crate::{sentinel_signature, AcceptWrite, DurabilityOutcome, IntentSigState, PersistenceFault};
+use crate::{sentinel_signature, AcceptWrite, IntentSigState};
 
 /// The verified, intent-bound evidence `promote_signed` takes (#768). Every
 /// event promoted below is one this fixture just signed itself, so the
@@ -268,21 +266,10 @@ fn assert_typed_refusal<T: std::fmt::Debug>(
 ) -> PersistenceError {
     let outcome = catch_unwind(AssertUnwindSafe(call))
         .unwrap_or_else(|_| panic!("{what} panicked the host instead of reporting corruption"));
-    let error = match outcome {
+    match outcome {
         Ok(value) => panic!("{what} returned {value:?} for a corrupt persisted row"),
         Err(error) => error,
-    };
-    assert_eq!(
-        error.fault(),
-        PersistenceFault::Invariant,
-        "{what}: a row this crate cannot decode is an invariant violation, not a backend fault"
-    );
-    assert_eq!(
-        error.durability(),
-        DurabilityOutcome::Absent,
-        "{what}: the decode precedes the commit, so nothing landed"
-    );
-    error
+    }
 }
 
 // -------------------------------------------------------------- delivery
@@ -437,13 +424,9 @@ fn replaceable_retirement_refuses_a_truncated_not_handed_off_attempt_record() {
             .is_some(),
         "failed replacement must not destroy the predecessor receipt"
     );
-    assert_eq!(
-        store
-            .recover_attempts(intent_id)
-            .expect_err("the malformed attempt remains visible")
-            .fault(),
-        PersistenceFault::Invariant
-    );
+    store
+        .recover_attempts(intent_id)
+        .expect_err("the malformed attempt remains visible");
     drop(store);
     assert_eq!(
         fixed_table_digest(&fixture, PUBLISH_QUEUE_ATTEMPT_DETAILS),

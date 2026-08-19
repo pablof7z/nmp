@@ -273,11 +273,6 @@ public enum RelayWaiting: Sendable, Hashable {
         cause: RetryCause,
         detail: String?
     )
-    /// The lane is owned and nonterminal, but a durable fact about it could
-    /// not be committed -- the local disk is refusing writes. No wire EVENT
-    /// was emitted. Also latched onto the queue entry and never cleared by a
-    /// later ack.
-    case persistenceStalled(detail: String)
 
     init(_ ffi: FfiRelayWaiting) {
         switch ffi {
@@ -291,7 +286,6 @@ public enum RelayWaiting: Sendable, Hashable {
                 cause: RetryCause(cause),
                 detail: detail
             )
-        case .persistenceStalled(let detail): self = .persistenceStalled(detail: detail)
         }
     }
 }
@@ -483,12 +477,6 @@ public struct PublishQueueEntry: Sendable, Hashable {
     public let relayStates: [(relay: String, state: RelayState)]
     /// `nil` while the write is still in progress.
     public let outcome: WriteOutcome?
-    /// LATCHED. Set the first time local persistence refused a durable fact
-    /// for this write, and never cleared by a later success -- an operator
-    /// must not lose the only signal that the disk is failing because a relay
-    /// acked afterwards.
-    public let persistenceFault: String?
-
     /// Whether this write will produce another fact.
     public var isTerminal: Bool { outcome != nil }
 
@@ -502,7 +490,6 @@ public struct PublishQueueEntry: Sendable, Hashable {
         routeComplete = ffi.routeComplete
         relayStates = ffi.relayStates.map { (relay: $0.relay, state: RelayState($0.state)) }
         outcome = ffi.outcome.map(WriteOutcome.init)
-        persistenceFault = ffi.persistenceFault
     }
 
     public static func == (lhs: PublishQueueEntry, rhs: PublishQueueEntry) -> Bool {
@@ -516,7 +503,6 @@ public struct PublishQueueEntry: Sendable, Hashable {
             && lhs.relayStates.map(\.relay) == rhs.relayStates.map(\.relay)
             && lhs.relayStates.map(\.state) == rhs.relayStates.map(\.state)
             && lhs.outcome == rhs.outcome
-            && lhs.persistenceFault == rhs.persistenceFault
     }
 
     public func hash(into hasher: inout Hasher) {

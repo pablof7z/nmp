@@ -486,7 +486,7 @@ impl CoreState {
     fn refuse_history_open(
         &mut self,
         id: HistorySessionId,
-        error: PersistenceError,
+        _error: PersistenceError,
         reason: String,
         mut effects: Vec<Effect>,
     ) -> ObservationOpen<HistorySessionId, HistoryBatch> {
@@ -500,7 +500,6 @@ impl CoreState {
             self.consume_resolver_delta(delta);
         }
         self.flush_consumed_resolver_closes(&mut effects);
-        self.degrade_store(error, &mut effects);
         ObservationOpen::Refused { reason, effects }
     }
 
@@ -528,7 +527,6 @@ impl CoreState {
                     }
                     self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("canonical history resolution failed: {error}");
-                    self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
                 }
             }
@@ -549,7 +547,6 @@ impl CoreState {
                     }
                     self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("history freshness decision failed: {error}");
-                    self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
                 }
             }
@@ -855,14 +852,13 @@ impl CoreState {
                     self.consume_resolver_delta(delta);
                     opened.push((branch, handle, kind));
                 }
-                SubscribeOutcome::Refused { error, delta } => {
+                SubscribeOutcome::Refused { error: _, delta } => {
                     self.consume_resolver_delta(delta);
                     for (_, handle, _) in opened {
                         let delta = self.resolver.unsubscribe(handle.id());
                         self.consume_resolver_delta(delta);
                     }
                     self.flush_consumed_resolver_closes(&mut effects);
-                    self.degrade_store(error, &mut effects);
                     effects.extend(self.on_rollback_history_load(id));
                     effects.push(Effect::HistoryLoadResult(
                         id,
@@ -950,11 +946,10 @@ impl CoreState {
                 pending.staged_batches = vec![requesting, batch];
                 added
             }
-            Err(error) => {
+            Err(_error) => {
                 if let Some(state) = self.history.get_mut(id) {
                     state.projection_complete = false;
                 }
-                self.degrade_store(error, &mut effects);
                 effects.extend(self.on_rollback_history_load(id));
                 effects.push(Effect::HistoryLoadResult(
                     id,
@@ -1271,11 +1266,10 @@ impl CoreState {
     ) -> Option<usize> {
         let (current, evidence) = match self.history_rows_and_evidence_for(id) {
             Ok(value) => value,
-            Err(error) => {
+            Err(_error) => {
                 if let Some(state) = self.history.get_mut(id) {
                     state.projection_complete = false;
                 }
-                self.degrade_store(error, effects);
                 return None;
             }
         };
@@ -1352,8 +1346,7 @@ impl CoreState {
         // place and degrades, instead of republishing it as unproven.
         let evidence = match self.history_evidence_for(id) {
             Ok(evidence) => evidence,
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return;
             }
         };
@@ -1712,12 +1705,11 @@ impl CoreState {
                             stored.provenance.seen.into_keys().collect(),
                         )
                     }),
-                    Err(error) => {
+                    Err(_error) => {
                         self.history
                             .get_mut(id)
                             .expect("history remained live after affected-row read failure")
                             .projection_complete = false;
-                        self.degrade_store(error, effects);
                         return true;
                     }
                 };
@@ -1871,7 +1863,7 @@ impl CoreState {
             };
             let rows = match queried {
                 Ok(rows) => rows,
-                Err(error) => {
+                Err(_error) => {
                     let state = self
                         .history
                         .get_mut(id)
@@ -1890,7 +1882,6 @@ impl CoreState {
                         }
                     }
                     state.projection_complete = false;
-                    self.degrade_store(error, effects);
                     return true;
                 }
             };

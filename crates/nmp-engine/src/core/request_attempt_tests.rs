@@ -208,13 +208,13 @@ fn repeated_local_refusals_keep_one_goal_increase_backoff_and_become_requesting_
             .next_deadline()
             .unwrap()
             .expect("capped retry deadline");
-        assert_eq!(due, prior_due + bootstrap_retry_delay_secs(failure));
+        assert_eq!(due, prior_due + unjittered_retry_delay_secs(failure));
         assert_eq!(core.bench_ownership_census().request_retry_jobs, 1);
         let emitted = core.handle(EngineMsg::Tick(due));
         current_attempt = only_request(&emitted).3;
         prior_due = due;
     }
-    assert_eq!(bootstrap_retry_delay_secs(12), RETRY_MAX_SECS);
+    assert_eq!(unjittered_retry_delay_secs(12), RETRY_MAX_SECS);
     let accepted = core.on_wire_request_handoff(RequestHandoffOutcome::Accepted {
         attempt_id: current_attempt,
         handle,

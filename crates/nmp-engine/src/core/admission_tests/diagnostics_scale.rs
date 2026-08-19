@@ -52,13 +52,6 @@ fn a_diagnostics_snapshot_built_over_corrupt_coverage_says_so() {
         1,
         "diagnostics_snapshot must own the first and only coverage dereference"
     );
-    assert!(
-        snapshot
-            .store_degraded
-            .as_deref()
-            .is_some_and(|message| message.contains("decode coverage row")),
-        "the exact decode failure must accompany the unreadable entry: {snapshot:?}"
-    );
     let relay_snapshot = snapshot
         .relays
         .iter()

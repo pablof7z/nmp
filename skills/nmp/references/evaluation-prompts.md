@@ -16,7 +16,7 @@ Prompt: "Show a direct-Rust service design that publishes a durable replaceable 
 
 ## Adversarial API review
 
-Prompt: "Review a proposal claiming that every NMP row exposes pending signature state, that diagnostics report a per-attempt write retry schedule, that apps can retry a failed write through a public method, and that Swift and Kotlin both expose `store_degraded`. Produce an implementable correction."
+Prompt: "Review a proposal claiming that every NMP row exposes pending signature state, that diagnostics report a per-attempt write retry schedule, that apps can retry a failed write through a public method, and that an app can branch on the kind of local-store failure it hit. Produce an implementable correction."
 
 ## Native signer refusal
 

@@ -845,13 +845,6 @@ fn only_the_branch_tells_two_identical_resolver_facts_apart() {
     );
 }
 
-fn degraded(effects: &[Effect]) -> Option<String> {
-    effects.iter().find_map(|effect| match effect {
-        Effect::EmitDiagnostics(snapshot) => snapshot.store_degraded.clone(),
-        _ => None,
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Falsifier: "branch K's open failure rolls back 0..K-1 with no wire owner."
 // ---------------------------------------------------------------------------
@@ -874,6 +867,21 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
     };
     testing::corrupt_canonical_event(&path, corrupt_id)
         .expect("store-owned canonical-event corruption");
+    // Non-vacuity, taken at the door before the engine takes the store: the
+    // corrupted row really is undecodable, so what follows cannot be a
+    // perfectly healthy open.
+    {
+        let probe = RedbStore::open(&path).expect("probe the corrupted store");
+        let refusal = probe
+            .query(&nostr::Filter::new().id(corrupt_id))
+            .expect_err("the corrupted canonical row must be undecodable");
+        assert!(
+            refusal
+                .message()
+                .starts_with("decode canonical event view "),
+            "the exact corrupted row must be the one that refuses: {refusal}"
+        );
+    }
     let mut core = EngineCore::new_with_fixture_routing_facts(
         RedbStore::open(&path).expect("reopen temporary Redb store"),
         FixtureRoutingFacts::new(),
@@ -894,13 +902,6 @@ fn a_union_branch_that_cannot_open_leaves_no_earlier_branch_installed() {
     );
 
     let refused = core.handle(EngineMsg::Subscribe(query));
-
-    let refusal = degraded(&refused).expect("the corrupt branch reports degraded storage");
-    assert!(
-        refusal.starts_with("durable-store persistence failure: decode canonical event view "),
-        "the store-owned corruption must actually be dereferenced; without this the rest of \
-         this test would pass over a perfectly healthy open: {refusal}"
-    );
     assert!(
         !refused
             .iter()
@@ -970,6 +971,21 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
     };
     testing::corrupt_canonical_event(&path, corrupt_id)
         .expect("store-owned canonical-event corruption");
+    // Non-vacuity, taken at the door before the engine takes the store: the
+    // corrupted row really is undecodable, so what follows cannot be a
+    // perfectly healthy open.
+    {
+        let probe = RedbStore::open(&path).expect("probe the corrupted store");
+        let refusal = probe
+            .query(&nostr::Filter::new().id(corrupt_id))
+            .expect_err("the corrupted canonical row must be undecodable");
+        assert!(
+            refusal
+                .message()
+                .starts_with("decode canonical event view "),
+            "the exact corrupted row must be the one that refuses: {refusal}"
+        );
+    }
     let store = RedbStore::open(&path).expect("reopen temporary Redb store");
     let mut core =
         EngineCore::new_with_fixture_routing_facts(store, FixtureRoutingFacts::new(), 10);
@@ -1032,11 +1048,6 @@ fn one_branchs_refresh_failure_retracts_no_sibling_row() {
         projection.evidence, prior_evidence,
         "and both branches' evidence, byte-identical -- including the failing \
          branch's own prior entry, which is not replaced by an empty one"
-    );
-    let refusal = degraded(&refreshed).expect("the corrupt branch reports degraded storage");
-    assert!(
-        refusal.starts_with("durable-store persistence failure: decode canonical event view "),
-        "the failure is reported as an ordinary degraded diagnostic instead: {refusal}"
     );
 }
 

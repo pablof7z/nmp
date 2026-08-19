@@ -427,5 +427,5 @@ fn fixed_key<'a, const N: usize>(
     what: &'static str,
 ) -> Result<&'a [u8; N], PersistenceError> {
     key.try_into()
-        .map_err(|_| PersistenceError::invariant(format!("{what} has wrong width")))
+        .map_err(|_| PersistenceError::new(format!("{what} has wrong width")))
 }

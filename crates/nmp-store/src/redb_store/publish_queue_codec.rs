@@ -127,7 +127,7 @@ impl From<PublishQueueCodecError> for PersistenceError {
 }
 
 pub(super) fn codec_error(what: &str, error: PublishQueueCodecError) -> PersistenceError {
-    PersistenceError::invariant(format!("decode publish queue {what}: {error}"))
+    PersistenceError::new(format!("decode publish queue {what}: {error}"))
 }
 
 struct Encoder {

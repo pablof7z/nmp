@@ -1108,7 +1108,7 @@ pub(crate) fn validate_resource_state(
         && unresolved_generation_valid;
     valid
         .then_some(())
-        .ok_or_else(|| PersistenceError::invariant("invalid active semantic resource state"))
+        .ok_or_else(|| PersistenceError::new("invalid active semantic resource state"))
 }
 
 pub(crate) fn recovered(state: SemanticResourceState) -> RecoveredSemanticResource {

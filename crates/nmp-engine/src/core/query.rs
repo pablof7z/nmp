@@ -106,7 +106,6 @@ impl CoreState {
                     }
                     self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("canonical query resolution failed: {error}");
-                    self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
                 }
             }
@@ -128,7 +127,6 @@ impl CoreState {
                     }
                     self.flush_consumed_resolver_closes(&mut effects);
                     let reason = format!("query freshness decision failed: {error}");
-                    self.degrade_store(error, &mut effects);
                     return ObservationOpen::Refused { reason, effects };
                 }
             }
@@ -180,7 +178,6 @@ impl CoreState {
                     self.consume_resolver_delta(delta);
                 }
                 self.flush_consumed_resolver_closes(&mut effects);
-                self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
@@ -207,7 +204,6 @@ impl CoreState {
                     self.handles.remove(branch);
                 }
                 self.flush_consumed_resolver_closes(&mut effects);
-                self.degrade_store(error, &mut effects);
                 return ObservationOpen::Refused { reason, effects };
             }
         };
@@ -704,7 +700,7 @@ impl CoreState {
     fn attempt_request_claim_transfer(
         &mut self,
         key: &(RelaySessionKey, SubId),
-        effects: &mut Vec<Effect>,
+        _effects: &mut Vec<Effect>,
     ) -> BTreeSet<CoverageKey> {
         let Some(mut pending) = self.pending_request_claim_transfers.remove(key) else {
             return BTreeSet::new();
@@ -725,15 +721,14 @@ impl CoreState {
             .cloned()
             .map(|atom| (atom, pending.session.clone(), pending.interval))
             .collect();
-        if let Err(error) = self.record_request_coverage_batch(&batch) {
+        if let Err(_error) = self.record_request_coverage_batch(&batch) {
             #[cfg(any(test, feature = "bench-instrumentation"))]
             self.request_claim_transfer_failures
                 .set(self.request_claim_transfer_failures.get().saturating_add(1));
             pending.failures = pending.failures.saturating_add(1);
-            pending.due = self.clock + bootstrap_retry_delay_secs(pending.failures);
+            pending.due = self.clock + unjittered_retry_delay_secs(pending.failures);
             self.pending_request_claim_transfers
                 .insert(key.clone(), pending);
-            self.degrade_store(error, effects);
             return BTreeSet::new();
         }
 
@@ -2008,8 +2003,7 @@ impl CoreState {
         // released.
         let local_rows = match self.store.query(&neg_filter.to_nostr()) {
             Ok(rows) => rows,
-            Err(e) => {
-                self.degrade_store(e, effects);
+            Err(_e) => {
                 let owner = plan_sub_id.clone();
                 self.start_backlog_req(
                     plan_sub_id,
@@ -2378,7 +2372,7 @@ impl CoreState {
         &mut self,
         completed: CompletedAttribution,
         relay: &RelayUrl,
-        effects: &mut Vec<Effect>,
+        _effects: &mut Vec<Effect>,
     ) -> Option<BTreeSet<CoverageKey>> {
         let completed_sub_id = completed.sub_id().clone();
         let completed_send = completed.send_id();
@@ -2400,8 +2394,7 @@ impl CoreState {
             ));
         }
 
-        if let Err(error) = self.record_request_coverage_batch(&batch) {
-            self.degrade_store(error, effects);
+        if let Err(_error) = self.record_request_coverage_batch(&batch) {
             return None;
         }
 
@@ -3170,11 +3163,10 @@ impl CoreState {
         let (current, evidence) = match self.observation_rows_and_evidence(id) {
             Ok(Some(value)) => value,
             Ok(None) => return,
-            Err(error) => {
+            Err(_error) => {
                 if let Some(state) = self.observations.get_mut(&id) {
                     state.projection_complete = false;
                 }
-                self.degrade_store(error, effects);
                 return;
             }
         };
@@ -3256,8 +3248,7 @@ impl CoreState {
         // a watermark this reducer simply could not see.
         let evidence = match self.observation_evidence_for(id) {
             Ok(evidence) => evidence,
-            Err(error) => {
-                self.degrade_store(error, effects);
+            Err(_error) => {
                 return;
             }
         };

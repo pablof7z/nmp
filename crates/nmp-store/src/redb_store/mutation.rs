@@ -24,7 +24,7 @@ use redb::ReadableTable;
 /// refusal. Returning `None`/skipping instead would turn a corrupt index
 /// into a silent wrong answer at the address — the false miss this closes.
 pub(super) fn missing_addr_index_target(event_key: EventKey) -> PersistenceError {
-    PersistenceError::invariant(format!(
+    PersistenceError::new(format!(
         "address index points at missing canonical event {event_key}"
     ))
 }
@@ -48,7 +48,7 @@ pub(super) fn tombstone_refuses<T: GovernedIngestTxn>(
         let key_str = key.to_redb_key();
         if let Some(encoded) = txn.tombstone_get(&addr_tombstone_key(&key_str))? {
             let rec: AddrTombstoneRecord = serde_json::from_slice(&encoded).map_err(|error| {
-                PersistenceError::invariant(format!("decode address tombstone {key_str}: {error}"))
+                PersistenceError::new(format!("decode address tombstone {key_str}: {error}"))
             })?;
             if event.created_at.as_secs() <= rec.ceiling {
                 return Ok(true);
@@ -149,7 +149,7 @@ pub(super) fn process_kind5_deletions<T: GovernedIngestTxn>(
                 serde_json::from_slice::<AddrTombstoneRecord>(&encoded)
                     .map(|rec| rec.ceiling)
                     .map_err(|error| {
-                        PersistenceError::invariant(format!(
+                        PersistenceError::new(format!(
                             "decode address tombstone {key_str}: {error}"
                         ))
                     })
@@ -206,19 +206,17 @@ fn update_publish_queue_receipt<T: GovernedIngestTxn>(
     let key = receipt_key(receipt_id);
     let encoded = txn
         .publish_queue_get(GovernedPublishQueueMap::Receipts, &key)?
-        .ok_or_else(|| {
-            PersistenceError::invariant(format!("missing delivery receipt {receipt_id}"))
-        })?;
+        .ok_or_else(|| PersistenceError::new(format!("missing delivery receipt {receipt_id}")))?;
     let mut record = decode_receipt(&encoded)
         .map_err(|error| codec_error(&format!("receipt {receipt_id}"), error))?;
     let crate::PublishQueueReceiptPayload::Event { state: current, .. } = &mut record.payload
     else {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "operation receipt cannot take an ordinary delivery state",
         ));
     };
     if *current == ReceiptState::Superseded || state == ReceiptState::Superseded {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "governed ingest cannot transition superseded receipt evidence",
         ));
     }

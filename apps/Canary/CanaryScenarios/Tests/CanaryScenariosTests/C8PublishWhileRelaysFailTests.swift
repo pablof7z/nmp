@@ -154,7 +154,6 @@ final class C8PublishWhileRelaysFailTests: XCTestCase {
             case .eligible: return "waiting(eligible)"
             case .backingOff(let attempt, _, let cause, let detail):
                 return "waiting(backingOff attempt=\(attempt) cause=\(cause) detail=\(detail ?? "nil"))"
-            case .persistenceStalled(let detail): return "waiting(persistenceStalled \(detail))"
             }
         case .attempting(let attempt, _): return "attempting(attempt=\(attempt))"
         case .sent(let attempt, _): return "sent(attempt=\(attempt))"

@@ -61,7 +61,7 @@ pub(super) fn decode_interval(json: &str) -> Result<CoverageInterval, Persistenc
 
 pub(super) fn decode_coverage_row(json: &str) -> Result<CoverageRowRecord, PersistenceError> {
     serde_json::from_str(json)
-        .map_err(|error| PersistenceError::invariant(format!("decode coverage row: {error}")))
+        .map_err(|error| PersistenceError::new(format!("decode coverage row: {error}")))
 }
 
 pub(super) fn insert(
@@ -74,9 +74,7 @@ pub(super) fn insert(
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_observation_before_commit) {
         drop(write);
-        drop(store.db.take());
         return Err(PersistenceError::new(
-            crate::PersistenceFault::Io,
             "injected observation failed before commit",
         ));
     }
@@ -118,9 +116,7 @@ pub(super) fn insert_batch(
     #[cfg(any(test, feature = "test-instrumentation"))]
     if std::mem::take(&mut store.fail_next_observation_before_commit) {
         drop(write);
-        drop(store.db.take());
         return Err(PersistenceError::new(
-            crate::PersistenceFault::Io,
             "injected observation failed before commit",
         ));
     }
@@ -179,7 +175,7 @@ pub(super) fn known_signature_from_db(
         return Ok(None);
     };
     let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-        PersistenceError::invariant(format!(
+        PersistenceError::new(format!(
             "decode canonical event view for known_signature {event_key}: {error:?}"
         ))
     })?;
@@ -231,19 +227,19 @@ pub(super) fn query(
                 .get(event_row_key(event_key).as_slice())
                 .map_err(persist_err)?
                 .ok_or_else(|| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "raw id map points at missing canonical event {event_key}"
                     ))
                 })?;
             let view = StoredEventView::from_trusted(value.value()).map_err(|error| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "decode canonical event view {event_key}: {error:?}"
                 ))
             })?;
             let matches = view
                 .matches_prepared_filter_after_index(&prepared_filter, IndexedMatch::None)
                 .map_err(|error| {
-                    PersistenceError::invariant(format!(
+                    PersistenceError::new(format!(
                         "match canonical event against filter {event_key}: {error:?}"
                     ))
                 })?;
@@ -384,7 +380,7 @@ pub(super) fn query_newest_before(
     }
     #[cfg(any(test, feature = "test-instrumentation"))]
     if store.take_query_newest_before_failure() {
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "injected query-newest-before failure",
         ));
     }
@@ -564,7 +560,7 @@ pub(super) fn expire_due(
 /// can fail for a reason outside this crate's control — the handle latched
 /// by an earlier I/O failure, a full or disconnected disk, a poisoned lock,
 /// on-disk corruption. `persist_err` is what tells those apart from this
-/// crate misusing its own database (`PersistenceFault::Invariant`), and both
+/// crate misusing its own database, and both
 /// now leave the host process alive: before #763 every one of them was an
 /// `.expect()`, so a read error aborted the embedding iOS/Android app.
 ///
@@ -624,7 +620,7 @@ pub(super) fn record_coverage(
         })
     {
         store.fail_next_coverage_write = None;
-        return Err(PersistenceError::invariant(
+        return Err(PersistenceError::new(
             "injected coverage write failure",
         ));
     }
@@ -641,11 +637,10 @@ pub(super) fn record_coverage(
 /// Every step is fallible for the same reasons [`next_expiration`] is, and
 /// the decode is the reason the door had to widen rather than answer `None`
 /// on failure: a corrupt watermark answered as `None` reads as "no coverage
-/// proven", which is a refetch decision made on a false cache miss. The
-/// decode failure is a genuine invariant violation (`PersistenceError::
-/// invariant`, raised inside [`decode_interval`]) and the transaction/table/
-/// row steps are environmental; both are `Err` here, and `PersistenceFault`
-/// is what tells them apart at the caller.
+/// proven", which is a refetch decision made on a false cache miss. A decode
+/// failure (raised inside [`decode_interval`]) and an environmental
+/// transaction/table/row failure are both `Err` here, and neither is ever
+/// allowed to render as an absent row.
 pub(super) fn get_coverage(
     store: &RedbStore,
     key: CoverageKey,
@@ -730,13 +725,13 @@ pub(super) fn gc(
                     }
                     let event = StoredEventView::from_trusted(value.value())
                         .map_err(|error| {
-                            PersistenceError::invariant(format!(
+                            PersistenceError::new(format!(
                                 "decode canonical event view {event_key}: {error:?}"
                             ))
                         })?
                         .materialize_event()
                         .map_err(|error| {
-                            PersistenceError::invariant(format!(
+                            PersistenceError::new(format!(
                                 "materialize canonical event {event_key}: {error:?}"
                             ))
                         })?;
@@ -746,17 +741,17 @@ pub(super) fn gc(
                     // A local sidecar with no note row before it is a broken
                     // relational invariant, not an event without local state.
                     let Some((pending_key, event)) = pending.take() else {
-                        return Err(PersistenceError::invariant(format!(
+                        return Err(PersistenceError::new(format!(
                             "canonical local state {event_key} has no event row"
                         )));
                     };
                     if pending_key != event_key {
-                        return Err(PersistenceError::invariant(format!(
+                        return Err(PersistenceError::new(format!(
                             "canonical local state {event_key} follows event {pending_key}"
                         )));
                     }
                     let local = binary_event::decode_local(value.value()).map_err(|error| {
-                        PersistenceError::invariant(format!(
+                        PersistenceError::new(format!(
                             "decode canonical local state {event_key}: {error:?}"
                         ))
                     })?;
@@ -775,7 +770,7 @@ pub(super) fn gc(
 
         for event in &victims {
             remove_row_in_txn(txn, event.id, |_| true)?.ok_or_else(|| {
-                PersistenceError::invariant(format!(
+                PersistenceError::new(format!(
                     "gc victim {} vanished before its own removal",
                     event.id
                 ))

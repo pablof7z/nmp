@@ -1223,23 +1223,6 @@ fn boot_degrades_explicitly_when_the_durable_journal_will_not_decode() {
     );
     let effects = core.recover_on_boot();
 
-    let degradations: Vec<_> = effects
-        .iter()
-        .filter_map(|effect| match effect {
-            Effect::EmitDiagnostics(snapshot) => snapshot.store_degraded.clone(),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        degradations.len(),
-        1,
-        "boot degrades exactly once: {effects:?}"
-    );
-    assert!(
-        degradations[0].contains("decode publish queue intent"),
-        "the degradation names the unreadable row: {}",
-        degradations[0]
-    );
     assert!(
         !effects.iter().any(|effect| matches!(
             effect,

@@ -59,7 +59,7 @@ pub(super) fn stalled_write_stage(
         ));
     }
 
-    if pending.durable_routes.is_empty() && pending.route_blocked_relays.is_empty() {
+    if pending.durable_routes.is_empty() {
         // Parked with nothing resolved. This is the ONE stall that no
         // clock may ever end (#1136): "we have not learned where this
         // goes" is ignorance, and a deadline over ignorance is a verdict.
@@ -81,8 +81,6 @@ pub(super) fn stalled_write_stage(
     let live: BTreeSet<&RelayUrl> = pending
         .lane_projection
         .required_relays()
-        .chain(&pending.unstarted_relays)
-        .chain(&pending.route_blocked_relays)
         .collect();
     if live.is_empty() {
         return None;
