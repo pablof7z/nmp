@@ -2,15 +2,11 @@
 title: Route resolvers — the contract, registration, and needs
 category: routing
 slug: resolvers
-status: designed
+status: not built
 date: 2026-07-29
 owns:
-  - the RouteResolver trait contract and its result vocabulary
-  - how a strategy is chosen (kind at resolution time, registry, outbox fallback)
-  - runtime registration on the engine, and its shipped precedents
-  - why resolvers DECLARE needs and the engine drives the query
-  - the dependency direction for crates that ship resolvers
   - why there is NO reserved-kind table, and the two honest consequences
+  - the dependency direction for crates that ship routing
 related:
   - docs/internals/routing/auto-and-explicit.md
   - docs/internals/routing/resolution-lifecycle.md
@@ -20,110 +16,35 @@ related:
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
 issues:
-  - "a kind-1059 under Auto with no nip17 resolver routes by outbox rules — accepted, §6.2"
-  - "the h-under-Auto refusal dies with the table — accepted, §6.2"
+  - "a kind-1059 under Auto with no nip17 resolver routes by outbox rules — accepted, §3"
+  - "the h-under-Auto refusal dies with the table — accepted, §3"
 ---
 
-# Route resolvers — the contract, registration, and needs
+# Route resolvers — what is not built, and the rulings around it
 
-`Auto` routing (`auto-and-explicit.md`) means "figure out how to route
-whatever I'm publishing." Resolvers are the figuring: pluggable strategies,
-owned by protocol crates, executed fresh at every resolution moment. This
-document is the contract — what a resolver is, how one is chosen, how it gets
-data, and what NMP deliberately refuses to police.
+NMP has no pluggable route-resolver contract. `Auto` routing
+(`auto-and-explicit.md`) resolves through one hard-coded path:
+`resolve_routes` (`crates/nmp-engine/src/core/write.rs:4494`) matches
+`WriteRouting::Auto => self.resolve_outbox(event)` and nothing else — there is
+no kind→resolver registry, no `RouteResolver` trait, no runtime registration
+door for one. The design sketched in earlier drafts of this document was
+never built.
 
-**Status is marked per section.** BUILT sections describe current master
-(`b99f9d41`); DESIGNED sections are settled design from the 2026-07-28/29
-session, not yet implemented.
-
----
-
-## 1. The contract — DESIGNED
-
-```rust
-pub trait RouteResolver {
-    /// The kinds this resolver claims under Auto.
-    fn claimed_kinds(&self) -> Vec<Kind>;
-
-    fn resolve(&self, subject: RouteSubject, ctx: &RouteContext) -> RouteResolution;
-}
-
-pub enum RouteResolution {
-    /// Zero unknowns remain. The Auto obligation retires (settled
-    /// RESOLUTION, not successful delivery — resolution-lifecycle.md).
-    Resolved { relays: BTreeSet<RelayUrl> },
-    /// Some relays known now (they get lanes immediately), some knowledge
-    /// still missing. The Auto entry stays; `needs` feeds discovery.
-    Partial { relays: BTreeSet<RelayUrl>, needs: Vec<RouteNeed> },
-    /// Nothing routable yet. The intent parks as AwaitingRoute; `needs`
-    /// feeds discovery so it can unpark.
-    Unresolved { needs: Vec<RouteNeed> },
-    /// This event must not be routed by this resolver at all (typed reason).
-    Refused,
-}
-```
-
-`RouteSubject { kind, tags, author: Option<PublicKey> }` — deliberately not
-`&Event`, so preview and send share one derivation and cannot drift
-(`preview-and-observability.md` §2). `RouteNeed` is a full `Filter`, not a
-`{author, kind}` pair, so future resolvers are not forced into
-relay-list-shaped needs. `RouteContext` exposes the neutral author fact's
-three-valued knowledge (`Present` / `Absent` / `Unknown`) and a
-`NeedState::{Pending, Settled}` per prior need — `Settled` means the
-exact protocol sources settled, so a miss is definitive absence
-(`knowledge-and-settlement.md`).
-
-Resolvers are pure functions of `(subject, ctx)`. They hold no state between
-drains: everything durable lives in the intent's journal and lanes, so a
-crash loses nothing and a restart simply re-resolves
-(`resolution-lifecycle.md`).
+Runtime registration of engine capabilities is not itself hypothetical —
+`Engine::add_auth_policy` (`crates/nmp/src/engine.rs:507`) and
+`Engine::add_private_key_account` (`crates/nmp/src/engine/session.rs:153`)
+both ship today, registering capabilities on the engine at runtime the same
+way a resolver registry was sketched to. No such registry exists for routing.
 
 ---
 
-## 2. Strategy selection: the KIND, at resolution time — DESIGNED
+## 1. Resolvers declare needs; the engine drives the query
 
-At each resolution moment the engine takes the event's kind and asks the
-registry. Registry hit → that resolver. No hit → the built-in outbox resolver
-(`outbox.md`). That is the entire dispatch.
+Pablo settled, in two steps, what a future routing crate's relationship to
+the network should be — the second statement corrects an over-reading of the
+first.
 
-Selection happens at **resolution time, not acceptance time** — the intent
-durably stores only that it is `Auto` (the journal stores a label, never a
-resolved set), and the strategy is re-derived and re-executed at every send
-attempt: first try, after a crash, when the offline queue drains. Pablo:
-
-> I think it's absolutely not required, all that should we might say is what routing to use: "nip17", "outbox", "nip29", "explicit" (meaning the app says explicitly which relays to use and that is that no matter what else happens),  "draft" (yes, nmp-draft should provide its own routing)... whatever and at publish time, including after a crash, when the app is restarted or whatever and we decide that we want to publish the stuff or when the app comes back online and the unpublished event queue starts getting drained calculations according to whatever routing has been decided is performed
-
-And the app never names the strategy:
-
-> I don't know if these "nip17" or "nip29" or "drafts" label are even needed or not, ideally that's not something the app has to concern itself with and it's either "figure it out how to route whatever I'm publishing" or "use these exact relays"; but the idea is that at publish time things just work
-
----
-
-## 3. Registration: runtime, on the engine — DESIGNED, with BUILT precedent
-
-Resolvers register on the engine at runtime, mirroring capability installation
-doors that already exist and ship:
-
-- `Engine::add_private_key_account`
-- `Engine::add_auth_policy` (`crates/nmp/src/engine.rs:647`)
-
-`add_route_resolver` follows the same shape: the protocol crate constructs
-the resolver, the app hands it to the engine, the engine owns it thereafter.
-Nothing is discovered by linkage magic; if the app never registers a
-resolver, the registry is empty and everything routes by outbox. That is not
-an oversight — it is §6.
-
----
-
-## 4. Resolvers declare needs; the ENGINE drives the query — DESIGNED
-
-A resolver that lacks knowledge does not fetch it. It returns a neutral need.
-The generic engine deduplicates and emits those needs; an optional protocol
-assembly may bind them to an ordinary exact-source query. This was settled in
-two steps, and both of Pablo's statements matter because the second corrects
-an over-reading of the first.
-
-First, resolvers genuinely do need the network:
+First, that routing crates genuinely do need the network:
 
 > 2. the routing that happens in nip17, per this example, when the app comes online it sees "oh, we need to route this dm through nip17", nip17 the says "ok, which one are the relays of the parties? ah, ok, relay 1 and 2". So yes, in that sense, the nip17 crate must perform a query from the network; of course.
 
@@ -131,49 +52,36 @@ Then, when that was misread as "the crate performs its own querying":
 
 > Yes, of course I didn't mean that nip17 should introduce a separate querying approach, parallel to the existing querying system! I meant that any routing crate should use the querying system to retrieve the data they need!
 
-The shipped NIP-65 implementation is the concrete proof. Core emits
-`AuthorRouteNeedsChanged`; the feature-gated facade owns one ordinary
-kind:10002 `LiveQuery` pinned to its operator-selected sources. Its rows and
-generic `RequestSettled` evidence feed the engine's one private neutral
-replacement door. Core and router contain no kind, tag-marker, winner, or
-source-selection knowledge.
-
-Three properties make declared needs strictly better than resolver-driven
-fetching, and each is a failure mode avoided:
-
-- **Statelessness survives crashes.** Needs are re-derived from the intent on
-  every drain. A resolver holding an in-flight fetch across a crash would
-  need its own durability story; a declared need has none to lose.
-- **Dedup across intents is free.** Ten parked DMs to one recipient
-  contribute one entry to the neutral need set. Ten resolver-owned fetches are
-  ten subscriptions — exactly the fan-out pathology the subscription plane
-  spent a week killing (`docs/internals/subscriptions/identity-grouping-and-limits.md` §3.4).
-- **One subscription system.** Every REQ the engine emits flows through the
-  demand/router/budget pipeline, so relay subscription budgets, coalescing,
-  and diagnostics see discovery traffic like any other. A parallel path would
-  be invisible to all three.
+The shipped NIP-65 path is the concrete proof this was followed. Core emits
+`Effect::AuthorRouteNeedsChanged` (`crates/nmp-engine/src/core/mod.rs:1251`,
+fed by `author_route_needs.rs`); the feature-gated facade owns one ordinary
+kind:10002 `LiveQuery` pinned to its operator-selected sources. Core and the
+router contain no kind, tag-marker, winner, or source-selection knowledge.
 
 ---
 
-## 5. Dependency direction — BUILT
+## 2. Dependency direction
 
-Protocol crates stay engine-free. `nmp-nip65` owns composition, demand,
-canonical-winner selection, marker parsing, and coordinator state over
-`nostr + nmp-grammar`; it has no dependency on `nmp`. The optional
-`nmp/nip65` facade depends toward that pure crate and binds its values to the
-ordinary engine doors. Disabling the feature removes that dependency and all
-coordinator symbols while the generic engine/router continue to compile.
+`nmp-nip65`'s only dependencies are `nostr` and `nmp-grammar`
+(`crates/nmp-nip65/Cargo.toml`) — it is engine-free, owning composition,
+demand, canonical-winner selection, marker parsing, and coordinator state
+without depending on `nmp`. The optional `nmp/nip65` facade depends toward
+that pure crate and binds its values to the ordinary engine doors.
 
-`nmp-nip29` needs neither a resolver nor the `nmp` edge: a group's host is
-not derivable from the event (`h` carries the group id, never the relay), so
-group routing is `Explicit([host])` minted by the `Group` door — see
-`docs/internals/nip29/group-publication.md`.
+`nmp-nip29` currently depends on `nmp` directly (`crates/nmp-nip29/Cargo.toml`
+lists `nmp.workspace = true` as an ordinary, non-dev dependency). That crate's
+own Cargo.toml comment records the rationale: since #1707 reversed #1033,
+`nmp-nip29` owns all of NIP-29's meaning again, and `nmp` supplies custody,
+storage, routing, signing, delivery, recovery and receipts underneath it — a
+capability crate composing the engine it runs against, the same upward edge
+restored for `nmp-nip02` by #1707. A group's host is not derivable from the
+event (`h` carries the group id, never the relay); group routing is
+`Explicit([host])` minted by the `Group` door
+(`docs/internals/nip29/group-publication.md`).
 
 ---
 
-## 6. There is NO reserved-kind table — DESIGNED, deliberately
-
-### 6.1 The ruling
+## 3. There is no reserved-kind table
 
 A reserved-kind table in `nmp-grammar` (1059/4 → DM, any `h` → group) was
 proposed so that a DM would fail closed when its crate is not linked. Pablo
@@ -181,12 +89,10 @@ rejected it:
 
 > 1. no table; if the crate isn't linked the app isn't sending DMs
 
-`nmp-grammar` gets zero NIP kind knowledge. `Auto` is: registered resolver
-claiming the kind, else outbox. Nothing else exists.
+`nmp-grammar` has zero NIP kind knowledge.
 
-### 6.2 The two honest consequences
-
-Stated here so nobody rediscovers them and mistakes them for oversights:
+Two honest consequences follow, recorded here so nobody rediscovers them and
+mistakes them for oversights:
 
 1. **A kind-1059 under `Auto` with no nip17 resolver routes by outbox
    rules.** NMP will not recognise it as a DM, because NMP does not know
@@ -200,18 +106,8 @@ barrier is doing NIP-17 cryptography by hand, not the type system), and the
 group workflow goes through `Group`, which mints its own `Explicit` route and
 its own `h`.
 
-### 6.3 The governing principle
-
-An app CAN hand-roll a gift wrap with the builder (which must be able to
+An app can hand-roll a gift wrap with the builder (which must be able to
 express anything — `writes/event-builder.md`) and publish it under `Auto`.
-That was put to Pablo directly as a residual risk, and his answer is the
-principle that governs every "should NMP prevent this?" question in the
-routing plane:
+That was put to Pablo directly as a residual risk:
 
 > are you saying that an app could hand roll their own giftwrap and yolo it? Yes, of course! preventing that would require making nmp impossible to work with! if a developer wants to shoot themselves on the foot we need to let them do that, we can provide guardrails, but at a certain point we'd be introducing more harm by adding restrictions than not.
-
-NMP provides guardrails — typed doors, previews, refusals with reasons — and
-does not police. Restrictions that would require NMP to know every NIP's
-semantics to enforce are the harm, not the protection. Do not reintroduce
-kind tables, tag bans, or "safety" refusals in the neutral plane on the
-strength of a scenario this ruling already covers.

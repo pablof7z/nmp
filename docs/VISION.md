@@ -114,8 +114,8 @@ NMP's NIP-29 remembered-groups product capability (#108/#1551) is exactly this
 shape: `nmp-nip29` exposes an observational decode of NIP-51 kind:10009 beside
 the group vocabulary that consumes it, never as a privileged core concept.
 
-The core must not privilege kind:1, timelines, follows, or any other content
-shape. Proofs and examples must remain kind-diverse.
+The core does not privilege kind:1, timelines, follows, or any other content
+shape.
 
 ### 2.3 Rows plus evidence, never global truth
 
@@ -335,7 +335,7 @@ engine noun or a source of routing, store, navigation, or product-policy truth.
 See
 `docs/design/ui-components-strategy.md`.
 
-## 8. Validation frame and work order
+## 8. Validation record
 
 The original milestone gates established the thesis in stages: grammar,
 compiler/router, store/transport/outbox, Swift boundary, an iOS falsifier, then a
@@ -345,18 +345,6 @@ and GitHub Issues; they do not make later architectural corrections retroactive.
 The minimal JVM Kotlin/Flow projection and live-relay falsifier landed in #54.
 It proves the reactive dialect and deterministic cancellation shape, not the
 full Android/AAR/Compose milestone or parity with the promoted target contract.
-
-The next work is ordered by dependency:
-
-1. Govern the provisional demand, snapshot, intent, signer, module, and receipt
-   shapes across the Rust facade and platform projections.
-2. Build crash-safe `Accepted`, pending rows, signature promotion,
-   cancellation/compensation, and reattachable receipts.
-3. Build signer reattachment and standard platform provider boundaries.
-4. Make source/access-context routing and protocol-module composition exact.
-5. Enforce bounded delivery and explicit shortfall throughout the engine.
-6. Falsify the same invariants through direct Rust, Swift, Kotlin, restart,
-   overload, signer-offline, and protocol-module scenarios.
 
 GitHub Issues are the tactical queue. `docs/known-gaps.md` states what remains
 unbuilt.

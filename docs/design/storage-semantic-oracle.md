@@ -16,29 +16,7 @@ The logical contract has two authority domains:
   and any projection journal. A committed mutation cannot lose an accepted
   obligation or invent publication.
 
-Redb commits both domains through one physical transaction. Any future proposal
-to replace it must satisfy all of these rules before it becomes an
-implementation:
-
-1. Commit the complete control obligation before projecting a local pending
-   event or performing signing/transport side effects.
-2. Give each projection a durable unique identity and total order.
-3. Make projection deterministic and idempotent, including replacement,
-   deletion, expiry, and local ownership effects.
-4. Reconcile every unapplied projection before ordinary query or transport
-   service starts.
-5. Persist event facts before advancing coverage claims. Coverage authority is
-   owned by the exact request/session/wire FIFO whose EVENT facts were
-   observed; an event-transaction failure revokes only the owners the wire
-   evidence can name. Every claim earned by one request commits as one atomic
-   batch. Temporary underclaim may refetch; overclaim or a visible prefix of a
-   multi-claim request can hide absent data and is forbidden.
-6. Treat an operation as successful only when the authority that owns its fact
-   has durably committed it. Recovery may expose a declared pre-operation,
-   post-operation, or reconciled state—never an unclassified mixture.
-
-Native and browser/WASM proposals may require different engines. Engine
-identity alone would not be portability evidence.
+Redb commits both domains through one physical transaction.
 
 ## What the trace proves
 
@@ -71,17 +49,7 @@ commit seams with a two-claim batch. Reopen may expose `{no fact, no claim}`,
 one-of-two prefix. This combination replaces row-count recovery claims with
 content, atomicity, and ordering evidence.
 
-## Future replacement sequence
+## Status
 
 No candidate implements NMP's complete durable-store contract in the current
-architecture. Before a future replacement decision:
-
-1. Evaluate Fjall through the complete semantic path, then fully settle and
-   account for compaction and other deferred maintenance.
-2. Evaluate LMDB with a packed, backend-native Nostr layout rather than the
-   historical Redb-shaped twelve-keyspace schema.
-3. Evaluate SQLite and browser persistence as a distinct portability track.
-
-No single benchmark decides a winner. A replacement proposal requires the
-semantic trace, completed maintenance accounting, performance evidence on the
-full governed path, and an explicit production rollout decision.
+architecture.

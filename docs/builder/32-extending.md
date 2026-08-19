@@ -141,20 +141,6 @@ Rust crates/features and SwiftPM/Gradle products may differ mechanically, but
 they project one semantic module over the canonical facade. Disabling the module
 removes its code and semantic API while leaving the raw core facade usable.
 
-## Required falsifiers
-
-A module is ready only when tests prove:
-
-- it neither redefines nor re-parses a schema another crate already owns;
-- its reusable binding prints exactly like the raw expansion;
-- reconstructed state uses canonical store/query semantics;
-- source/routing authority cannot be forged from app relay arrays;
-- cross-module composition produces deterministic final unsigned bytes;
-- core signs the composed body once;
-- Swift, Kotlin, and direct Rust agree on bytes and observable facts;
-- disabling it leaves the raw engine useful; and
-- no hidden lifecycle, store, signer, or transport path appears.
-
 ---
 
 <sub>[Index](README.md) · Related: [Using protocol modules](27-recipes-and-choosing.md) · [Governed provisional API](33-versioning.md)</sub>

@@ -26,18 +26,12 @@ or state machine, durable authority, independently consumable capability,
 external-resource owner, or composition/artifact boundary. Dependency
 isolation is one powerful way a crate can enforce that responsibility, but it
 is neither necessary nor sufficient. Identical dependency lists do not imply
-identical responsibilities.
-
-Do not ask "what dependency does this split remove?" before establishing
-whether the candidate owns a coherent responsibility. A package may be
-justified even when both sides use the same lower-level mechanisms.
+identical responsibilities. A package may be justified even when both sides
+use the same lower-level mechanisms.
 
 Enforcement here is structural, and deliberately does not depend on a checker.
-That is a property of the mechanisms below, not a statement about CI: CI
-returns once local commands are deterministic and known flakes are fixed or
-honestly excluded with an owning issue, and when it does, each gate must
-protect one named failure mode and fail when the mechanism it protects is
-reverted. None of the boundaries below become weaker or stronger for it.
+That is a property of the mechanisms below, not a statement about CI — none
+of the boundaries below become weaker or stronger for whether CI exists.
 Manifest exclusion is one mechanism: a
 crate that does not declare a dependency cannot use it. Many important
 boundaries are enforced by other structural means — private fields, opaque
@@ -87,9 +81,8 @@ sides declare the same dependencies.
    Two things the ruling does **not** settle, and neither is licence to widen
    it. `nmp-nip11` being a non-optional dependency of both `nmp` and
    `nmp-runtime` is still the one inverted edge in the workspace, and #1806
-   still owns extracting AUTH and relay-info out of the core (its third
-   subject, negentropy, was deleted rather than extracted). A permitted
-   re-export is not a permitted dependency direction.
+   still owns extracting AUTH, negentropy and relay-info out of the core. A
+   permitted re-export is not a permitted dependency direction.
 
 A crate earns its existence by a real reason — a genuine ownership
 boundary, an independent lifecycle, an independently consumed artifact, a
@@ -114,6 +107,7 @@ open-questions section.
 | `nmp-grammar` | the value vocabulary both sides speak: `Filter`/`Binding`/`Demand`/`LiveQuery`, `WriteIntent`/`WritePayload`/`ReplaceableOperation`, tagging, NIP-19 codec — plus (in flight, #1707 steps 1–2) `Row`/`RowSignature` and the `ReplaceableMaterializer` contract | any other NMP crate. Deps stay `nostr` + `blake3` + `serde_json`. 16 consumers; the hub | correct today + in flight additions |
 | `nmp-signer` | the signing contract | anything but `zeroize` — that manifest is what keeps the contract crypto-agnostic | correct today |
 | `nmp-local-signer` | the one in-process key provider | — | correct today |
+| `nmp-asset` | exact-byte asset identity (`Sha256Hash`, `VerifiedAsset`) | any protocol or NMP crate; `sha2` only | correct today |
 
 ### Mechanism primitives
 
@@ -161,7 +155,7 @@ The reducer and the async edge left `crates/nmp` as **two crates**:
 
 | crate | owns | must never depend on | status |
 |---|---|---|---|
-| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `nostr` | runtime seam correct today; internals open |
+| `nmp-engine` | the deterministic reducer: `EngineCore`, `handle(EngineMsg) → Vec<Effect>` / `tick()`, plus its reducer-coupled satellites (the negentropy FSM it drives turn-by-turn, the publish-queue fact vocabulary, bench hooks) | **`tokio`, `reqwest`, `nmp-nip11`,** the runtime, the facade, any capability crate. Allowed: grammar, store, resolver, router, transport (nine value and observation types — see the fence), signer, `negentropy`, `nostr` | runtime seam correct today; internals open |
 | `nmp-runtime` | the async edge that interprets effects: `EngineThread`, `Handle`, channels/mailboxes, the AUTH driver, sign-event completion, signer registry, pool bridge, the opaque session payload, NIP-11 service wiring, and driving whichever `AuthorRouteProvider` the application constructed | the facade, any capability crate, **any routing protocol** (`nmp-nip11` is its ONE declared protocol edge; author-route discovery is a contract it drives, not a crate it names) | correct today |
 
 `session.rs` went with the runtime rather than staying in the facade:
@@ -345,9 +339,7 @@ conjunction gates both planes' sends. A write/read crate seam would put
 shared mutable state on the wrong side of any line drawn. Four owner-shaped
 candidates were then measured one at a time and each failed for its own
 reason — `SessionRegistry`, `AttemptCorrelations`, `CoordinateCoverage`, and
-`nmp-nip77`, all below. (The `nmp-nip77` case is now moot: NIP-77 was deleted
-outright rather than extracted. It is kept because the reasoning about how a
-boundary is judged is what the section is for.)
+`nmp-nip77`, all below.
 
 *What is NOT measured, and must not be inferred from it.* That no package
 seam exists. **Four rejected proposals bound the proposals, not the space.**
@@ -391,10 +383,8 @@ things" below is where that is measured properly and comes out differently.
 ### Owners extracted so far
 
 `RequestAttempts` (#1693), `HistorySessions` (#1695), `WireOwnership` and
-`RequestTargets` (#1746), and `Nip77Sessions` (#1747, since deleted with
-NIP-77) all came out of the
-≥85%-concentration band. `EngineCore` is **114 → 96 fields** across the last
-three. What they proved:
+`RequestTargets` (#1746), and `Nip77Sessions` (#1747) all came out of the
+≥85%-concentration band, each shrinking the reducer's field count as it left. What they proved:
 
 **`WireOwnership` — ten fields.** `rebuild_wire_ownership` opened with
 **twelve consecutive `.clear()` calls** and then open-coded the owner counting
@@ -427,8 +417,7 @@ Activation had also been reaching into `self.handles` to derive which scopes
 contribute wire; that is a freshness decision the branch owns, so it now
 arrives as a passed-in fact.
 
-**`Nip77Sessions` — eight fields (deleted with NIP-77; kept here for the
-method).** The candidate signal here was not
+**`Nip77Sessions` — eight fields.** The candidate signal here was not
 concentration but *repetition*: three clusters with the identical
 `(map, reverse-index-by-plan)` shape, each carrying its own hand-written insert
 and take. Six functions, verbatim copies, differing only in the value type and
@@ -487,13 +476,13 @@ its counts being wrong, not merely absent.
 
 ### The field census — picking the next owner by lookup, not judgement
 
-Every `EngineCore` field, with its accesses counted per production file. The
+Every reducer-state field, with its accesses counted per production file. The
 number that decides things is **concentration**: the share of a field's
-accesses landing in its top file. Regenerate it rather than trusting this
-snapshot — the point is the method, and the counts move:
+accesses landing in its top file. Regenerate it rather than trusting the
+snapshot below — the point is the method, and the counts move:
 
 ```zsh
-fields=$(awk '/^pub struct EngineCore \{/{f=1;next} f&&/^\}/{exit} f' \
+fields=$(awk '/^pub struct CoreState \{/{f=1;next} f&&/^\}/{exit} f' \
   crates/nmp-engine/src/core/mod.rs \
   | grep -oE '^[[:space:]]+[a-z_][a-z0-9_]*:' | tr -d ' :' | sort -u)
 for f in ${(f)fields}; do
@@ -503,8 +492,18 @@ for f in ${(f)fields}; do
 done
 ```
 
-**114 fields.** 55 sit at ≥70% concentration; the tail below ~50% is the
-shared context, and the split between those two groups is the whole finding.
+The script targets `CoreState`, not `EngineCore`. `EngineCore` (`core/cell.rs`)
+is now a one-field shell holding a private `CoreState` (`core/mod.rs`), so the
+earlier version of this script — which grepped for `pub struct EngineCore {` in
+`mod.rs` — returned zero fields and silently produced an empty census rather
+than failing. If you re-run it and get nothing, that is the bug, not a result.
+
+**Field count, re-derived: 82.** The tables below are a snapshot from an
+earlier tree that reported 114 and later 96; treat their exact digits as stale
+and the shape as the finding. The shape is what survives re-derivation: a group
+of fields at high concentration, which is where an owner can be cut, and a tail
+in the 35-50% band which is shared context and cannot be. The split between
+those two groups is the whole point.
 
 Read it three ways:
 
@@ -561,18 +560,17 @@ sentence that made "a module is as good as a crate" sound proven:
   crate-global: any module may `use` any dependency the package declares, and
   no amount of module privacy narrows that.**
 
-The demonstration was in this crate, not hypothetical. `hex` is declared once
-in `crates/nmp-engine/Cargo.toml` and used to be reached by two modules that
-share nothing: the deleted `negentropy/mod.rs` framed NEG-OPEN/NEG-MSG
-payloads with it, and `core/write.rs` encodes and decodes durable
-`explicit-hex:` routing snapshots with it. The manifest comment named both
-concerns — and **that comment was the only thing scoping the dependency.**
-Module privacy had no opinion on it: `write.rs` did not have to ask anyone,
-and if a third module reaches for `hex` tomorrow the comment simply goes
-stale with nothing red. Contrast the package answer: were the second consumer
-its own crate declaring `hex`, `write.rs` reaching for it would be `E0433`
-and would have to add its own reviewable manifest line. `libc` shows the same
-shape from the other end
+The demonstration is in this crate, not hypothetical. `hex` is declared once
+in `crates/nmp-engine/Cargo.toml` and used by two modules that share nothing:
+`negentropy/mod.rs` frames NEG-OPEN/NEG-MSG payloads with it, and
+`core/write.rs:4956`/`:4988` encodes and decodes durable `explicit-hex:`
+routing snapshots with it. The manifest comment names both concerns — and
+**that comment is the only thing scoping the dependency.** Module privacy has
+no opinion on it: `write.rs` did not have to ask anyone, and if a third
+module reaches for `hex` tomorrow the comment simply goes stale with nothing
+red. Contrast the package answer: were the NIP-77 FSM its own crate declaring
+`hex`, `write.rs` reaching for it would be `E0433` and would have to add its
+own reviewable manifest line. `libc` shows the same shape from the other end
 — declared for exactly one file's bench counters (`ingest_attribution.rs`),
 and reachable from all 57 files in the crate whenever the feature is on.
 
@@ -618,10 +616,7 @@ each in a different way, and the failures are the useful part:
   `self.on_unsubscribe(..)`. Teardown reaches into the query plane, which is
   I6 stated as a call graph.
 
-`nmp-nip77` was a fourth rejection, on a different failure again — and the
-subject of it no longer exists, since NIP-77 was deleted outright rather than
-extracted. The record stands as reasoning about boundaries, not as a live
-question: the reducer
+`nmp-nip77` was a fourth rejection, on a different failure again: the reducer
 holds `Prober` and `Reconciler` as its own fields and matches `NegStep`
 directly, so `nmp-engine` would name `nmp-nip77` and `nmp-nip77` would name
 `negentropy` — the dependency gains a hop rather than leaving the manifest,
@@ -631,10 +626,8 @@ reducer saw only a value `core` defines itself, which is what let the crate
 line remove `reqwest` from the reducer's future manifest. Ask which side owns
 the state before asking whether the cluster is self-contained.
 
-> **OVERTURNED by #1806 (Pablo, 2026-08-17), then made moot by NIP-77's
-> deletion.** NIP-77 — with NIP-42 AUTH and
-> NIP-11 — must come out of the core. NIP-77 came out by being deleted; AUTH
-> and NIP-11 remain #1806's live subjects. The rejection above is not retracted as
+> **OVERTURNED by #1806 (Pablo, 2026-08-17).** NIP-77 — with NIP-42 AUTH and
+> NIP-11 — must come out of the core. The rejection above is not retracted as
 > an *observation*: the dependency really does gain a hop, and "ask which side
 > owns the state" is still the right question. What it got wrong is treating
 > the answer as a verdict on the boundary. The reducer holding `Prober` and
@@ -742,26 +735,6 @@ this cluster eventually use.
 shape.** That is the whole force of the calibration: it is not an argument
 that the claim is unlikely, it is four counter-examples already compiled.
 
-#### The fifteen clusters not yet behind an owner
-
-| # | cluster | store | clock | router | resolver | what actually decides it |
-|---|---|---|---|---|---|---|
-| 1 | **PendingWrites** (`pending`, `intent_receipts`, `event_to_receipts`) | **atomic** | fact | — | root | The in-memory map is a *mirror of a durable transaction*. `write.rs:4427-4502` removes the entry, calls `store.cancel_write`, and **re-inserts on store failure**; `write.rs:5012-5050` does the same around `compensate_write`. 10 of 24 mutating functions call the store. This is I1, and it is real coupling. |
-| 2 | **LaneProjection** | **atomic** | fact | — | root | The lanes *are* store rows; the projection mirrors them. `lane_projection.rs:95` `operation(&mut self.store)`, `:122` `bootstrap_publish_queue_lanes`, `:377` `record_route_revision`. Clock is a deadline (`:218 due: self.clock`, `:232`) — fact-shaped. |
-| 3 | **SessionRegistry** | **atomic** | fact | fact | **atomic** | `auth_transport.rs:1435-1437` — `self.resolver.ingest_observed_detailed(&mut self.store, observed_events)` mutates resolver and store in one call, inside a function that also reads `slot_to_relay`. 29 `Effect::` emissions in the file: it emits directly rather than returning an outcome. |
-| 4 | **RequestEvidence** / request targets | root | fact | — | root | 16 mutating functions; **one** reads `clock`, **zero** call store, router or resolver. The cleanest cluster measured. |
-| 5 | **CoordinateCoverage** | — | — | — | — | 0 of 4 mutating functions touch any of the four. Its rejection was never about the shared four: `release_coordinate_coverage` calls `self.on_unsubscribe(..)` — **cross**, I6 as a call graph. |
-| 6 | **AuthorOutboxRouteNeeds** | — | — | — | — | 0 of 5 mutating functions touch any of the four — but it emits `Effect::AuthorRouteNeedsChanged` from its own method instead of returning an outcome. **Axis 2**, not axis 1. |
-| 7 | **AttemptCorrelations** | root | fact | — | root | Rejected on **appears**, not coupling: `AttemptCorrelationTarget` names `ReceiptId`, `RelaySessionKey` and `PublishQueueLaneKey` — a ~50-line crate whose public type drags three vocabularies. |
-| 8 | **LiveWireOwnership** (9 fields) | root | root | **fact** | root | 4 of 8 mutating functions read `self.router.plan()`; none calls store or resolver. One genuinely foreign reader (`observation.rs`, a membership predicate). |
-| 9 | **NegentropySessions** (NIP-77, 10 fields) — *deleted with NIP-77* | root | fact | fact | root | 22 mutating functions, 2 touch router/clock. Its crate rejection was a **dependency** argument, not a coupling one. Overturned by #1806, then made moot: the cluster is gone. Row kept so the census's own numbers stay readable. |
-| 10 | **ObservationBranches** (`observations`, `handles`) | root | — | — | **root** | 3 of 7 mutating functions call the resolver — all of them root subscribe/unsubscribe *around* the map update, the `HistorySessions` shape exactly. |
-| 11 | **RequestClaimTransfers** | root | fact | fact | root | Clock is a deadline; router reads are plan facts. |
-| 12 | **QuarantinedAuthReceipts** | root | fact | — | root | First read as **atomic**; re-reading it, the shape is get → orchestrate → remove, which is what the extracted owners already do. Recorded as the corrected classification. |
-| 13 | **StalledWriteCensus** | root | fact | — | root | A cached projection; the store calls are the root recomputing it. |
-| 14 | **TransportHealth** | — | fact | fact | — | Barely a cluster: `relay_open_failures` is inserted inside the dispatcher arm in `mod.rs`, so it is already partly root-owned, and consumers read it by reference as pure fact. |
-| 15 | **PlannedReadSessions** | — | — | **fact** | — | One mutating function, one `router.plan()` read. |
-
 #### Two axes, and the argument kept confusing them
 
 Before the verdict, one distinction the original claim collapsed and that
@@ -788,8 +761,11 @@ extracting them.
 #### What survives
 
 **The blanket claim does not survive.** Twelve of the fifteen clusters
-need only read-only facts and root orchestration; two of them (5, 6) touch
-none of the four in any mutating function at all. The two rejections this
+measured — every one except `PendingWrites`, `LaneProjection`, and
+`SessionRegistry`, the three with real store/resolver coupling below — need
+only read-only facts and root orchestration; two of them,
+`CoordinateCoverage` and `AuthorOutboxRouteNeeds`, touch none of the four in
+any mutating function at all. The two rejections this
 document leaned on hardest were not about the shared four in the first place
 — `CoordinateCoverage` failed on a **cross**-owner teardown call and
 `AttemptCorrelations` on the vocabularies its public type drags. "They all
@@ -999,11 +975,10 @@ assertions of the form `x == x`. All green while the thing they protected was
 violated. The reducer's guards are the same class one level down — which is
 why the rule generalises past the eight named invariants:
 
-**Any guard whose failure mode is fail-open is probably untested.** When you
-add one, the falsifier is not optional, and it must construct the input the
-guard exists to reject. See #1727, and #1736 for the fixture the corpus
-needs before I3 can be falsified at all. I7 and I8 needed no fixture and got
-no falsifier; the store-failure model they guarded was deleted instead.
+**Any guard whose failure mode is fail-open is probably untested.** See
+#1727, and #1736 for the fixture the corpus needs before I3 can be
+falsified at all. I7 and I8 needed no fixture and got no falsifier; the
+store-failure model they guarded was deleted instead.
 
 ### A red falsifier is only evidence if it is red for the right reason
 
@@ -1098,7 +1073,7 @@ above it without one new public item.
 |---|---|---|
 | `nmp-nip02` (kind:3 + follow door) | yes — depends on `nmp` | in flight (#1707 step 3) |
 | `nmp-nip29` (groups + `RelayScope` door) | yes — depends on `nmp` | in flight (#1707 step 4) |
-| `nmp-nip18`, `nmp-nip22` (→ `nmp-nip73`), `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-bookmarks` | no — engine-free composition | correct today |
+| `nmp-nip18`, `nmp-nip22` (→ `nmp-nip73`), `nmp-nip25`, `nmp-nipc7`, `nmp-content`, `nmp-nip68`, `nmp-blossom`, `nmp-media` | no — engine-free composition | correct today |
 | future families (bookmarks, mute lists, …) | as needed | one crate each, when the behavior arrives |
 
 The direction of the capability edge is the load-bearing fact:
@@ -1111,9 +1086,8 @@ level down.
 
 **The facade's re-export inventory is a reliable single point of truth for
 what is reachable, and the architecture depends on it.** Five reversals have
-now run the same census before moving anything — the media seam (since
-deleted), `Row`/materializer, NIP-02, the eight pure re-export doors,
-NIP-29 — and the
+now run the same census before moving anything — `nmp-media`,
+`Row`/materializer, NIP-02, the eight pure re-export doors, NIP-29 — and the
 property held every time: **every external consumer reaches these types
 through `nmp`'s crate-root re-export, never by naming a lower crate directly
 for something `nmp` re-exports.** Every downstream fix across all five was a
@@ -1162,8 +1136,8 @@ crates must not be folded into tests; the proof is the manifest.
 Mechanical, no checker required:
 
 1. **Protocol-named entries directly under `crates/nmp/src`** — **0**
-   (steps 0–4 moved eleven of them out, including `nip02/`, `nip29/`,
-   `nip18.rs`, `nip22.rs`, `nip25.rs`, `nipc7.rs` and
+   (steps 0–4 moved `media/`, `nip02/`, `nip29/`, `nip18.rs`, `nip22.rs`,
+   `nip25.rs`, `nip68.rs`, `nipc7.rs`, `blossom.rs`, `asset.rs`,
    `content.rs`; the NIP-65 split then deleted the last one, `nip65.rs` --
    one line of capability convenience, `engine.publish(request.into_
    write_intent())`, wearing an engine-bound signature, not routing
@@ -1236,7 +1210,8 @@ the value types — `PendingWrite` owning its own transitions rather than
 
   An `nmp-nip51` crate would be a category Nostr does not have, holding
   unrelated kinds together for an editorial reason rather than a semantic
-  one — the same defect as any other invented category, applied to crate
+  one — the same defect as any other invented category
+  (), applied to crate
   boundaries instead of type names. **Do not "fix" the absence**, and do not
   let an architecture diagram draw a single NIP-51 box; the absence reads
   like an omission to anyone scanning the crate list, and someone will
@@ -1288,8 +1263,7 @@ Marked open on purpose; do not infer answers.
    Swift/Kotlin projection does not scale to hundreds of kinds; the likely
    direction is a generic FFI surface (the two nouns + registered-payload
    minting) with typed capability vocabulary in native packages, but nobody
-   has designed it. Do not treat today's per-NIP FFI modules as the pattern
-   to extend indefinitely.
+   has designed it.
 2. **What constitutes the deterministic engine, and whether any owner
    inside it earns a package.**
    The engine/runtime boundary is settled. The internal package
@@ -1298,13 +1272,8 @@ Marked open on purpose; do not infer answers.
    not earn a package on *their* evidence. That bounds those proposals, not
    the space.
 
-   Evaluate Query, publication, synchronization, AUTH, session state, and
-   other owners by responsibility, lifecycle coherence, and the facts that
-   must cross. Ask what state each exclusively owns, what causes that
-   responsibility to change, and whether it can be reasoned about through an
-   independent interface. A distinct dependency list is not required. #1627
-   already names this distinction: query/publication lifecycle owners may
-   become packages while related protocol vocabularies with identical
+   #1627 already names this distinction: query/publication lifecycle owners
+   may become packages while related protocol vocabularies with identical
    dependency/artifact shapes remain feature-gated modules.
 
    #1606 continues through private concrete owners regardless. A package

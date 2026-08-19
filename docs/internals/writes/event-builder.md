@@ -279,19 +279,18 @@ Two consequences:
   "the cost of folding" `Unsigned` into the builder is, in Pablo's words,
   non-existent.
 
-## 7. What to watch when building this — DESIGNED
+## 7. Three properties the shipped type has
 
-- **The builder must stay grammar-level** (`nmp-grammar`, where `WritePayload`
-  lives — `crates/nmp-grammar/src/write.rs:1-13` records why: protocol modules
-  composing intents must not gain an engine dependency). Schema-only composers
-  return `EventBuilder`; composers that own write policy return `WriteIntent`.
-- **Stamping is acceptance-time, not compose-time**, and it is the same
-  acceptance transaction that resolves identity (`writes/identity.md`).
-- **Do not add validation to the builder.** Ruling: it "should be able to
-  provide ANYTHING." Guardrails belong in composers and diagnostics, not as
-  refusals in the one universal type. The failure mode is well-intentioned
-  kind- or tag-shape checks accreting here until hand-rolling a gift wrap
-  becomes impossible — the exact outcome Pablo forbade.
+- **The builder is grammar-level.** It lives in `nmp-grammar` beside
+  `WritePayload` (`crates/nmp-grammar/src/write.rs`), so a protocol module
+  composing an intent gains no engine dependency. Schema-only composers return
+  `EventBuilder`; composers that own write policy return `WriteIntent`.
+- **Stamping is acceptance-time, not compose-time**, in the same acceptance
+  transaction that resolves identity (`writes/identity.md`).
+- **The builder carries no validation.** Pablo's ruling was that it "should be
+  able to provide ANYTHING"; guardrails live in composers and diagnostics. The
+  failure mode avoided is kind- or tag-shape checks accreting here until
+  hand-rolling a gift wrap becomes impossible.
 
 ---
 

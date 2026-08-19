@@ -16,20 +16,13 @@ related:
 issues:
   - "#899 unmergeable demands collide on one SubId and silently vanish"
   - "#900 AuthorUnion narrows an unconstrained authors filter"
-  - "the tag axis has no merge rule (§3.4)"
+  - "tag axis had no merge rule — CLOSED by StructuralUnion (§3.4)"
   - "#933 per-EOSE delta subscriptions — measured, analysed, NOT BUILT (§11)"
   - "#1340 observation admission no longer reprojects every sibling — CLOSED"
   - "#1341 pending app demand is grouped before immutable relay admission — OPEN: the 10ms cohort and coverage containment ship, the uncovered residual does not (§3.2, §11.5)"
+  - "#932 Close/reopen straggler race — CLOSED (§8.2)"
   - "#1731 nmp-runtime coordinator split — where the 10ms window's constant now lives (crates/nmp-runtime/src/wire_admission.rs)"
 ---
-
-> **NIP-77 was deleted from NMP.** Every mention of negentropy, the capability
-> prober, the four `nip77_role_sub_id` roles, and the live-first handoff below
-> is HISTORY: the code, its falsifiers, and the reincarnation counter those
-> roles needed are all gone, and no engine path mints a derived wire id any
-> more. The reasoning is kept because the identity failure modes it records
-> apply to any future derived-id namespace, not because any of it is currently
-> reachable. §7.2's planned-subscription rule is the part that is still live.
 
 # Subscription identity, grouping, and relay limits
 
@@ -42,12 +35,15 @@ all three were consequences of a single design choice that was never written
 down. Read §5 first if you only want the failure modes.
 
 **Status is marked per section.** Sections marked BUILT describe shipped
-behaviour; sections marked OPEN are unresolved. §7's design is now built —
+behaviour; sections marked OPEN are unresolved. §7's design is built —
 §7.1 as `nmp_router::StructuralUnion`, §7.2 as `nmp_router::wire_id` — and
 §6's per-relay subscription budget is built as `nmp_router::CompileBudget`.
-What remains unbuilt is §8.1b/§8.2 and #933's coverage-driven derived-demand
-growth. The 10ms app-admission cohort in §1 and §11.5 is built; it is not the
-per-EOSE mechanism #933 describes.
+§8.2's incarnation fix is built (`nip77_role_sub_id`, `next_nip77_incarnation`
+in `crates/nmp-engine/src/core/`). §8.1b records a decision about retraction's
+shape, not an implementation. #933's coverage-driven derived-demand growth
+(§11) is measured and NOT built: the 10ms app-admission cohort in §1 and
+§11.5 covers unsent app demand, a different regime from #933's per-EOSE
+derived-growth split.
 
 ---
 
@@ -162,8 +158,8 @@ and its filters ship as separate REQs.
 Over-fetching is safe because `crates/nmp-router/src/deliver.rs` re-filters every
 returned event against each consuming atom's *own* original filter before
 delivery. Widen-only guarantees no under-delivery; local re-filtering guarantees
-no over-delivery. **Do not weaken the local re-filter** — it is the reason merge
-mistakes cost bandwidth rather than correctness.
+no over-delivery. The local re-filter is why merge mistakes cost bandwidth
+rather than correctness.
 
 ### 3.2 Where merging happens
 
@@ -373,8 +369,7 @@ allocated plan identity and a monotonic mint counter. NIP-01 requires only that
 ids are unique per connection; exact zero-diff retention is local bookkeeping,
 not a protocol requirement that byte changes reuse an id.
 
-Verified: nothing in reconnect/replay, `clear_session`, the (since deleted)
-NIP-77 role ids,
+Verified: nothing in reconnect/replay, `clear_session`, NIP-77 role ids,
 persistence, or the #106 anti-alias tests depends on the derivation. Coverage is
 consulted only by the `MaxAge` freshness gate and by diagnostics — **never
 during filter construction**.
@@ -420,8 +415,8 @@ and never repairs. Silent demand loss is the worst failure class in this system:
 everything downstream believes the request is live.
 
 `limit` is the *trigger*, not the defect — under `dedup_only()` two ordinary
-unlimited atoms collide identically. At scale, 6 authors × 3 shapes plans 13
-WireReqs onto **3** ids.
+unlimited atoms collide identically, and the collision rate grows with the
+number of distinct shapes sharing an author set.
 
 A second consequence of the same root: `crates/nmp-engine/src/core/query.rs`
 resolves a REQ's `absorbed` coverage keys with `reqs.iter().find(...)` —
@@ -451,9 +446,19 @@ It survived for **two** reasons, and the second is the subtler one:
    asserted that the rules ever *fired* during the run. A generator can drift
    into producing only unmergeable pairs and the test still passes.
 
-The fix therefore carries **fire counters** as a hard failure: each rule must
-merge a minimum number of pairs per run (measured: AuthorUnion 17, KindUnion 23,
-IdUnion 20 per 256 cases). Vacuity is now a test failure, not a silent pass.
+The first fix carried **fire counters**: each rule had to merge a minimum
+number of pairs per random run. That mechanism is gone. Its own test file
+records why (`crates/nmp-router/tests/coalescing.rs`): with four axes competing
+for a fixed sample budget an axis occasionally never came up, so it "was
+measured failing about one run in twelve on a green tree" — reporting a defect
+where there was none. Sampling was the wrong instrument, because "can the rule
+fire on the tags axis" is a fact about the rule, not about a draw.
+
+The shipped guard is `the_merge_rule_fires_on_every_axis`: one hand-built pair
+per axis, differing in exactly that component and nothing else. Deterministic,
+and strictly stronger — it fails the moment an axis stops being mergeable
+rather than only when the generator happens to notice. Vacuity is a test
+failure, not a silent pass.
 
 `KindUnion` had the identical defect and `IdUnion` a narrower version of it
 (refusing `None` but accepting `Some(∅)`). All three now share one admission
@@ -511,9 +516,10 @@ The codebase already knows this and stopped enforcing it:
 subscription budget becomes a real planning input, using the existing `limited` /
 `refused_sessions` reporting seam rather than reviving `RelayLimits`.
 
-Sequencing is load-bearing: pre-collapse, a budget over 300-vs-20 only forces
-triage that drops 280 atoms' coverage — fail-closed but useless. **Land the
-collapse first**, then the budget is a guard rail rather than a guillotine.
+Sequencing was load-bearing: pre-collapse, a budget over 300-vs-20 would only
+have forced triage that drops 280 atoms' coverage — fail-closed but useless.
+The collapse (§3.4) landed first, so the budget below is a guard rail rather
+than a guillotine.
 
 ### 6.1 As built
 
@@ -565,8 +571,8 @@ deliberately not among their inputs.
 
 Parsed and unread until now. A relay advertising `< 64` would reject our
 fixed-length ids and nothing would notice. It is now reported per session
-(`subid_length_rejects_our_ids`) and enforces nothing. It must **never** feed id
-derivation — NIP-11 documents refresh, and a mutable derivation input is
+(`subid_length_rejects_our_ids`) and enforces nothing. It never feeds id
+derivation — NIP-11 documents refresh, and a mutable derivation input would be
 identity instability.
 
 ---
@@ -693,8 +699,7 @@ nothing.
 **What it costs:** the router holds matching state (bounded — it is `prev_plan`,
 already held and pruned every compile, not the unbounded-map class); ids stop
 being recomputable from filters, so a log line needs the plan to interpret; ~12
-test fixtures that predict ids need rework; the (since deleted) negentropy
-prober had to be
+test fixtures that predict ids need rework; the negentropy prober must be
 domain-separated from the allocated namespace.
 
 ### 7.3 The relationship between the halves
@@ -711,33 +716,35 @@ successor is accepted.
 
 ## 8. Accepted costs and open corners
 
-### 8.1 Accepted — pin as tests, do not "fix"
+### 8.1 Accepted costs, pinned as tests
 
 - **Compound churn.** Two components moving in one recompile — an author
   resolves *and* the window advances — is a 2-diff, so it cannot claim a
   structural predecessor and opens as an independent fresh-id request while
   unmatched prior work closes normally.
-  Reviewed and **dismissed by the owner as not a real workload** (2026-07-27);
-  not to be measured or designed around. **Do not relax to "≤2 components with
-  overlap evidence"** regardless — every relaxation re-imports lineage matching's
-  ambiguity for no gain.
+  Reviewed and **dismissed by the owner as not a real workload** (2026-07-27).
+  A relaxation to "≤2 components with overlap evidence" was considered and
+  rejected: every relaxation re-imports lineage matching's ambiguity for no
+  gain.
 - **Window siblings.** Two filters identical except `until`, both moving in one
   compile, are each one-diff from each prior, and a scalar has no overlap metric.
-  Needs an arbitrary-but-deterministic tiebreak; the residual swap is accepted.
-  Heavy multi-window pagination is the single workload that would argue for the
-  collision-check design instead.
+  This needs an arbitrary-but-deterministic tiebreak; the residual swap is
+  accepted. Heavy multi-window pagination is the one workload that would argue
+  for the collision-check design instead (§7.2's alternatives table).
 
-### 8.1b Retraction — DECIDED (owner, 2026-07-27)
+### 8.1b Retraction — DECIDED (owner, 2026-07-27), not yet implemented
 
-When a newer answer invalidates what we previously held, **close whatever is now
-known to be incorrect and open it again with the right values.** Correctness
-first; do not try to preserve a subscription whose demand has been contradicted.
+When a newer answer invalidates what was previously held, the ruling is: close
+whatever is now known to be incorrect and open it again with the right
+values. Correctness over preserving a subscription whose demand has been
+contradicted.
 
-Stated preference on *how*: this should be expressed **declaratively or via
-signals**, not as imperative teardown bookkeeping scattered through the
-recompile path. The recompile is already a full recomputation from demand
-(§1), so the natural shape is that retraction falls out of the recomputed
-demand rather than being a separate imperative step.
+Stated preference on *how*: expressed declaratively or via signals, not as
+imperative teardown bookkeeping scattered through the recompile path. The
+recompile is already a full recomputation from demand (§1), so the natural
+shape is retraction falling out of the recomputed demand rather than being a
+separate imperative step. No code in this repository implements this shape
+yet; the paragraph records the ruling, not shipped behaviour.
 
 Note the interaction with §7.2: under signature matching, a filter whose values
 shrink is still a one-component difference, so the common case is a typed
@@ -745,138 +752,88 @@ fresh-id successor carrying the survivor set. EngineCore offers that successor
 before closing its predecessor and keeps the predecessor live if local
 placement is refused. Demand that is genuinely gone still closes directly.
 
-### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof (moot: NIP-77 deleted)
+### 8.1c PARTIAL (#1004) — ordinary-plan assertions raced NIP-77 capability proof
 
-Found while un-`@wip`ing the BDD scenarios and originally attributed to an
-indeterminate live-engine recompile boundary. Issue #1004 captured the
-recurring active-suite failure and its full wire trace identified the actual
-interleaving.
+Found while un-`@wip`ing the BDD scenarios, originally attributed to an
+indeterminate live-engine recompile boundary. #1004's full wire trace found
+the real interleaving: the relay's behavioral NIP-77 probe sometimes resolved
+between two watch mutations, so the first mutations emitted ordinary planned
+REQs, the next broad Public recompile opened a distinct `limit:0` NIP-77 live
+candidate, and that candidate's EOSE correctly closed the overlapped ordinary
+predecessor. The historical failing record — two in-place ordinary
+replacements, then a fresh `limit:0` candidate, then the predecessor CLOSE —
+was a harness capability race, not a router-plan CLOSE or an observation
+race: the assertion measured ordinary NIP-01 plan replacement while letting
+the relay change acquisition protocol mid-stimulus. (Current ordinary byte
+changes use the fresh-id accepted-open-before-close transition in §7.2
+regardless.)
 
-The relay's behavioral NIP-77 probe sometimes resolved between two watch
-mutations. The first mutations therefore emitted ordinary planned REQs; the
-next broad Public recompile correctly opened a distinct `limit:0` NIP-77 live
-candidate. Once that candidate's exact EOSE arrived, the gap-free handoff
-correctly closed the overlapped ordinary predecessor. The historical failing
-record was unambiguous under the implementation at that time: two in-place
-ordinary replacements, then a fresh `limit:0` candidate covering the enlarged
-author set, then the predecessor CLOSE. Current ordinary byte changes instead
-use the fresh-id accepted-open-before-close transition in §7.2.
-
-That is not a router-plan CLOSE and not an observation race. It is a harness
-capability race: the assertion claimed to measure ordinary NIP-01 plan
-replacement while allowing the relay to change acquisition protocol midway
-through the stimulus.
-
-The subscription-collapse feature now drives an explicit NIP-11 document
+Fix: the subscription-collapse feature now drives an explicit NIP-11 document
 whose `supported_nips` excludes 77, so the engine deterministically suppresses
-the behavioral probe and the scenario observes only the ordinary router plan.
-The no-CLOSE assertions additionally reject any `limit:0` live candidate by
-its exact wire shape before evaluating the plan invariant, so losing that
-isolation fails with the real cause rather than reviving the flaky
-misclassification. `nmp-test-support` separately pins that wire-shape
-classification.
+the behavioral probe. The no-CLOSE assertions also reject any `limit:0` live
+candidate by its exact wire shape before evaluating the plan invariant, so
+losing that isolation fails loudly rather than reviving the flaky
+misclassification. `nmp-test-support` pins that wire-shape classification
+separately. This closed #1004's active ordinary tag/author failure.
 
-That closes #1004's active ordinary tag/author failure. One separate residue
-remains `@wip`: the derived-group stimulus is downstream of an inbound EVENT,
-so outbound-wire quiet cannot establish that ingestion, resolution, and
-recompilation reached a named generation. It has an engine-level falsifier but
-the live BDD harness still lacks that generation boundary. The earlier
-investigation below is retained for that residue; its claim that the ordinary
-author/tag scenarios demonstrated the same recompile race is superseded by
-the complete #1004 wire trace above.
+One residue stayed `@wip`: the derived-group stimulus is downstream of an
+inbound EVENT, so outbound-wire quiet (`wait_wire_quiet`, watching only
+client-to-relay traffic) cannot establish that ingestion, resolution, and
+recompilation reached a named generation — the read can land in the quiet gap
+between "relay pushes an event" and "client re-resolves, recompiles, emits a
+REQ" and report what had happened by then. Polling instead
+(`nmp_bdd::world::wire_record_when`) was tried and, over eight consecutive
+suite runs against real in-process relays, separated two effects the original
+investigation had conflated: a three-value `#p` watch then dropping one
+closed **two** subscriptions (a NIP-77 handoff, later excluded by the #1004
+fix above); the derived five-groups-then-one `#d` sequence closed **one**,
+and in another run opened a second subscription instead of widening — end
+state correct every time, so this is churn from cross-compile interleaving
+(`tag_fanout_churn.rs` assumes one recompile per growth step; a live engine
+does not guarantee that), not a correctness defect.
 
-The wire `Then` steps read the relay's socket ONCE, after the client wire has
-been quiet for a window. That is not sufficient for any assertion whose subject
-is downstream of an INBOUND frame: `wait_wire_quiet` watches client-to-relay
-traffic only, so "seed a kind:39001 → relay pushes it → the client ingests,
-re-resolves the derived set, recompiles, emits a REQ" has a genuinely quiet
-client wire in the middle of it. The read lands in that gap and reports what
-had happened by then.
-
-Making those steps poll (`nmp_bdd::world::wire_record_when`) was tried. It
-exposed two effects which the original investigation conflated. The ordinary
-tag/author CLOSEs were NIP-77 handoffs (NIP-77 is now deleted, so that source
-of CLOSEs is gone entirely; #1004 had already excluded it deterministically). The derived-group scenario still crosses an inbound pipeline for which
-the harness cannot name a completed plan generation. Measured over eight
-consecutive suite runs against real in-process relays:
-
-- a three-value `#p` watch then dropping one closed **two** subscriptions;
-- the derived five-groups-then-one `#d` sequence closed **one**, and in another
-  run opened a second subscription instead of widening;
-- the pre-existing author-axis regression guards also showed a CLOSE; #1004's
-  complete record later proved that CLOSE was a NIP-77 handoff (since
-  deleted), not the
-  derived recompile-boundary residue.
-
-The end state was correct every time: one subscription carrying every value,
-nothing under-fetching. The remaining derived observation is therefore churn,
-not a demonstrated correctness defect.
-
-The mechanism is interleaving. `tag_fanout_churn.rs` presents every growth step
-as one recompile over the whole demand set and measures the same deterministic
-fresh-id transition sequence for fan-out and pre-batched input. A live engine
-does not guarantee one recompile per demand: two can land in separate compiles,
-the coalescer's grouping can differ between them, and a request with no typed
-successor is retired directly rather than at an accepted transition edge.
-
-Proving the derived case live requires giving the harness a way to await a
-specific plan generation rather than a quiet socket. Until then the polling
-helper stays, used only to SEQUENCE a stimulus (so "one more group" arrives
-after the first subscription is genuinely live), never to take an assertion.
-
-**It reaches further than the scenarios it was found on, and §6's own feature
-is in it.** Measured 2026-07-27 over NINE completed `cargo test -p nmp-bdd
---test bdd` runs on a branch carrying NO library changes: **three red, six
-green** — a third of runs, not an occasional blip. Two scenarios carry it:
-
-- `features/queries/reactive-follows.feature`, "Unfollowing one person
-  touches only that person's subscriptions" — red twice, on `the
-  subscriptions serving Alice and Bob are untouched`.
-- `features/routing/relay-subscription-limits.feature`, "A catalog of three
-  hundred groups fits inside a limit of twenty" — red once, reporting **2**
-  live subscriptions where the end state holds 1.
-
-Same mechanism, same verdict: a transient second subscription exists between
-two compiles that did not group identically, the one-shot socket read lands
-inside it, and the end state is correct every time. So the flake is a
-property of the harness's observation model rather than of any one feature —
-**a single red run here is not evidence against the change under test.** Note
-what the second scenario means for §6: the subscription-budget feature
-asserts a COUNT, which is exactly the quantity this interleaving perturbs, so
-it is structurally the most exposed assertion in the suite.
+Measured 2026-07-27 over NINE completed `cargo test -p nmp-bdd --test bdd`
+runs on a branch with NO library changes: **three red, six green** — a third
+of runs. Two scenarios carried it: `features/queries/reactive-follows.feature`
+("Unfollowing one person touches only that person's subscriptions") red
+twice, on `the subscriptions serving Alice and Bob are untouched`; and
+`features/routing/relay-subscription-limits.feature` ("A catalog of three
+hundred groups fits inside a limit of twenty") red once, reporting **2** live
+subscriptions where the end state holds 1. Same mechanism both times: a
+transient second subscription exists between two compiles that grouped
+differently, the one-shot socket read lands inside it, and the end state is
+correct every time — a single red run here was not evidence against the
+change under test. The second scenario matters for §6: the subscription-budget
+feature asserts a COUNT, exactly the quantity this interleaving perturbs, so
+it was structurally the most exposed assertion in the suite.
 
 ### 8.1d CLOSED (#1211) — the derived read now waits on the engine's own proof
 
-§8.1c ends by saying that proving the derived case live "requires giving the
-harness a way to await a specific plan generation rather than a quiet socket."
-The await already existed; the harness simply was not reading it. #12 put the
-INTERIOR `Derived` atoms into the subtree that a source's
+The fix §8.1c called for — a way to await a specific plan generation instead
+of a quiet socket — already existed; the harness was not reading it. #12 put
+the INTERIOR `Derived` atoms into the subtree that a source's
 `SourceEvidence::reconciled_through` is computed over, so that watermark is
 `None` until the inner demand's own request has settled AND every outer atom
-its rows resolved to has itself been requested and settled. That is not a plan
-generation counter, and it is better than one: it is a durable per-source
-coverage fact, produced by the component that owns coverage, and it is already
-delivered to every subscriber on every frame.
+its rows resolved to has itself been requested and settled — a durable
+per-source coverage fact, already delivered to every subscriber on every
+frame, not a new generation counter. `nmp_bdd::world::wire_settled` now waits
+on that for any watch whose filters are compiled from rows it must ingest
+first, before waiting out the outbound handoff. `WIRE_QUIET`'s doc no longer
+claims to bound recompilation; it bounds the socket, which is all it can see.
 
-`nmp_bdd::world::wire_settled` now waits on that for any watch whose filters
-are compiled from rows it must ingest first, and only then waits out the
-outbound handoff. `WIRE_QUIET`'s doc no longer claims to bound recompilation;
-it bounds the socket, which is all it can see.
-
-What the 400ms window was actually doing was measured before the change, by
+What the old window was actually missing, measured before the change by
 dumping the derived `#d` set's successive resolutions on the 300-group
-catalog. It grows as a contiguous SUFFIX of the seeded range — `{300}`,
-`{290..300}`, `{244..300}`, `{53..300}`, `{1..300}` — because the fixtures
-carry strictly increasing `created_at` and the relay replays stored events
-newest-first. A wire count taken part-way through therefore misses a
-contiguous LOW-numbered prefix, which is exactly the shape #1211 reported
-(`group-0001..group-{N}`, N varying 12/47/123/197/206/220/223/233 across
-runs). The suite failed 2 runs in 4 locally on `1d2ea5fc` and 4 in 6 on the
-issue's `8d51d069`; it does not fail now.
-
-This closes the derived-set half of §8.1c. The COUNT-interleaving residue in
-that section is a different mechanism (two compiles that did not group
-identically, leaving a transient second subscription) and is untouched here.
+catalog: it grows as a contiguous SUFFIX of the seeded range — `{300}`,
+`{290..300}`, `{244..300}`, `{53..300}`, `{1..300}` — because fixtures carry
+strictly increasing `created_at` and the relay replays stored events
+newest-first, so a wire count taken part-way through misses a contiguous
+LOW-numbered prefix, exactly the shape #1211 reported (`group-0001..group-{N}`,
+N varying across runs). The suite was reproducibly flaky before the fix and
+does not fail now. The two commit hashes the failure rates were quoted against
+no longer resolve in this history, so those rates are not restated here; the
+mechanism above is the finding, and it is checkable against the code. This closes the derived-set half of §8.1c. The COUNT-interleaving
+residue (transient second subscription from two compiles that grouped
+differently) is a different mechanism and is untouched here.
 
 ### 8.2 CLOSED — the Close/reopen straggler race (#932)
 
@@ -918,8 +875,7 @@ survives to be repeated.
 Same allocated token, and it appends to the SAME FIFO rather than a fresh one —
 that is the ruling's intersection rule operating normally, not a reincarnation.
 
-**NIP-77 live candidate**, `nip77_role_sub_id(plan, 0x71, filter)` — *deleted
-with NIP-77*. WAS THE
+**NIP-77 live candidate**, `nip77_role_sub_id(plan, 0x71, filter)`. WAS THE
 RESIDUE. Content-derived from a plan token that structural-signature matching
 deliberately CARRIES FORWARD across recompiles, so a filter that churns away
 and back re-derives an identical string after the first was closed and
@@ -927,25 +883,22 @@ discarded. `limit:0` poisons its coverage, so the observable is the handoff
 barrier itself: a straggler tripped `activate_live_and_open_neg` for a
 candidate the relay never acknowledged.
 
-**NIP-77 NEG session**, `nip77_role_sub_id(plan, 0x72, filter)` — *deleted
-with NIP-77*. WAS THE
+**NIP-77 NEG session**, `nip77_role_sub_id(plan, 0x72, filter)`. WAS THE
 RESIDUE, same mechanism. Unlimited and carrying the demand's real absorbed
 keys, so a straggler EOSE on a repeated string mints coverage directly.
 
-**NIP-77 missing-ids backfill**, `nip77_role_sub_id(plan, 0x73, ids)` —
-*deleted with NIP-77*. WAS THE
+**NIP-77 missing-ids backfill**, `nip77_role_sub_id(plan, 0x73, ids)`. WAS THE
 RESIDUE, same mechanism. Its own `absorbed` is empty, but its EOSE is what
 unlocks the deferred NEG credit, so a straggler released that credit early.
 
-**NIP-77 fallback backlog**, `nip77_role_sub_id(plan, 0x74, filter)` —
-*deleted with NIP-77*. WAS THE
+**NIP-77 fallback backlog**, `nip77_role_sub_id(plan, 0x74, filter)`. WAS THE
 RESIDUE and the sharpest instance: unlimited (nothing poisons it) and carrying
 the demand's real absorbed keys. The falsifier drives exactly this one and
 watches durable `RecordCoverage` intervals appear for a request the relay had
 not finished serving.
 
 **Negentropy prober**, `SubId::for_wire(relay, probe_filter(), Public,
-Public)` — *deleted with NIP-77*. SAFE, and worth stating explicitly because the string is maximally
+Public)`. SAFE, and worth stating explicitly because the string is maximally
 reproducible — a fixed filter makes it constant per relay. It is never
 registered in attribution at all: `Prober::begin_probe` keys it into the
 prober's own `pending` map, and no probe ever calls `record_send`. It measures
@@ -954,9 +907,9 @@ protocol support and touches no coverage identity.
 **`SubId::for_wire` in `core/evidence.rs`**. SAFE. Test fixtures only, inside
 `#[cfg(test)]`.
 
-#### 8.2.2 The fix (deleted with NIP-77)
+#### 8.2.2 The fix
 
-`nip77_role_sub_id` took a monotonic incarnation minted by `EngineCore`
+`nip77_role_sub_id` takes a monotonic incarnation minted by `EngineCore`
 (`next_nip77_incarnation`), folded into the digest after the role byte and the
 filter hash. Every derivation therefore yields a string nobody has been handed
 before, and a straggler for a closed role subscription resolves to nothing —
@@ -1027,13 +980,13 @@ Everything asserted above is measured, not reasoned. Reproduce with:
 | engine-level collapse; warm cache; EOSE independence; multi-relay; 50 values; the tag/author equality | `crates/nmp-engine/tests/core_headless/derived_tag_fanout.rs` |
 | fan-out and pre-batched compiling to one plan; the #899 falsifier and its control | `crates/nmp-router/tests/tag_fanout_churn.rs` |
 | 300 groups INSIDE a 20-subscription cap; strict improvement over dedup-only | `crates/nmp-router/tests/tag_kill_measurement.rs` |
-| widen-only over the full component-shape space with PER-AXIS fire counters; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
+| widen-only over the full component-shape space, with a deterministic per-axis firing guard; the tag polarity, both ends; the two-tag-name refusal; cap chunking | `crates/nmp-router/tests/coalescing.rs`, `crates/nmp-router/src/coalesce.rs` |
 | §3.2 the containment predicate itself, both legs per axis and the `limit` refusal on both sides | `crates/nmp-router/src/admission/metadata_tests.rs` |
 | §3.2 what containment does at admission: exact reuse, an uncovered later filter executing, and the partial-coverage over-fetch (plus its `#[ignore]`d #1341 target) | `crates/nmp-router/tests/admission/coverage_behavior.rs` |
 | author-axis limits under `AuthorUnion` (the pre-existing twin) | `crates/nmp-router/tests/kill_measurement.rs` |
 | live REQ frames against a real relay | `crates/nmp/examples/tag_fanout_live.rs` |
 | intended behaviour, `@wip` | `features/routing/subscription-collapse.feature` |
-| §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | *deleted with NIP-77* (was `crates/nmp-engine/tests/core_headless/negentropy.rs`) |
+| §8.2 the Close/reopen straggler, role path: durable coverage minted by a straggler, plus the positive leg | `crates/nmp-engine/tests/core_headless/negentropy.rs` (`a_reopened_backlog_req_never_inherits_a_closed_incarnations_eose`, `a_reopened_live_candidate_never_inherits_a_closed_incarnations_eose`) |
 | §8.2 the same race on the plan path, green by §7.2 alone | `crates/nmp-engine/tests/core_headless/live_queries.rs` (`a_reopened_plan_subscription_never_inherits_a_closed_tokens_eose`) |
 | §8.2 observed at the relay, in the product's own voice | `features/coverage/reopened-requests.feature` |
 | §11 what a widening subscription costs a relay, versus asking only for the new values | `crates/nmp/examples/reserve_cost_live.rs` |
@@ -1044,34 +997,6 @@ The live probe is the strongest evidence and the cheapest to re-run:
 nak serve --port 10547 --verbose
 cargo run -p nmp --example tag_fanout_live -- ws://localhost:10547 20 0 both
 ```
-
----
-
-## 10. Rules of thumb
-
-1. **Fan-out at the resolver is correct.** Fix the wire, never the atoms.
-2. **Widen-only is the contract.** A merge may over-fetch; it may never
-   under-fetch. The local re-filter is what makes that safe — do not weaken it.
-3. **Merging controls count; identity controls churn.** Different problems.
-4. **Deleting a field from an id is a bet that merging happened.** If merging can
-   refuse, the bet can lose, and losing is silent.
-5. **A `debug_assert` is not a guard.** It compiles out. If an invariant matters
-   in production, check it in production.
-6. **Property-test generators are the real defence.** #900 lived because a
-   generator never produced `None`. Every axis added here needs generator
-   coverage before it needs a rule.
-7. **Measure the saving before designing the mechanism.** §11's whole verdict
-   turned on two numbers — 90% of the waste and 20x the subscriptions — that
-   took one afternoon and an example file to obtain, against four design
-   problems that had been open for a day.
-8. **Fire counters belong per AXIS, not per rule.** Collapsing three rules into
-   one made a whole-rule counter *weaker* than what it replaced: the rule can
-   fire prolifically on `authors` and never once touch `tags`. A widening
-   property over pairs no rule accepts is vacuously green, and that is half of
-   why #900 survived.
-9. **A chunk count is not a contract.** Where a cap shards a filter, assert the
-   provable window and the relay's own ceiling — never `⌈n/cap⌉`, which the
-   greedy fixed point does not promise.
 
 ---
 
@@ -1194,139 +1119,115 @@ never-widened REQ per value, paying the subscription cost and none of the
 bandwidth cost. #933 is a proposal to move unlimited queries to where limited
 queries already sit.
 
-**This conjunct used to have a second half** — the relay had to not be
-NIP-77-capable on a Public session, because a broad Public REQ on a probed
-relay was diverted into the live-first handoff and the plan's op never reached
-`kept_ops`. NIP-77 is deleted, so it no longer applies and the benefit set is
-`unlimited AND mergeable AND multi-step growth`.
+**The relay must not be NIP-77-capable on a Public session**, or the
+overwrite the design attacks never reaches the wire. `crates/nmp-engine/src/
+core/query.rs:1021` is `let broad = filter.limit.is_none();` and the arm below
+it diverts every broad Public REQ on a probed relay into `begin_neg_handoff`
+— the plan's op is **never pushed to `kept_ops`**. So the whole benefit set is
+`unlimited AND mergeable AND (non-Public OR unprobed) AND multi-step growth`.
 
 ### 11.3 The four recorded problems, answered
 
-**#1 — where the time floor is stamped. The issue's own probable answer is
-UNSAFE, not merely insufficient.** Flooring the merged wire filter at
-materialisation cannot work standalone, for a reason that has nothing to do
-with where the stamp goes. `CoverageKey` is per narrow atom
+**#1 — the time floor.** Flooring the merged wire filter at materialisation
+cannot work standalone. `CoverageKey` is per narrow atom
 (`crates/nmp-store/src/coverage.rs`), so the only floor a MERGED filter may
 carry is the minimum proven `through` across its `absorbed` keys. A value
 discovered on this compile has no row at all, so that minimum is 0 and the
 filter is unfloored — on exactly the compile the feature exists for. Any
-floor above it under-fetches the new value's history, which is the widen-only
+floor above it under-fetches the new value's history, the widen-only
 violation §5.2 calls the one correctness property the module rests on. The
-floor is sound only AFTER a split has separated covered values from uncovered
-ones. **Problem 1 has no standalone answer: the floor and the split are one
-mechanism, and the floor is the dependent half.**
+floor is sound only AFTER a split has separated covered values from
+uncovered ones — the floor and the split are one mechanism, and the floor is
+the dependent half.
 
-**#2 — one interval per row. Confirmed, and it binds the two TIERS against
-each other, not just time-chunked backfill — but it is a satisfiable
-constraint, not an unanswered problem.** `merge_interval`
+**#2 — one interval per row.** Confirmed, and it binds the two TIERS against
+each other, not just time-chunked backfill. `merge_interval`
 (`crates/nmp-store/src/coverage.rs:120`) treats `incoming.from <=
 cur.through + 1` as touching and unions; anything else keeps whichever
-interval has the greater `through` and **discards the other outright**. The
-issue's conclusion (chunk descending only) is right. What it misses is that
-the live tier and the backfill tier land on the SAME key one step later —
-once a delta value joins the incumbent filter, a live tier floored at `now`
-proves `[now, eose]` against a row holding `[0, delta_eose]`. Disjoint.
-Recency wins. The backfill's proof is destroyed.
+interval has the greater `through` and discards the other outright. The live
+tier and the backfill tier land on the SAME key one step later — once a delta
+value joins the incumbent filter, a live tier floored at `now` proves `[now,
+eose]` against a row holding `[0, delta_eose]`. Disjoint; recency wins; the
+backfill's proof is destroyed. It is satisfiable rather than a blocker: an
+UNBOUNDED re-fire EOSEs at ~now, mints `[0, ~now]`, touches the live row and
+unions, so the loop terminates after one wasted full-history refetch (only a
+`until`-bounded re-fire loops forever); and capping the live tier's floor at
+`min(through) + 1` over its absorbed keys makes `from <= delta_eose + 1`
+always hold, so the intervals always union.
 
-Two precisions, both of which cut AGAINST treating this as a blocker:
-
-- The destroyed proof re-fires **forever** only if the re-fired backfill is
-  `until`-bounded, which pins its `through` below the live row's `from` on
-  every retry. An UNBOUNDED re-fire EOSEs at ~now, mints `[0, ~now]`, touches
-  the live row and unions — so the loop terminates after one wasted
-  full-history refetch. The natural design carries `until` (to avoid
-  double-serving the live range), so the scary version is the likely one; but
-  "forever" is a property of that choice, not of the storage model.
-- The fix falls out of the same paragraph: cap the live tier's floor at
-  `min(through) + 1` over its absorbed keys. Then `from <= delta_eose + 1`
-  always, so the intervals always touch and always union. The floor can never
-  simply be "now", and is only ever as high as the laggiest value in the
-  merged filter — a real constraint on the design, cheaply satisfied.
-
-**#3 — backfill squeezed from both sides. Confirmed exactly as written.**
+**#3 — backfill squeezed from both sides.** Confirmed exactly as written.
 `AttributionState::record_send` snapshots `limited: filter.limit.is_some()`,
 and `attribute_eose_detailed` poisons on `fifo.iter().any(|s| s.limited)` —
-one limited snapshot voids every key that EOSE could have proven. Unlimited is
-the `broad` predicate above. Emitting outside the plan path IS possible; the
-four (now deleted) NIP-77 role ids did exactly that. What that costs is stated
-in §8.2.2 and in the issue's own closing note: such ids must be engine-minted
-and engine-stored, they are invisible to `diag.rs` (which projects `RelayPlan`
-only), and they are not replayed by `on_relay_connected`, so a reconnect
+one limited snapshot voids every key that EOSE could have proven. Emitting
+outside the plan path IS possible; the four NIP-77 role ids do exactly that
+(§8.2.2), at the cost the issue's own closing note names: such ids must be
+engine-minted and engine-stored, invisible to `diag.rs` (which projects
+`RelayPlan` only), and not replayed by `on_relay_connected`, so a reconnect
 mid-backfill loses them silently.
 
-**#4 — MOOT: NIP-77 is deleted.** This answered a premise about probed
-relays: the plan REQ was not overwritten on the wire, it was dropped in favour
-of a live candidate and a reconciliation seeded from the entire local store,
-and the recorded answer was that NIP-77 relays were out of the delta design's
-scope. Nothing diverts a broad Public REQ any more, so the design's premise
-now holds uniformly and this exception is retired rather than answered.
+**#4 — on a NIP-77 relay the premise is false, and more so than stated.** The
+plan REQ is not overwritten on the wire; it is dropped. What happens is a
+fresh `0x71` live candidate, then `open_neg_session`
+(`crates/nmp-engine/src/core/query.rs:1971`) stripping `since`/`until`/`limit`
+and re-querying the entire local store to seed `Reconciler::open`. Scoping
+that reconciliation to the delta values would seed the reconciler with a
+deliberately partial view of what NMP holds, inverting negentropy's contract
+— the seed IS the claim. NIP-77 relays are out of scope; negentropy is
+already the delta mechanism there. Suppressing the tiers on probed relays is
+the only variant that does not ship two unreconciled loops.
 
 ### 11.4 The real cost: every survivable variant converges on the same bill
 
-**A — as specified, a lost backfill is never retried; the only retry path
-that exists costs the whole design.** Each current byte-changing successor
-still sends the wide UNFLOORED filter, so any history previously missed is
-re-served. That accidental self-repair is precisely what the delta design
-removes. If a
-one-shot backfill is lost — disconnect mid-flight, CLOSE before EOSE, a relay
-that never EOSEs — the next compile is zero-diff and no REQ is emitted.
-Nothing else picks it up: `decide_handle_acquisition` is explicitly one-shot
-("an unsatisfied `MaxAge` becomes `Live` once and stays there"), history's
-re-request evidence is its own `acquired_tie_seconds` set rather than
-coverage rows, and every `get_coverage` reader in the engine is a gate or a
-diagnostic — §4.3's "never during filter construction" is exact.
+**A — a lost backfill is never retried under the design as specified; the
+only retry path that exists costs the whole design.** Each current
+byte-changing successor still sends the wide UNFLOORED filter, so any history
+previously missed is re-served — the accidental self-repair the delta design
+removes. If a one-shot backfill is lost (disconnect mid-flight, CLOSE before
+EOSE, a relay that never EOSEs), the next compile is zero-diff and no REQ is
+emitted. Nothing else picks it up: `decide_handle_acquisition` is explicitly
+one-shot, history's re-request evidence is its own `acquired_tie_seconds` set
+rather than coverage rows, and every `get_coverage` reader in the engine is a
+gate or a diagnostic — §4.3's "never during filter construction" is exact.
 
-The engine DOES have a repair pattern, and it is worth naming because it is
-the only one available: **anchor retryable work in the plan, and re-derive
-ephemeral work from the plan on reconnect.** That is how the NIP-77 role subs
-survive a disconnect — not by being replayed themselves, but because
-`on_relay_connected` re-derives the whole flow from `router.plan().reqs`.
-Borrowing it means making the split a COMPILE INPUT: `compile(demand,
-directory, budget, coverage)`, partitioning a merged shape's absorbed keys
-into covered and uncovered, planning a floored incumbent over the former and
-one coalesced unfloored backfill over the latter. Every leg of the failure
-closes — replay resends it, a missing coverage row means the next compile
-still plans it, attribution works through the front door unpoisoned, and
-`diag.rs` can see it because it is in `RelayPlan`.
+The only available repair pattern is: anchor retryable work in the plan, and
+re-derive ephemeral work from the plan on reconnect — how the NIP-77 role
+subs survive a disconnect, via `on_relay_connected` re-deriving the whole
+flow from `router.plan().reqs`. Borrowing it means making the split a COMPILE
+INPUT: `compile(demand, directory, budget, coverage)`, partitioning a merged
+shape's absorbed keys into covered and uncovered, planning a floored
+incumbent over the former and one coalesced unfloored backfill over the
+latter. That variant is sound. It is also the whole bill: it reverses §4.3 —
+coverage becomes an input to filter construction; identical-demand recompiles
+stop being zero-diff whenever coverage moved, breaking §5.1's `ops on
+identical recompile: 0` unless floors are frozen between value-set changes
+(more state); folding a backfilled value back into the incumbent needs a
+recompile trigger on coverage minting, which nothing does today, or the
+backfill lingers holding budget until the next demand mutation; and
+`shadow_plan_for` must be fed the same coverage snapshot or `MaxAge`
+evaluates against a plan shape the live router no longer produces.
 
-That variant is sound. It is also the whole bill:
+**B — the fold is a 2-diff, so every growth step churns.** The sharpest cost,
+listed by neither the issue nor an earlier pass of this section. Under §7.2,
+`since` and a tag's values are SEPARATE components
+(`crates/nmp-router/src/component.rs`). A floored-incumbent design moves both
+in the same compile at every growth step — the value set gains the
+backfilled value AND the floor advances — a two-component move, so
+`wire_id::assign` mints a fresh token without a structural predecessor. That
+is exactly the compound churn §8.1 dismissed as "not a real workload,"
+reintroduced as the steady state of the feature. The replacement REQ is
+floored, so the churn is bandwidth-cheap, but it creates a new physical
+generation on every growth step and pays the transition cost each time.
 
-- it reverses §4.3 — coverage becomes an input to filter construction;
-- identical-demand recompiles stop being zero-diff whenever coverage moved,
-  which breaks §5.1's `ops on identical recompile: 0` unless floors are
-  frozen between value-set changes, which is more state;
-- folding a backfilled value back into the incumbent needs a recompile
-  trigger on coverage minting — nothing recompiles on EOSE today — or the
-  backfill lingers, holding budget, until the next demand mutation;
-- `shadow_plan_for` must be fed the same coverage snapshot, or `MaxAge`
-  evaluates against a plan shape the live router no longer produces.
-
-**B — and the fold is a 2-diff, so every growth step churns.** This is the
-cost neither the issue nor the first pass of this section listed, and it is
-the sharpest one. Under §7.2 `Since` and a tag's values are SEPARATE
-components (`crates/nmp-router/src/component.rs`). A floored-incumbent design
-moves both in the same compile at every growth step: the value set gains the
-backfilled value AND the floor advances. That is a two-component move, so
-`wire_id::assign` mints a fresh token without a structural predecessor. The
-next request opens independently and unmatched prior work closes normally. It
-is exactly the **compound churn** §8.1
-dismissed as "not a real workload" and forbade designing around — reintroduced
-as the steady state of the feature. The replacement REQ is floored, so the
-churn is bandwidth-cheap; but it creates a new physical generation on every
-growth step and therefore pays the transition cost each time.
-
-**C — a lesser cost: #931 ranks the backfill last.** `refuse_over_budget`
-runs per session after coalescing and token assignment, and §6.1's ranking is
-that **incumbents outrank newcomers**; a backfill is a newcomer by
-construction. Recorded for completeness rather than as a blocker, because it
-is narrow and loud: it can only fire on a relay that advertises
-`max_subscriptions` AND is already over cap — the state §3.4's collapse made
-rare — and when it does fire, the refused keys join `limited`, so
-`plan_is_fresh_for` returns false and `ShortfallFact::LocalLimit` reaches the
-app. It also has a clean in-router answer, since the split and the budget would
-live in the same compile step: when `planned + 1 > allowed`, emit the current
-unfloored merged filter for that session as the full-query successor instead
-of a separate backfill.
+**C — a lesser cost: #931 ranks the backfill last.** `refuse_over_budget` runs
+per session after coalescing and token assignment, and §6.1's ranking is that
+incumbents outrank newcomers; a backfill is a newcomer by construction. Narrow
+and loud: it can only fire on a relay that advertises `max_subscriptions` AND
+is already over cap — the state §3.4's collapse made rare — and when it does
+fire, the refused keys join `limited`, so `plan_is_fresh_for` returns false
+and `ShortfallFact::LocalLimit` reaches the app. It has a clean in-router
+answer: when `planned + 1 > allowed`, emit the current unfloored merged
+filter for that session as the full-query successor instead of a separate
+backfill.
 
 ### 11.5 The cheaper change — BUILT for app-admission bursts, #1341 still OPEN
 
@@ -1372,42 +1273,35 @@ EOSE-anchored mechanism reaches that different regime and remains #933.
 
 ### 11.6 Verdict
 
-**#933 stays open, unbuilt, with this analysis.** The saving is real; the
-mechanism as specified is not available. What would have to change first, in
-order:
+**#933 stays open, unbuilt.** The saving is real; the mechanism as specified
+is not available. What would have to change first: coverage becomes an input
+to filter construction, reversing §4.3, because it is the only way to know
+which values are already covered and the only way a lost backfill is ever
+retried (§11.4 A); identical-demand recompiles stop being zero-diff whenever
+coverage moved, unless floors are frozen between value-set changes — §5.1's
+`ops on identical recompile: 0` is a shipped assertion; something must
+recompile when coverage is minted, which nothing does today, or a backfill
+lingers past its own EOSE holding a subscription; compound churn becomes the
+steady state, because value-set growth plus a floor advance is a 2-diff under
+§7.2, the exact workload §8.1 forbade designing around (§11.4 B); suppression
+on probed NIP-77 Public sessions (§11.3 #4) is a scope decision already
+accepted; and a floor discipline proven never to produce a disjoint coverage
+merge (§11.3 #2) is satisfiable but must be proven, not assumed.
 
-- **coverage becomes an input to filter construction**, reversing §4.3 —
-  because it is the only way to know which values are already covered, and
-  the only way a lost backfill is ever retried (§11.4 A);
-- **identical-demand recompiles stop being zero-diff** whenever coverage
-  moved, unless floors are frozen between value-set changes — §5.1's `ops on
-  identical recompile: 0` is a shipped assertion;
-- **something must recompile when coverage is minted**, which nothing does
-  today, or a backfill lingers past its own EOSE holding a subscription;
-- **compound churn becomes the steady state**, because value-set growth plus
-  a floor advance is a 2-diff under §7.2 — the exact workload §8.1 forbade
-  designing around (§11.4 B);
-- **a floor discipline proven never to produce a disjoint coverage merge**
-  (§11.3 #2) — satisfiable, but it must be proven rather than assumed.
+Two of those six break invariants that landed the same week as this
+analysis, both from the identity work: the zero-diff recompile (#899) and
+the compound-churn exemption (§7.2/§8.1). The rest are older properties, a
+mechanism that does not exist yet, and one scope decision. The convergence —
+every surviving variant lands on coverage-driven planned demand and pays the
+whole list — is the verdict's foundation, not the subscription count or the
+budget ranking. Two smaller arguments are NOT load-bearing: the 20x
+subscription bill belongs to the never-close variant only (§11.1), and the
+budget ranking is narrow, loud, and answerable in-router (§11.4 C).
 
-**Two** of those six break invariants that landed this week, and both are
-from the identity work: the zero-diff recompile (#899) and the compound-churn
-exemption (§7.2/§8.1). The rest are older properties, a mechanism that does
-not exist yet, and one scope decision. But the count is not the argument —
-the first bullet is. Every variant that survives scrutiny gets there by
-making the split coverage-driven planned demand, and then pays the whole
-list. That convergence — not the subscription count, not the budget ranking —
-is the verdict's foundation.
-
-Two smaller arguments are recorded here but are NOT load-bearing, and a
-future revisit should not have to refute them: the 20x subscription bill
-(which belongs to the never-close variant only, §11.1), and the budget
-ranking (narrow, loud, and answerable in-router, §11.4 C).
-
-The measurement exists so that a revisit argues against numbers. What it does
-not yet establish is where a real workload sits between `0.6%` and `90%` —
-that bracket is the honest state of knowledge, and closing it is the cheapest
-next thing anyone could do here.
+The measurement exists so a revisit argues against numbers. It does not yet
+establish where a real workload sits between `0.6%` and `90%` — that bracket
+is the honest state of knowledge, and closing it is the cheapest next thing
+anyone could do here.
 
 *Reviewed adversarially by Fable, 2026-07-27, against an earlier draft that
 called §11.4 A permanent and unanswerable. It is not: the plan-replay variant

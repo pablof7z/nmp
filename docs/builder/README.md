@@ -127,6 +127,3 @@ obligation and canonical pending row were committed together. Explicitly
 non-durable writes state their weaker retention promise; they do not become
 silent fire-and-forget calls. `Accepted`, `sent`, `acked`, and product-level
 success are different facts.
-
-Authoring guidance for this manual lives in [the design guidelines](000-design-guidelines-and-toc.md)
-and [writing brief](001-writing-brief.md).

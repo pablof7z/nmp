@@ -39,7 +39,7 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Routing & limits
 
-- **There is no indexer write lane, and the owner ruled there must be one.**
+- **There is no indexer write lane.**
   The 2026-08-17 routing ruling (`docs/internals/routing/outbox.md`) is that
   indexers always receive kind:0, kind:3 and kind:1xxxx events. Nothing
   publishes to an indexer today: the built-in `Auto` write resolver
@@ -89,18 +89,20 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   store/query/ingest/transport fixes (secondary indexes, bounded interior
   `Derived`, packed arenas, parse-once typed ingest, batch ingest, async
   pull-based observation handles, internal-admission elimination) are closed in
-  code and falsified in headless tests, but the ~97% CPU jank has NOT been
+  code and falsified in headless tests, but the on-device jank has NOT been
   re-measured on a physical device with the Swift coalescing + Rust index +
   churn fixes all live. Verify the running result on the Canary before
   declaring the M5 jank gone. Many of these fixes also carry "device room-open
   verification pending" — the same on-device pass closes them.
 - **Engine-lifetime memory grows linearly in DISTINCT filters observed, and
-  closing the observation never releases it (#1846).** Canary C17 measured
-  +291 B per additional distinct filter between 300 and 1200 cycles and
-  +541 B between 1200 and 4000 — linear, no plateau, with `phys_footprint`
-  rising 9.49 MB → 13.78 MB across 4000 closed observations. The identical
-  loop with the SAME filter is flat (−0.5 B per additional cycle), so this
-  is keyed on the filter being new, not on open/close overhead. Released in
+  closing the observation never releases it (#1846).** Canary C17's `distinct`
+  phase grows linearly with no plateau, confirmed at three cycle counts; the
+  identical loop with the SAME filter is flat, so this is keyed on the filter
+  being new, not on open/close overhead. The measured figures, the cycle
+  counts, the committed bound and what that bound cannot resolve are all in
+  `apps/Canary/CanaryScenarios/Tests/CanaryScenariosTests/C17RepeatedLifecycleChurnTests.swift`;
+  they are deliberately not restated here, where they would drift from the
+  assertion. Released in
   full by `shutdown()`. Whether it is an unbounded in-memory map or the
   store's page cache holding durable per-filter coverage rows cannot be
   determined through the public API — `DiagnosticsSnapshot` exposes no
@@ -202,8 +204,8 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
 
 ## Store & persistence
 
-- **The engine ships no retention policy, and the owner ruled that it should
-  (#1787, #1843).** On 2026-08-17: *"whatever, just ship a default policy;
+- **The engine ships no retention policy (#1787, #1843).**
+  The owner ruled on 2026-08-17 that it should have one: *"whatever, just ship a default policy;
   this is not a high priority."* Today canonical events are retained
   unconditionally — `RedbStore::gc` exists but no crate outside `nmp-store`
   ever calls it, and neither `GcRetentionSet` nor `GcReport` appears in `nmp`
@@ -225,8 +227,8 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   remains the production baseline, and as of #1941 it is the only backend the
   tree contains: the Fjall and LMDB ceiling-ingest harnesses, and the
   `heed`/`fjall` dependencies that carried them, are deleted. Re-evaluating a
-  candidate starts from `docs/design/storage-semantic-oracle.md`'s replacement
-  sequence and a fresh adapter, not from a harness that is still here.
+  candidate would start from `docs/design/storage-semantic-oracle.md`'s
+  semantic trace and a fresh adapter, not from a harness that is still here.
 - **Fjall is only partially qualified (#818, under #701).** A real
   `RLIMIT_FSIZE`/`SIGXFSZ` journal-write failure was proven to behave correctly
   on pinned Fjall 3.1.7/3.1.8 (3.1.6 silently lost the transaction); that
@@ -238,8 +240,8 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   fault audit; it cannot inherit this by semver.
 - **Boot recovery still READS per intent (#889).** Reopening an engine
   rebuilds volatile write ownership before the first command, and two
-  unnecessary durability barriers were removed (boot fell from 38.9s to 108ms),
-  but recovery still visits every open intent, so its READ work and in-memory
+  unnecessary durability barriers were removed, but recovery still visits every
+  open intent, so its READ work and in-memory
   rebuild remain linear in durable-queue size. There is no incremental or
   interleaved recovery — a command arriving mid-rebuild would read a partial
   queue, so the rebuild stays one indivisible step. Acceptance-time
@@ -343,10 +345,6 @@ open issue. Fixed items are deleted (git/history remembers them), not narrated.
   kills the process nor surfaces anywhere — a test can pass while the runtime
   thread underneath it died. A masked-failure risk in exactly the fail-open
   class the reducer's own guards are audited for; unaudited.
-- **One test asserts against the wall clock.**
-  `crates/nmp-engine/tests/core_headless/live_queries.rs:185` asserts
-  `start.elapsed() < 30s`; on a loaded machine that is a genuine flake. The
-  standing rule is to control clocks rather than race them.
 - **`process::exit` call sites are unaudited** for reachability from a test
   process. Present in `nmp-store/src/redb_store/{store,tests,postings_store,
   publish_queue_ops}.rs` and `nmp-cli/src/main.rs`. Flagged, not cleared.

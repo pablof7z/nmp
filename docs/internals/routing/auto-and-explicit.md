@@ -2,14 +2,14 @@
 title: "Write routing: Auto and Explicit"
 category: routing
 slug: auto-and-explicit
-status: designed
+status: built
 date: 2026-07-29
 owns:
   - the app-facing routing contract (`WriteRouting { Auto, Explicit }`)
   - why routing is a durable strategy, not a resolved relay set
   - the reversal that made single-relay publishing first-class
   - routing's independence from authorship
-  - what `Explicit` inherits from guarantee #6, and what dies with the old variants
+  - what `Explicit` inherits from guarantee #6
 related:
   - docs/internals/routing/resolution-lifecycle.md
   - docs/internals/routing/knowledge-and-settlement.md
@@ -19,16 +19,15 @@ related:
   - docs/internals/writes/event-builder.md
   - docs/internals/nip29/group-publication.md
 issues:
-  - "publishing before the first relay-list fetch terminally fails today (see resolution-lifecycle.md §8) — the design parks instead"
-  - "the current three `WriteRouting` variants are all deleted by this design; no aliases survive"
+  - "the current three `WriteRouting` variants (`AuthorOutbox`, `PrivateNarrow`, `RelayListBootstrap`) were deleted with no aliases; see migration commit 0b6996bb (#1105/#1163)"
 ---
 
 # Write routing: Auto and Explicit
 
 This is the app-facing contract for how a write chooses its relays. It was
 settled in the design session of 2026-07-28/29 with the repository owner
-(Pablo), and it replaces the entire current routing vocabulary with exactly two
-values:
+(Pablo), and it replaces the entire earlier routing vocabulary with exactly
+two values, shipped in commit `0b6996bb` (#1105/#1163):
 
 ```rust
 pub enum WriteRouting {
@@ -44,45 +43,35 @@ in the sibling documents; this one records why the surface is exactly this
 shape and no other, because the shape was arrived at through a genuine
 reversal and the argument must not be re-litigated.
 
-**Status is marked per section.** Sections marked BUILT describe master
-behaviour at `b99f9d41`, verified against this worktree. Sections marked
-DESIGNED describe the settled-but-unbuilt design.
-
 ---
 
-## 1. What exists today — BUILT
+## 1. What exists today
 
-`WriteRouting` on master (`crates/nmp-grammar/src/write.rs:207-228`) has three
-variants:
+`WriteRouting` (`crates/nmp-grammar/src/write.rs:384-408`, referenced from 74
+files) has exactly two variants:
 
-- `AuthorOutbox` — resolves to the author's NIP-65 write relays and nothing
-  else (`crates/nmp/src/core/write.rs:2591-2603`), erroring when none are
-  known.
-- `PrivateNarrow(PrivateRoute)` — guarantee #6's fail-closed narrow route. Its
-  `NarrowOnly` set is populated once at construction and structurally exposes
-  no widen/insert operation afterward (`crates/nmp-grammar/src/write.rs:230`
-  onward); an empty set fails closed at resolution
-  (`crates/nmp/src/core/write.rs:2605-2613`) and never falls back to a public
-  relay.
-- `RelayListBootstrap(RelayListBootstrapAuthority)` — a finite validated set
-  minted only by the NIP-65 module, executed verbatim and directory-blind
-  (`crates/nmp/src/core/write.rs:2615-2622`).
+- `Auto` — "figure out how to route whatever I'm publishing." NMP derives the
+  route from the event at send time; the caller names no relay and no
+  strategy.
+- `Explicit(Vec<RelayUrl>)` — "use these exact relays and that is that, no
+  matter what else happens."
 
-The routing value is serialized to a string and parsed back
-(`routing_snapshot`/`parse_routing_snapshot`,
-`crates/nmp/src/core/write.rs:2424-2485`) so durable writes replay after a
-crash. At the FFI boundary, `FfiWriteRouting` has exactly ONE variant,
-`AuthorOutbox` (`crates/nmp-ffi/src/types.rs:560-562`) — no Swift/Kotlin app
-can construct either of the other two.
+At the FFI boundary, `FfiWriteRouting` mirrors it exactly
+(`crates/nmp-ffi/src/types.rs:656-661`): `Auto` and `Explicit { relays: Vec<String> }`.
+`Explicit` is app-constructible on every platform — Swift and Kotlin apps can
+build it directly.
 
-Every one of these three variants dies under this design. There is no
-migration, no alias, and no deprecation window. Pablo's words:
+Three earlier variants — `AuthorOutbox`, `PrivateNarrow(PrivateRoute)`, and
+`RelayListBootstrap(RelayListBootstrapAuthority)` — are gone. No trace of any
+of the three remains in `crates/`. There was no migration, no alias, and no
+deprecation window —, and
+Pablo's ruling that put this in motion:
 
 > no backwards compatibility!!!! I told you this so many times!!!
 
 ---
 
-## 2. Routing is a STRATEGY, re-executed at every send opportunity — DESIGNED
+## 2. Routing is a STRATEGY, re-executed at every send opportunity
 
 The single most important property: **the intent stores *how to decide*, not
 *where to send*.** A routing value is durable; a relay set is a moment's
@@ -100,24 +89,22 @@ while offline outlives the relay list it would have been resolved against.
 Resolving late, every time, against engine-owned directory state, is the only
 behaviour that is correct in both cases.
 
-This is not a wholly new architecture. On master, `resolve_routes` is already
-called from the SEND path, not at compose time — at boot recovery
-(`crates/nmp/src/core/write.rs:875`) and at `on_signed` (`:2226`), reading
-`self.directory` at that moment. Per-attempt re-resolution already IS the
-architecture; the design extends it to more moments (see
-`resolution-lifecycle.md` §5) rather than inventing it.
+This is not a wholly new architecture bolted on afterward — it is what
+shipped. `resolve_routes` (`crates/nmp-engine/src/core/write.rs:4494`) is
+called from the SEND path, not at compose time: at boot recovery
+(`crates/nmp-engine/src/core/write.rs:1903`) and at `on_signed`
+(`crates/nmp-engine/src/core/write.rs:4163`), reading engine-owned directory
+state at that moment. Per-attempt re-resolution is the architecture (see
+`resolution-lifecycle.md` §5).
 
-A consequence worth stating because it eliminated a whole design branch: the
-strategy stored in the journal is a **label**, and resolvers are looked up at
-send time. Nothing about resolution logic is ever serialized. The earlier
-constraint "routing must be a closed, serializable value — never a closure,
-trait object, or resolver callback" dissolves: the closed serializable value is
-`Auto` or `Explicit(relays)`, and everything dynamic lives behind the resolver
-registry (`resolvers.md`), never in the journal.
+A consequence worth stating: the strategy stored in the journal is a
+**label**. Nothing about resolution logic is ever serialized. The closed
+serializable value is `Auto` or `Explicit(relays)`; how `Auto` is answered
+lives in the engine, never in the journal.
 
 ---
 
-## 3. The app says one of exactly two things — DESIGNED
+## 3. The app says one of exactly two things
 
 An earlier iteration of the design had the app (or protocol crate) naming a
 strategy: `"nip17"`, `"outbox"`, `"nip29"`, `"draft"`. Pablo cut that down in
@@ -127,9 +114,9 @@ the same breath he proposed it:
 
 That sentence is the whole surface. `Auto` is "figure it out how to route
 whatever I'm publishing"; `Explicit(relays)` is "use these exact relays". The
-strategy names are NMP's internal business — which resolver claims a kind is
-decided by the resolver registry at send time (`resolvers.md`), never spelled
-by the app. What that feels like from the app side, in Pablo's words:
+strategy names are NMP's internal business, never spelled by the app. Today
+`Auto` has exactly one answer, the author's outbox; no per-kind resolver
+plane exists to claim a kind (`resolvers.md`). What that feels like from the app side, in Pablo's words:
 
 > the app should be able to say "publish this event" and it would default to using outbox. "publish this dm" and it would use nip17 routing, without the app having to say which are the nip17 relays that should be used -> the nip17 crate provides the relays that need to be used for communication between two pubkeys. "publish this wiki" and nmp-wiki would provide an overridable relay that respects the underlying user's wishes. "publish this kind:1 to this nip29 group" and the nmp-nip29 crate would route to which group (h tag and relays) it belongs to. Or the app might say "publish this event to this exact relay I'm giving you". It just might be, for example, that the user sees a cool event from someone they follow and they right click in their app and decide to publish that exact signed event, as-is (i.e. signed by the user they follow) to their own personal archive relay.
 
@@ -143,7 +130,7 @@ speak the same two words.
 
 ---
 
-## 4. The reversal: single-relay publishing is a first-class general capability — DESIGNED
+## 4. The reversal: single-relay publishing is a first-class general capability
 
 This design was reached through a reversal, and the reversal is the part most
 worth recording, because a future reader will find the *old* reasoning
@@ -175,16 +162,14 @@ time:
    unchanged, to your own personal archive relay (the right-click case quoted
    in §3).
 
-Consequences, so the dead reasoning stays dead: `GroupHostAuthority` is dead;
-the "never let a route become app-visible" line of argument is dead; the
-`check-nip29-ownership.sh` clauses guarding against a host-authority type were
-guarding against a capability that should exist, and are revised deliberately
-rather than evaded (see `nip29/group-publication.md`). `Explicit` is
-app-constructible, on every platform, by design.
+Consequences: `GroupHostAuthority` has zero references anywhere in `crates/`
+— dead, confirmed; the "never let a route become app-visible" line of
+argument is dead; `Explicit` is app-constructible, on every platform, as
+built.
 
 ---
 
-## 5. Routing is independent of authorship — DESIGNED
+## 5. Routing is independent of authorship
 
 State it plainly, because the old premise quietly assumed the opposite:
 **where an event goes has nothing to do with who signed it.**
@@ -201,97 +186,65 @@ examples, not an edge.
 
 The two axes meet only in one place: an `Auto` resolver MAY read the author as
 an input (outbox resolves the author's write relays; see `outbox.md`). That is
-a resolver consuming a fact, not a coupling of the contract — `Explicit` never
-reads the author at all, and `Auto` for a group-host or pinned-target shape
-would not either.
+a resolver consuming a fact, not a coupling of the contract. This is exactly
+what `resolve_routes`'s `Explicit` arm shows structurally
+(`crates/nmp-engine/src/core/write.rs:4499-4507`): it reads only `relays` and
+never touches `event.pubkey` — `Explicit` never reads the author at all.
 
 ---
 
-## 6. What `Explicit` carries forward from guarantee #6 — DESIGNED
+## 6. What `Explicit` carries forward from guarantee #6
 
-`PrivateNarrow` dies, but the structural discipline it embodied does not.
-Guarantee #6's fail-closed property transfers to `Explicit` intact, and
-*structurally* — as properties of the type and the acceptance path, not as
-conventions:
+The structural discipline of the earlier `PrivateNarrow` variant (guarantee
+#6's fail-closed property) transfers to `Explicit` intact, and *structurally*
+— as properties of the type and the acceptance path, not as conventions:
 
-- **Verbatim execution.** `Explicit(relays)` resolves to exactly those relays,
-  every time, no matter what the directory knows or later learns. No
-  augmentation, no substitution. This is today's `PrivateNarrow` execution
-  rule (`crates/nmp/src/core/write.rs:2570-2613` — "never consults the
-  directory at all") generalized to the non-private case.
+- **Verbatim execution.** `Explicit(relays)` resolves to exactly those
+  relays, every time, no matter what the directory knows or later learns. No
+  augmentation, no substitution. `resolve_routes`'s `Explicit` arm
+  (`crates/nmp-engine/src/core/write.rs:4499-4507`) reads only `relays` and
+  never consults engine-owned directory state.
 - **No widen path.** There is no operation anywhere that adds a relay to an
-  accepted `Explicit` route — the same absence of insert/extend/union that
-  `NarrowOnly` enforces by construction today
-  (`crates/nmp-grammar/src/write.rs:230` onward).
-- **Empty refused pre-acceptance — owner ruling, and it deletes something
-  deliberate.** An `Explicit` with zero relays is refused *before* acceptance:
-  no intent, no journal row, no receipt lifecycle. Pablo's ruling was direct —
-  "reject it immediately".
+  accepted `Explicit` route — `WriteRouting::Explicit` holds a plain
+  `Vec<RelayUrl>` fixed at construction, with no insert/extend/union exposed
+  afterward (`crates/nmp-grammar/src/write.rs:384-408`).
+- **Empty refused pre-acceptance.** An `Explicit` with zero relays is refused
+  *before* acceptance: no intent, no journal row, no receipt lifecycle. This
+  is built as `PublishError::EmptyExplicitRoute`, checked first in
+  `prepare_publish` ahead of every other door check
+  (`crates/nmp-engine/src/core/write.rs:2965-2980`). Pablo's ruling was
+  direct — "reject it immediately" — and the code comment at the check site
+  quotes it verbatim.
 
-  This is stricter than master, and the difference is not an oversight being
-  corrected. Today an empty `PrivateNarrow` is accepted and then fails closed
-  at resolution with `WriteStatus::Failed`
-  (`crates/nmp/src/core/write.rs:2605-2613`), and guarantee #6 built that on
-  purpose — `NarrowOnly`'s own doc says an empty set "is exactly how an
-  unroutable private recipient is expressed structurally"
-  (`crates/nmp-grammar/src/write.rs:230-238`). Emptiness was a *sentence*, not
-  a mistake: it said "I resolved this and there is nowhere safe to send it",
-  and it said so through the receipt like any other outcome.
-
-  That expression is removed here, so the meaning needs somewhere else to live,
-  and it has two homes:
-
-  - **On the resolver path**, `RouteResolution::Refused(reason)` says it, with
-    a reason string the empty set never carried
-    (`docs/internals/routing/resolvers.md`).
-  - **On the app path**, `preview_route`'s `blocked` field says it *before* the
-    app tries to publish (`docs/internals/routing/preview-and-observability.md`).
-
-  So an app that resolves a recipient to nothing does not publish an empty
-  route and wait for a receipt to fail — it learns from the preview and does
-  not publish at all. The reason the stricter rule is safe is that the
-  replacement channels are strictly more informative: an empty `Vec` cannot
-  explain itself, and both of its successors can.
+  This is stricter than the design `Explicit` replaced. The old
+  `PrivateNarrow` accepted an empty set and only failed closed later, at
+  resolution, with `WriteStatus::Failed` — emptiness was a *sentence*, not a
+  mistake, saying "I resolved this and there is nowhere safe to send it"
+  through the receipt like any other outcome. That expression is gone:
+  `Explicit([])` never becomes a durable write at all, so there is no receipt
+  for it to arrive on. The reason the stricter rule is safe is that the door
+  refusal is at least as informative as the receipt it replaces — the caller
+  learns synchronously, before anything durable exists, rather than via a
+  parked failure later.
 
 What `Explicit` deliberately does NOT carry: the *privacy* framing.
-`PrivateNarrow`'s wording binds a fail-closed mechanism to a privacy
+`PrivateNarrow`'s wording bound a fail-closed mechanism to a privacy
 invariant, which is exactly why reusing it for group hosts was rejected in the
 NIP-29 exploration — a group host is a public target, and journal snapshots
 describing a group write as "private" would be lying. Fail-closed is a routing
-property; privacy is one reason among several to want it. The full accounting
-of what each removed variant's callers migrate to.
+property; privacy is one reason among several to want it.
 
----
+**On resolution failure more generally:** `resolve_routes` returns
+`RouteAnswer` directly — there is no error arm. A route that cannot yet be
+resolved (for example, publishing before the first relay-list fetch
+completes) does not terminally fail; it parks, carrying `author_route_needs`
+and `complete == false`, and re-resolves on the next send opportunity (§2).
+Pablo's ruling on why acceptance cannot validate reachability up front, and
+what an app needs instead, applies here:
 
-## 7. The failure this contract accepts, and where it surfaces — DESIGNED
+> Yeah, a DM that's been published while we were offline and we didn't know a dm relay list for that user doesn't exist it's a failure; there's no way to know that at acceptance time in the same way that we can't know if the user says "when you go online publish this to wss://non-existent.com" -- all we can do is provide via the nip17 crate a "what will this compute to" so that apps can easily show which relays would be used for a certain communication, for example, such that they can disable the send button when a relay cannot be determined for one of the parties. This way of popping up a "we were trying to publish to relay X and it didn't work" or "we were trying to route this event but it didn't work" needs to exist because there are many ways we'll find ourselves there
 
-Two-word contracts have a cost, and it was priced in explicitly rather than
-discovered later. `Explicit` executes verbatim — including verbatim nonsense.
-Pablo, ruling on exactly this:
-
-> 4. Yeah, a DM that's been published while we were offline and we didn't know a dm relay list for that user doesn't exist it's a failure; there's no way to know that at acceptance time in the same way that we can't know if the user says "when you go online publish this to wss://non-existent.com" -- all we  can do is provide via the nip17 crate a "what will this compute to" so that apps can easily show which relays would be used for a certain communication, for example, such that they can disable the send button when a relay cannot be determined for one of the parties. This way of popping up a "we were trying to publish to relay X and it didn't work" or "we were trying to route this event but it didn't work" needs ato exist because there are many ways we'll find ourselves there
-
-So: acceptance does not validate reachability or existence, because it cannot.
-What the design provides instead is (a) a first-class preview
-(`preview_route`) so an app can show — or disable send on — what a route
-*would* compute to, and (b) durable, visible failure observability for the
-writes that route or deliver into a wall. Both live in
-`preview-and-observability.md`; they are the contract's other half, not
-optional extras.
-
----
-
-## 8. Rules of thumb
-
-1. **The app says "figure it out" or "these exact relays." Nothing else,
-   ever.** A third routing word appearing in an API review is a design
-   regression against a settled ruling.
-2. **A routing value is a strategy. Resolving it yields a moment's answer.**
-   Never store the answer where the strategy belongs.
-3. **Routing and authorship are separate axes.** The archive-republish case is
-   the standing counterexample to any coupling.
-4. **Single-relay publishing is general.** NIP-29 is one consumer of it, not
-   its justification — and not its gatekeeper.
-5. **Fail-closed transfers; privacy framing does not.** `Explicit` executes
-   verbatim, cannot widen, and refuses empty pre-acceptance. Calling that
-   "private" was `PrivateNarrow`'s category error; do not reintroduce it.
+No route-preview API (`preview_route` or equivalent) exists in `crates/`
+today — the "what will this compute to" capability Pablo describes above is
+unbuilt. There is no `RouteResolution::Refused` type either; the only refusal
+surface that exists is the pre-acceptance `EmptyExplicitRoute` check above.
