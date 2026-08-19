@@ -207,19 +207,6 @@ impl RedbStore {
         event_ops::known_signature(self, id)
     }
 
-    /// Return only the canonical ids from [`Self::query_newest`].
-    ///
-    /// Consumers that need selection identity but not event payloads use this
-    /// door so Redb can project ids from ordered indexes without allocating
-    /// owned content.
-    pub fn query_newest_ids(
-        &self,
-        filter: &Filter,
-        limit: usize,
-    ) -> Result<Vec<EventId>, PersistenceError> {
-        event_ops::query_newest_ids(self, filter, limit)
-    }
-
     /// Return the first `limit` canonical newest rows visible under a pin on
     /// `pinned` — [`Provenance::visible_under_pin`] is the one rule that
     /// decides which those are.
@@ -594,13 +581,6 @@ impl RedbStore {
             intent_id,
             write_ops::CompensationReason::ExplicitCancellation,
         )
-    }
-
-    /// Read every retained receipt back out, newest id last (#1039).
-    pub fn enumerate_publish_queue_receipts(
-        &self,
-    ) -> Result<Vec<crate::PublishQueueReceipt>, PersistenceError> {
-        publish_queue_ops::enumerate_publish_queue_receipts(self)
     }
 
     /// Read at most `limit` retained receipts whose ids are strictly greater

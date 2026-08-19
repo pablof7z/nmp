@@ -211,7 +211,7 @@ fn a_precommit_io_failure_leaves_no_durable_receipt_for_a_fresh_open() {
     // never heard of this write -- and `publish()` never returned `Ok`.
     let mut store = RedbStore::open(&path).expect("fresh generation over the same file");
     assert!(
-        store.enumerate_publish_queue_receipts().unwrap().is_empty(),
+        store.publish_queue_receipts_after(None, u8::MAX).unwrap().is_empty(),
         "the dropped transaction cannot leave a durable receipt behind"
     );
     assert!(store.recover_publish_queue().unwrap().is_empty());
@@ -219,7 +219,7 @@ fn a_precommit_io_failure_leaves_no_durable_receipt_for_a_fresh_open() {
     let accepted =
         attempt_write(&mut store, 901).expect("the fresh store accepts the exact retry once");
     assert_eq!(
-        store.enumerate_publish_queue_receipts().unwrap().len(),
+        store.publish_queue_receipts_after(None, u8::MAX).unwrap().len(),
         1,
         "the retry is the only durable receipt"
     );
@@ -244,7 +244,7 @@ fn a_commit_then_io_failure_still_yields_one_receipt_to_a_fresh_open() {
     // back exactly one of each -- never zero, never two.
     let store = RedbStore::open(&path).expect("fresh generation over the same file");
     let receipt = store
-        .enumerate_publish_queue_receipts()
+        .publish_queue_receipts_after(None, u8::MAX)
         .unwrap()
         .into_iter()
         .next()
@@ -259,7 +259,7 @@ fn a_commit_then_io_failure_still_yields_one_receipt_to_a_fresh_open() {
         "the committed pending row survives the real Redb generation change"
     );
     assert_eq!(
-        store.enumerate_publish_queue_receipts().unwrap().len(),
+        store.publish_queue_receipts_after(None, u8::MAX).unwrap().len(),
         1,
         "the ambiguous result owns exactly one durable receipt"
     );

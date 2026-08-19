@@ -2085,120 +2085,6 @@ fn query_newest_kind_and_global_scans_stop_at_limit() {
     assert_eq!(global_rows[0].event.created_at, Timestamp::from(1_239u64));
 }
 
-#[test]
-fn query_newest_ids_projects_covered_filters_without_event_values() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut store = RedbStore::open(dir.path().join("projected-ids.redb")).unwrap();
-    let keys = nostr::Keys::generate();
-    let relay = RelayUrl::parse("wss://projected.example").unwrap();
-
-    for i in 0..40u64 {
-        store
-            .insert(
-                room_event(&keys, "target", 1_000 + i, &"x".repeat(64 * 1024)),
-                RelayObserved::new(relay.clone(), Timestamp::from(2_000 + i)),
-            )
-            .unwrap();
-    }
-
-    let filter = Filter::new().kind(Kind::from(9u16));
-    let expected: Vec<_> = store
-        .query_newest(&filter, 25)
-        .unwrap()
-        .into_iter()
-        .map(|row| row.event.id)
-        .collect();
-    store.reset_query_work();
-    let projected = store.query_newest_ids(&filter, 25).unwrap();
-
-    assert_eq!(projected, expected);
-    let (index_rows, event_values, materialized) = store.query_work();
-    assert_eq!(
-        (event_values, materialized),
-        (0, 0),
-        "an index-covered ID projection must not read or own 64 KiB event values"
-    );
-    assert!(
-        index_rows <= 32,
-        "packed merge may decode only the bounded active-run heads plus the requested rows"
-    );
-}
-
-#[test]
-fn query_newest_ids_postfilters_borrowed_values_without_materializing_events() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut store = RedbStore::open(dir.path().join("projected-postfilter.redb")).unwrap();
-    let wanted = nostr::Keys::generate();
-    let noise = nostr::Keys::generate();
-    let relay = RelayUrl::parse("wss://projected.example").unwrap();
-
-    let wanted = room_event(&wanted, "target", 1_000, "wanted");
-    store
-        .insert(
-            wanted.clone(),
-            RelayObserved::new(relay.clone(), Timestamp::from(2_000u64)),
-        )
-        .unwrap();
-    for i in 0..20u64 {
-        store
-            .insert(
-                room_event(&noise, "target", 2_000 + i, &format!("noise-{i}")),
-                RelayObserved::new(relay.clone(), Timestamp::from(3_000 + i)),
-            )
-            .unwrap();
-    }
-
-    store.reset_query_work();
-    let ids = store
-        .query_newest_ids(&Filter::new().kind(Kind::from(9u16)).search("wanted"), 1)
-        .unwrap();
-
-    assert_eq!(ids, vec![wanted.id]);
-    let (index_rows, event_values, materialized) = store.query_work();
-    assert_eq!(index_rows, 21);
-    assert_eq!(event_values, 21);
-    assert_eq!(materialized, 0);
-}
-
-#[test]
-fn query_newest_ids_preserves_provisional_suppression() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut store = RedbStore::open(dir.path().join("projected-suppression.redb")).unwrap();
-    let keys = nostr::Keys::generate();
-    let relay = RelayUrl::parse("wss://projected.example").unwrap();
-    let visible = room_event(&keys, "target", 1_000, "visible");
-    let hidden = room_event(&keys, "target", 2_000, "hidden");
-    for event in [visible.clone(), hidden.clone()] {
-        store
-            .insert(
-                event,
-                RelayObserved::new(relay.clone(), Timestamp::from(3_000u64)),
-            )
-            .unwrap();
-    }
-    let claim_key = publish_queue_codec::id_claim_key(&hidden.id, &hidden.pubkey);
-    let write_txn = store.raw_database().begin_write().unwrap();
-    {
-        let mut claims = write_txn.open_table(PUBLISH_QUEUE_SUPPRESS).unwrap();
-        add_claimant_in_txn(&mut claims, &claim_key, IntentId(1)).unwrap();
-    }
-    write_txn.commit().unwrap();
-
-    let filter = Filter::new().kind(Kind::from(9u16));
-    let expected: Vec<_> = store
-        .query_newest(&filter, 2)
-        .unwrap()
-        .into_iter()
-        .map(|row| row.event.id)
-        .collect();
-    store.reset_query_work();
-    let projected = store.query_newest_ids(&filter, 2).unwrap();
-
-    assert_eq!(expected, vec![visible.id]);
-    assert_eq!(projected, expected);
-    assert_eq!(store.query_work(), (2, 2, 2));
-}
-
 /// #1248: `publish_queue_suppress_by_id` and `publish_queue_suppress_by_addr`
 /// folded into one `PUBLISH_QUEUE_SUPPRESS` tree, discriminant-tagged
 /// (`PUBLISH_QUEUE_SUPPRESS_ID`/`PUBLISH_QUEUE_SUPPRESS_ADDR`) the same way
@@ -2289,34 +2175,6 @@ fn merged_suppress_table_round_trips_both_former_tables_across_a_real_reopen() {
         ],
         "the merged tree must hold exactly the id row and the addr row, each under its own tag"
     );
-}
-
-#[test]
-fn query_newest_ids_fails_closed_on_stale_ordered_index() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut store = RedbStore::open(dir.path().join("projected-corruption.redb")).unwrap();
-    let keys = nostr::Keys::generate();
-    let event = room_event(&keys, "target", 1_000, "event");
-    store
-        .insert(
-            event.clone(),
-            RelayObserved::new(
-                RelayUrl::parse("wss://projected.example").unwrap(),
-                Timestamp::from(2_000u64),
-            ),
-        )
-        .unwrap();
-    let write_txn = store.raw_database().begin_write().unwrap();
-    {
-        let mut event_ids = write_txn.open_table(EVENT_IDS).unwrap();
-        event_ids.remove(event.id.as_bytes()).unwrap();
-    }
-    write_txn.commit().unwrap();
-
-    let error = store
-        .query_newest_ids(&Filter::new().kind(Kind::from(9u16)), 1)
-        .unwrap_err();
-    assert!(error.message().contains("canonical id map"));
 }
 
 #[test]
@@ -2708,10 +2566,6 @@ fn plan_choice_cannot_change_query_results() {
             .into_iter()
             .map(|row| row.event.id)
             .collect();
-        let projected = store
-            .query_ordered_ids(&read_txn, plan, &filter, 3)
-            .unwrap();
-        assert_eq!(bounded, projected, "{:?} projected differently", plan.index);
         if plan.index == candidates[0].index {
             continue;
         }
@@ -2976,11 +2830,6 @@ fn ordered_planner_matches_fixture_derived_expectations_over_mixed_filters() {
             .map(|event| event.id)
             .collect();
         assert_eq!(redb_newest, expected_newest, "bounded round {round}");
-        assert_eq!(
-            redb.query_newest_ids(&filter, limit).unwrap(),
-            expected_newest,
-            "projected bounded round {round}"
-        );
 
         // Same filter, every ordered index that could answer it. The planner
         // picks one; this asserts the other choices would have returned the
@@ -3015,13 +2864,6 @@ fn ordered_planner_matches_fixture_derived_expectations_over_mixed_filters() {
                 assert_eq!(
                     bounded, expected_newest,
                     "round {round} bounded under {:?}",
-                    plan.index
-                );
-                assert_eq!(
-                    redb.query_ordered_ids(&read_txn, &plan, &filter, limit)
-                        .unwrap(),
-                    expected_newest,
-                    "round {round} projected under {:?}",
                     plan.index
                 );
             }

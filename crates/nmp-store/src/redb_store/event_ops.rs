@@ -283,33 +283,6 @@ pub(super) fn query_newest(
     store.query_ordered(&read_txn, &plan, filter, None, Some(limit), None)
 }
 
-pub(super) fn query_newest_ids(
-    store: &RedbStore,
-    filter: &Filter,
-    limit: usize,
-) -> Result<Vec<EventId>, PersistenceError> {
-    if limit == 0
-        || filter
-            .since
-            .zip(filter.until)
-            .is_some_and(|(since, until)| since > until)
-        || filter.generic_tags.values().any(BTreeSet::is_empty)
-    {
-        return Ok(Vec::new());
-    }
-    if filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
-        return Ok(store
-            .query_newest(filter, limit)?
-            .into_iter()
-            .map(|row| row.event.id)
-            .collect());
-    }
-
-    let read_txn = store.database()?.begin_read().map_err(persist_err)?;
-    let plan = plan_ordered_query(filter);
-    store.query_ordered_ids(&read_txn, &plan, filter, limit)
-}
-
 pub(super) fn query_newest_under_pin(
     store: &RedbStore,
     filter: &Filter,
